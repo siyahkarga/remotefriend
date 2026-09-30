@@ -1,5 +1,7 @@
 //! Host: ekranı paylaşan taraf.
-//! Gerçek capture (xcap) + JPEG + input (enigo) + dosya alma.
+//! Native TCP + tarayıcı için HTTP/WebSocket sunar.
+
+mod web;
 
 use anyhow::{Context, Result};
 use remote_friend_common::{Packet, VideoCodec, VideoFrame};
@@ -10,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-const FPS_MS: u64 = 66; // ~15fps (H264 ile hafifler)
+pub(crate) const FPS_MS: u64 = 66; // ~15fps (H264 ile hafifler)
 const MAX_W: u32 = 1920; // 1080p aynen, üstünü küçült
 
 /// Son capture'ın geometrisi: client koordinatını host mantıksal koordinata çevirmek için.
@@ -35,8 +37,21 @@ static GEO: std::sync::Mutex<Geo> = std::sync::Mutex::new(Geo {
     mon_y: 0,
 });
 
+/// Windows: ekran yakalama + doğru ölçek için DPI-awareness şart.
+/// (xcap "Process not DPI aware" verirse capture/ölçek bozulur.)
+fn enable_dpi_awareness() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::HiDpi::*;
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    enable_dpi_awareness();
     tracing_subscriber::fmt::init();
     let password = std::env::var("REMOTE_FRIEND_PASS").unwrap_or("1234".into());
     let pc_name = hostname::get()
@@ -48,6 +63,22 @@ async fn main() -> Result<()> {
     println!("Dinleniyor: {addr} | şifre: {password}");
     println!("Gelen her bağlantı ONAY ister (E/H). Otomatik kabul için: REMOTE_FRIEND_AUTO_ACCEPT=1");
     tracing::info!("host dinliyor: {addr}");
+
+    // Tarayıcı client için web sunucusu (kurulumsuz bağlantı)
+    let http_port: u16 = std::env::var("RF_HTTP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(33201); // discovery UDP/33201 ile çakışmaz (TCP)
+    let lan_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or("127.0.0.1".into());
+    println!("Tarayıcı ile bağlan: http://{lan_ip}:{http_port}  (aynı ağdan)");
+    let web_pw = password.clone();
+    tokio::spawn(async move {
+        if let Err(e) = web::serve(format!("0.0.0.0:{http_port}"), web_pw).await {
+            tracing::warn!("web sunucusu kapandı: {e:#}");
+        }
+    });
 
     // LAN discovery beacon (clientlar listede görsün)
     std::thread::spawn({
@@ -71,7 +102,7 @@ async fn main() -> Result<()> {
 static APPROVAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Host operatörüne sor. true = kabul. 30 sn cevap yoksa ret.
-fn ask_approval(peer: &str) -> bool {
+pub(crate) fn ask_approval(peer: &str) -> bool {
     if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false) {
         println!("*** {peer}: otomatik kabul (REMOTE_FRIEND_AUTO_ACCEPT=1)");
         return true;
@@ -216,7 +247,7 @@ async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Resul
 
 /// Ekran görüntüsü: RGBA + H264 için çift boyut garantili.
 /// Dönen boyutlar her zaman çifttir (YUV420 şartı).
-fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
     let monitors = xcap::Monitor::all().context("monitör listesi alınamadı")?;
     let mon = monitors.into_iter().next().context("monitör yok")?;
     let scale = mon.scale_factor().unwrap_or(1.0);
@@ -257,7 +288,7 @@ fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
 }
 
 /// Bağlantı başına bir tane: ilk frame her zaman IDR (SPS/PPS dahil).
-struct H264Enc {
+pub(crate) struct H264Enc {
     enc: Option<openh264::encoder::Encoder>,
     w: u32,
     h: u32,
@@ -265,21 +296,24 @@ struct H264Enc {
 }
 
 impl H264Enc {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { enc: None, w: 0, h: 0, frames: 0 }
     }
 
-    fn encode_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+    pub(crate) fn encode_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
         use openh264::formats::{RgbSliceU8, YUVBuffer};
 
         if self.enc.is_none() || self.w != w || self.h != h {
             use openh264::encoder::{
-                BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType,
+                BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Level, Profile,
+                UsageType,
             };
             let config = EncoderConfig::new()
                 .bitrate(BitRate::from_bps(4_000_000))
                 .max_frame_rate(FrameRate::from_hz(15.0))
                 .usage_type(UsageType::ScreenContentRealTime)
+                .profile(Profile::Baseline)
+                .level(Level::Level_4_0)
                 .intra_frame_period(IntraFramePeriod::from_num_frames(75));
             let mut enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
                 .context("h264 encoder açılamadı")?;
@@ -309,7 +343,7 @@ impl H264Enc {
     }
 }
 
-fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
+pub(crate) fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
     use enigo::{Axis, Coordinate, Enigo, Keyboard, Mouse, Settings};
     use remote_friend_common::InputEvent as E;
     // her eventte yeni Enigo (MVP basitliği, sonra kalıcı tut)
@@ -391,7 +425,7 @@ fn map_btn(b: remote_friend_common::MouseButton) -> enigo::Button {
     }
 }
 
-fn save_chunk(c: remote_friend_common::FileChunk) -> Result<()> {
+pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<()> {
     use std::io::{Seek, SeekFrom, Write};
     let dir = std::env::var("REMOTE_FRIEND_DIR").unwrap_or("/tmp".into());
     std::fs::create_dir_all(&dir)?;

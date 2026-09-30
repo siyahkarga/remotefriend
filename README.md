@@ -1,29 +1,32 @@
-# RemoteFriend — AnyDesk benzeri, Rust, P2P (v0.2.0)
+# RemoteFriend v0.4.0 — tarayıcıdan bağlan, kurulum yok
 
-Durum: **LAN'da çalışıyor.** İnternet P2P (hole-punch/relay) sonraki faz.
+## En kolay yol (önerilen)
+1. Host PC'de `remote-friend-host.exe` çalıştır. Ekranda şunu görürsün:
+   ```
+   Tarayıcı ile bağlan: http://192.168.X.X:33201  (aynı ağdan)
+   ```
+2. Aynı ağdaki HERHANGİ cihazdan (PC, telefon, tablet) tarayıcıda o adresi aç.
+   Chrome/Edge önerilir (H264 WebCodecs gerekir).
+3. Şifreyi gir (varsayılan `1234`) → Bağlan → **host terminalinde E'ye bas (onay şart!)**.
+4. Bitti: canlı görüntü + mouse + klavye + scroll + dosya gönderme.
 
-## Ne var? (v0.2.0)
-- `host`: H264 ekran yayını (openh264, 1080p, ~15fps, ~1-4 Mbps) + tam kontrol (mouse sol/sağ, scroll, tüm klavye: harf/ok/F1-F12/shift/ctrl/alt) + dosya alma
-- `client`: terminal GEREKTİRMEZ — açılışta adres+şifre ekranı; canlı görüntü + tıklama + yazı + scroll + "Dosya Gönder" butonu
-- ÖNEMLİ: v0.2.0 protokolü değiştirdi — **host ve client ikisi de v0.2.0 olmalı**
+Gereken portlar (host PC firewall): TCP `33200` (native client) + TCP `33201` (tarayıcı).
 
-## Hızlı test (aynı ağ, terminalsiz)
-1. Host PC: `remote-friend-host.exe` çalıştır (şifre: 1234)
-2. Client PC: `remote-friend-client` çalıştır → adres yaz (`192.168.178.31:33200`) → Bağlan
+## Native client (alternatif)
+`remote-friend-client` çalıştır → adres yaz → Bağlan. LAN'daki hostlar otomatik listelenir,
+son bağlantılar hatırlanır. ⛔ Kes ile çıkılır.
 
-Headless testler (GUI'siz):
-```
-cargo run -p remote-friend-client --example headless -- 127.0.0.1:33200 1234
-cargo run -p remote-friend-client --example inputtest -- 127.0.0.1:33200 1234
-```
+## Önemli
+- Her bağlantı host ONAYI ister (E/H, 30 sn, varsayılan ret). Onaysız yayın başlamaz.
+- Bir host'a aynı anda birden fazla izleyici bağlanabilir.
+- v0.4.0 protokolü değiştirdi: iki taraf da v0.4.0 olmalı.
 
-## Bu PC (Linux Wayland) notu
-xcap GNOME-Wayland'da bazen portal hatası verir (tekrar dene / Xorg ile giriş yap). **Windows host sorunsuz**, bu Linux = client izler.
+## Ortam değişkenleri (host)
+- `REMOTE_FRIEND_PASS` — şifre (varsayılan 1234)
+- `REMOTE_FRIEND_AUTO_ACCEPT=1` — onaysız kabul (sadece güvenli/test ortamı!)
+- `RF_HTTP_PORT` — web portu (varsayılan 33201)
+- `REMOTE_FRIEND_DIR` — gelen dosyalar (varsayılan /tmp ya da %TEMP%)
 
-## Windows kurulumu (derlemesiz)
-Releases'ten indir → çıkar → `HOST_BASLAT.bat` çift tık. Bkz: `WINDOWS_KURULUM.md`.
-
-## Sonraki faz (yapılmadı)
-- QUIC (quinn) + donanım encode (NVENC/QSV/AMF)
-- İnternet: sinyal sunucusu + hole-punch + TURN relay (AnyDesk-ID benzeri)
-- Ses, pano, çoklu monitör, servis olarak çalıştırma
+## Sonraki faz
+- İnternet (farklı ağ): sinyal sunucusu + AnyDesk-tarzı kod + hole-punch
+- QUIC şifreli transport, pano paylaşımı, ses

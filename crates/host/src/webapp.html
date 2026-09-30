@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemoteFriend</title>
+<style>
+  :root { --bg:#14161c; --card:#1e2230; --line:#2c3348; --txt:#e8ebf4; --dim:#9aa3b8;
+          --acc:#4f7cff; --ok:#34c77b; --err:#e5484d; }
+  * { box-sizing:border-box; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--txt); min-height:100vh; }
+  header { display:flex; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--line); }
+  header .logo { width:26px; height:26px; border-radius:7px; background:linear-gradient(135deg,var(--acc),#8b5cf6); display:flex; align-items:center; justify-content:center; font-weight:800; }
+  header h1 { font-size:17px; margin:0; }
+  #pill { margin-left:auto; font-size:13px; padding:5px 12px; border-radius:20px; background:#2a3042; color:var(--dim); }
+  #pill.on { background:#123b28; color:var(--ok); }
+  #pill.err { background:#3d1a1c; color:var(--err); }
+  main { max-width:1060px; margin:0 auto; padding:22px 16px 40px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; margin-bottom:16px; }
+  .card h2 { margin:0 0 6px; font-size:18px; }
+  .card p.dim { color:var(--dim); font-size:13.5px; margin:0 0 14px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input[type=text], input[type=password] { background:#12151d; border:1px solid var(--line); color:var(--txt);
+    border-radius:9px; padding:10px 12px; font-size:14px; outline:none; }
+  input:focus { border-color:var(--acc); }
+  button { background:var(--acc); color:#fff; border:0; border-radius:9px; padding:10px 18px;
+    font-size:14px; font-weight:600; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  button.ghost { background:#2a3042; }
+  button.danger { background:var(--err); }
+  button:disabled { opacity:.5; cursor:default; }
+  #recentList { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+  .recent { background:#12151d; border:1px solid var(--line); border-radius:10px; padding:9px 13px;
+    font-size:13px; cursor:pointer; }
+  .recent:hover { border-color:var(--acc); }
+  #view { display:none; }
+  #toolbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  #toolbar .meta { color:var(--dim); font-size:13px; margin-left:auto; }
+  #stage { position:relative; background:#000; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  #screen { display:block; width:100%; cursor:crosshair; }
+  #err { display:none; background:#3d1a1c; border:1px solid var(--err); border-radius:10px; padding:12px; margin-bottom:12px; }
+  #hint { color:var(--dim); font-size:12.5px; margin-top:10px; }
+  kbd { background:#12151d; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">R</div><h1>RemoteFriend</h1>
+  <div id="pill">● hazır</div>
+</header>
+<main>
+  <div id="err"></div>
+
+  <div class="card" id="loginCard">
+    <h2>Bağlan</h2>
+    <p class="dim">Bu sayfa host'un kendisinden geliyor — adres yazmana gerek yok. Şifreyi gir, Bağlan'a bas, host onaylasın.</p>
+    <div class="row">
+      <input type="text" id="addr" style="width:260px" title="Sunucu adresi">
+      <input type="password" id="pw" placeholder="Şifre" style="width:150px">
+      <button id="connectBtn">Bağlan</button>
+    </div>
+    <div id="hint">Aynı ağdaki başka bilgisayara bağlanmak için onun adresini yazabilirsin (<kbd>192.168.1.20:33201</kbd>).</div>
+    <h3 style="margin:16px 0 4px;font-size:14px">Son bağlanılanlar</h3>
+    <div id="recentList"></div>
+  </div>
+
+  <div id="view">
+    <div id="toolbar">
+      <button class="danger" id="discBtn">⛔ Bağlantıyı Kes</button>
+      <button class="ghost" id="fileBtn">📁 Dosya Gönder</button>
+      <input type="file" id="filePick" style="display:none">
+      <span class="meta" id="meta">—</span>
+    </div>
+    <div id="stage"><canvas id="screen"></canvas></div>
+    <div id="hint">Tıkla/sürükle = mouse • Tekerlek = scroll • Klavyen doğrudan gider • Sağ tık menüsü kapalıdır.</div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const pill = $('pill'), errBox = $('err'), meta = $('meta');
+const canvas = $('screen'), ctx = canvas.getContext('2d');
+let ws = null, connected = false;
+let decoder = null, sps = null, pps = null, cfgW = 0, cfgH = 0, hostW = 0, hostH = 0;
+let frames = 0, fpsT = 0, ts = 0;
+const CODECS = ['avc1.420028', 'avc1.4D0028', 'avc1.640028'];
+const SC = [0, 0, 0, 1];
+
+function setPill(txt, cls) { pill.textContent = '● ' + txt; pill.className = cls || ''; }
+function showErr(t) { errBox.style.display = 'block'; errBox.textContent = t; }
+function hideErr() { errBox.style.display = 'none'; }
+
+// adres: varsayılan bu sayfanın hostu
+(function init() {
+  const host = location.hostname || '127.0.0.1';
+  const port = location.port || '33201';
+  $('addr').value = host + ':' + port;
+  const saved = localStorage.getItem('rf_pw');
+  if (saved) $('pw').value = saved;
+  renderRecents();
+})();
+
+function renderRecents() {
+  const list = JSON.parse(localStorage.getItem('rf_recents') || '[]');
+  const box = $('recentList'); box.innerHTML = '';
+  if (!list.length) { box.innerHTML = '<span style="color:var(--dim);font-size:13px">Henüz yok.</span>'; return; }
+  for (const u of list.slice(0, 8)) {
+    const d = document.createElement('div');
+    d.className = 'recent'; d.textContent = u;
+    d.onclick = () => { $('addr').value = u; connect(); };
+    box.appendChild(d);
+  }
+}
+function touchRecent(u) {
+  let list = JSON.parse(localStorage.getItem('rf_recents') || '[]').filter(x => x !== u);
+  list.unshift(u); list = list.slice(0, 10);
+  localStorage.setItem('rf_recents', JSON.stringify(list));
+  renderRecents();
+}
+
+$('connectBtn').onclick = connect;
+$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+$('discBtn').onclick = disconnect;
+
+function connect() {
+  if (connected) return;
+  hideErr();
+  const addr = $('addr').value.trim();
+  const pw = $('pw').value;
+  if (!addr) { showErr('Adres boş.'); return; }
+  localStorage.setItem('rf_pw', pw);
+  setPill('bağlanıyor...', '');
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + addr + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', password: pw }));
+  ws.onclose = () => { onClose('Bağlantı kapandı.'); };
+  ws.onerror = () => { onClose('Bağlanamadı (adres/host kapalı olabilir).'); };
+  ws.onmessage = onMsg;
+}
+function disconnect() { if (ws) ws.close(); }
+function onClose(msg) {
+  connected = false;
+  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
+  sps = pps = null; cfgW = cfgH = 0;
+  $('view').style.display = 'none';
+  $('loginCard').style.display = 'block';
+  setPill('hazır', '');
+  if (msg && !$('view').dataset.ok) showErr(msg);
+}
+
+function onMsg(ev) {
+  if (typeof ev.data === 'string') {
+    const m = JSON.parse(ev.data);
+    if (m.t === 'reject') { ws.close(); onClose('Reddedildi: ' + (m.msg || '')); }
+    else if (m.t === 'wait') { setPill('host onayı bekleniyor...', ''); }
+    else if (m.t === 'welcome') {
+      connected = true;
+      $('view').dataset.ok = '1';
+      hideErr();
+      $('loginCard').style.display = 'none';
+      $('view').style.display = 'block';
+      setPill('bağlı', 'on');
+      touchRecent($('addr').value.trim());
+      fpsT = performance.now(); frames = 0;
+    }
+    return;
+  }
+  // binary video: w(4) + h(4) + Annex-B
+  const buf = new Uint8Array(ev.data);
+  if (buf.length < 12) return;
+  const dv = new DataView(ev.data, 0, 8);
+  hostW = dv.getUint32(0, true); hostH = dv.getUint32(4, true);
+  if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
+  feed(buf.subarray(8));
+  frames++;
+  const now = performance.now();
+  if (now - fpsT >= 1000) {
+    meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps';
+    frames = 0; fpsT = now;
+  }
+}
+
+function splitNals(buf) {
+  const pos = [];
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === 0 && buf[i + 1] === 0) {
+      if (buf[i + 2] === 1) { pos.push([i, 3]); i += 2; }
+      else if (buf[i + 2] === 0 && buf[i + 3] === 1) { pos.push([i, 4]); i += 3; }
+    }
+  }
+  const out = [];
+  for (let k = 0; k < pos.length; k++) {
+    const s = pos[k][0] + pos[k][1];
+    const e = (k + 1 < pos.length) ? pos[k + 1][0] : buf.length;
+    if (e > s) out.push({ type: buf[s] & 0x1F, data: buf.slice(s, e) });
+  }
+  return out;
+}
+
+function avccDesc(sps, pps) {
+  // ISO 14496-15 avcC: [ver, profile, compat, level, 0xFF, 0xE1, spsLen, sps, 1, ppsLen, pps]
+  const out = new Uint8Array(8 + sps.length + 3 + pps.length);
+  out[0] = 1; out[1] = sps[1]; out[2] = sps[2]; out[3] = sps[3];
+  out[4] = 0xFF; out[5] = 0xE1;
+  out[6] = (sps.length >> 8) & 0xFF; out[7] = sps.length & 0xFF;
+  out.set(sps, 8);
+  let o = 8 + sps.length;
+  out[o++] = 1;
+  out[o++] = (pps.length >> 8) & 0xFF; out[o++] = pps.length & 0xFF;
+  out.set(pps, o);
+  return out;
+}
+
+function nalsToAvcc(nals) {
+  // start kodsuz NAL'lari 4-byte uzunluk önekli AVCC'ye çevir (SPS/PPS hariç)
+  let total = 0;
+  const keep = [];
+  for (const n of nals) {
+    if (n.type === 7 || n.type === 8) continue;
+    keep.push(n.data); total += 4 + n.data.length;
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const d of keep) {
+    out[o++] = (d.length >>> 24) & 0xFF; out[o++] = (d.length >>> 16) & 0xFF;
+    out[o++] = (d.length >>> 8) & 0xFF; out[o++] = d.length & 0xFF;
+    out.set(d, o); o += d.length;
+  }
+  return out;
+}
+
+function ensureDecoder() {
+  if (decoder && cfgW === hostW && cfgH === hostH) return true;
+  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
+  if (!sps || !pps) return false;
+  const desc = avccDesc(sps, pps);
+  const codecs = ['avc1.' + [desc[1], desc[2], desc[3]].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase()];
+  for (const c of [...codecs, ...CODECS]) {
+    try {
+      decoder = new VideoDecoder({ output: drawFrame, error: e => { setPill('decode hatası', 'err'); decoder = null; } });
+      decoder.configure({ codec: c, codedWidth: hostW, codedHeight: hostH, description: desc });
+      cfgW = hostW; cfgH = hostH;
+      return true;
+    } catch (e) { decoder = null; }
+  }
+  showErr('Tarayıcın H264 çözemiyor (WebCodecs yok). Chrome/Edge dene.');
+  return false;
+}
+
+function feed(annexb) {
+  if (typeof VideoDecoder === 'undefined') { showErr('WebCodecs yok. Chrome/Edge ile aç.'); ws.close(); return; }
+  const nals = splitNals(annexb);
+  let hasVcl = false;
+  for (const n of nals) {
+    if (n.type === 7) { sps = n.data; continue; }
+    if (n.type === 8) { pps = n.data; continue; }
+    if (n.type === 5 || n.type === 1) hasVcl = true;
+  }
+  if (!hasVcl) return;
+  if (!ensureDecoder()) return;
+  const avcc = nalsToAvcc(nals);
+  if (!avcc.length) return;
+  const isKey = nals.some(n => n.type === 5);
+  try {
+    decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts++, data: avcc }));
+  } catch (e) {}
+}
+
+function drawFrame(f) {
+  ctx.drawImage(f, 0, 0);
+  f.close();
+}
+
+// ---- input ----
+function toHost(e) {
+  const r = canvas.getBoundingClientRect();
+  const x = Math.round((e.clientX - r.left) / r.width * hostW);
+  const y = Math.round((e.clientY - r.top) / r.height * hostH);
+  if (x < 0 || y < 0 || x >= hostW || y >= hostH) return null;
+  return { x, y };
+}
+function send(o) { if (connected && ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+let lastM = null;
+canvas.addEventListener('mousemove', e => {
+  const p = toHost(e); if (!p) return;
+  if (!lastM || lastM.x !== p.x || lastM.y !== p.y) { lastM = p; send({ t: 'mouse', x: p.x, y: p.y }); }
+});
+canvas.addEventListener('mousedown', e => {
+  const p = toHost(e); if (!p) return;
+  send({ t: 'mouse', x: p.x, y: p.y });
+  send({ t: 'down', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
+  e.preventDefault();
+});
+canvas.addEventListener('mouseup', e => {
+  send({ t: 'up', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+  const mult = e.deltaMode === 1 ? 1 : (e.deltaMode === 2 ? 20 : 1 / 50);
+  const dx = Math.trunc(e.deltaX * mult), dy = Math.trunc(e.deltaY * mult);
+  if (dx || dy) send({ t: 'scroll', dx, dy });
+  e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('keydown', e => {
+  if (!connected) return;
+  if (['INPUT'].includes(document.activeElement && document.activeElement.tagName)) return;
+  send({ t: 'key', code: e.key.length === 1 ? e.key : e.key, down: true });
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => {
+  if (!connected) return;
+  send({ t: 'key', code: e.key.length === 1 ? e.key : e.key, down: false });
+  e.preventDefault();
+});
+
+// ---- dosya ----
+$('fileBtn').onclick = () => $('filePick').click();
+$('filePick').addEventListener('change', async () => {
+  const f = $('filePick').files[0];
+  if (!f) return;
+  const id = Math.floor(Date.now() / 1000);
+  const buf = new Uint8Array(await f.arrayBuffer());
+  const CH = 200 * 1024;
+  for (let off = 0; off < buf.length; off += CH) {
+    const part = buf.slice(off, off + CH);
+    let bin = '';
+    for (let i = 0; i < part.length; i += 8192)
+      bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
+    send({ t: 'file', transfer_id: id, name: f.name, offset: off, total: buf.length,
+           data: btoa(bin), last: off + CH >= buf.length });
+  }
+  $('filePick').value = '';
+});
+</script>
+</body>
+</html>
