@@ -3,9 +3,10 @@
 
 use anyhow::{Context, Result};
 use remote_friend_common::{Handshake, InputEvent, MouseButton, Packet, FileChunk, PROTOCOL_VERSION};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 struct Shared {
     texture: Option<(egui::ColorImage, u32, u32)>, // son frame
@@ -30,8 +31,8 @@ fn main() -> Result<()> {
         fps: 0.0,
     }));
 
-    // GUI -> net: input/file paketleri
-    let (tx_out, rx_out) = mpsc::channel::<Packet>();
+    // GUI -> net: input/file paketleri (async uyumlu kanal)
+    let (tx_out, rx_out) = unbounded_channel::<Packet>();
 
     // net thread (tokio)
     let sh = shared.clone();
@@ -47,7 +48,7 @@ fn main() -> Result<()> {
         });
     });
 
-    let app = App { shared, tx_out };
+    let app = App { shared, tx_out, last_mouse: None };
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]),
         ..Default::default()
@@ -61,7 +62,7 @@ async fn net_loop(
     host: &str,
     password: &str,
     shared: Arc<Mutex<Shared>>,
-    rx_out: mpsc::Receiver<Packet>,
+    mut rx_out: UnboundedReceiver<Packet>,
 ) -> Result<()> {
     let mut socket = tokio::net::TcpStream::connect(host)
         .await
@@ -85,9 +86,9 @@ async fn net_loop(
 
     let (mut rd, mut wr) = socket.into_split();
 
-    // gönderici
+    // gönderici (async recv: thread'i kilitlemez)
     tokio::spawn(async move {
-        while let Ok(p) = rx_out.recv() {
+        while let Some(p) = rx_out.recv().await {
             let buf = match remote_friend_common::encode(&p) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -100,10 +101,12 @@ async fn net_loop(
     // alıcı: video
     let mut last = SystemTime::now();
     let mut n = 0u32;
+    let mut total = 0u64;
     loop {
         let pkt = read_packet_split(&mut rd).await?;
         if let Packet::Video(f) = pkt {
             n += 1;
+            total += 1;
             let img = decode_jpeg(&f.data)?;
             let mut s = shared.lock().unwrap();
             s.host_w = f.width;
@@ -114,6 +117,9 @@ async fn net_loop(
                 s.fps = n as f32 / el;
                 n = 0;
                 last = SystemTime::now();
+            }
+            if total % 50 == 0 {
+                tracing::info!("video akiyor: toplam {total} frame");
             }
         }
     }
@@ -129,7 +135,8 @@ fn decode_jpeg(data: &[u8]) -> Result<egui::ColorImage> {
 
 struct App {
     shared: Arc<Mutex<Shared>>,
-    tx_out: mpsc::Sender<Packet>,
+    tx_out: UnboundedSender<Packet>,
+    last_mouse: Option<(u32, u32)>,
 }
 
 impl eframe::App for App {
@@ -175,8 +182,11 @@ impl eframe::App for App {
 
                 if let Some(pos) = resp.hover_pos() {
                     if let Some((x, y)) = to_host(pos) {
-                        // hareketi sürekli gönder (Wayland/X11 fark etmez, host uygular)
-                        let _ = self.tx_out.send(Packet::Input(InputEvent::MouseMove { x, y }));
+                        // ayni koordinati spamleme: sadece degisince gonder
+                        if self.last_mouse != Some((x, y)) {
+                            self.last_mouse = Some((x, y));
+                            let _ = self.tx_out.send(Packet::Input(InputEvent::MouseMove { x, y }));
+                        }
                     }
                 }
                 if resp.clicked() {
