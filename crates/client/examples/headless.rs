@@ -19,9 +19,28 @@ async fn main() {
         match read(&mut s).await {
             Ok(Packet::Video(f)) => {
                 println!("frame {i}: seq={} {}x{} codec={:?} {} byte", f.seq, f.width, f.height, f.codec, f.data.len());
-                if i == 0 && matches!(f.codec, remote_friend_common::VideoCodec::Jpeg) {
-                    std::fs::write("/tmp/rf_win_frame.jpg", &f.data).unwrap();
-                    println!("ilk frame kaydedildi: /tmp/rf_win_frame.jpg");
+                if i == 0 {
+                    match f.codec {
+                        remote_friend_common::VideoCodec::Jpeg => {
+                            std::fs::write("/tmp/rf_win_frame.jpg", &f.data).unwrap();
+                            println!("ilk frame kaydedildi: /tmp/rf_win_frame.jpg");
+                        }
+                        remote_friend_common::VideoCodec::H264 => {
+                            use openh264::formats::YUVSource;
+                            let mut dec = openh264::decoder::Decoder::new().unwrap();
+                            for nal in openh264::nal_units(&f.data) {
+                                if let Ok(Some(yuv)) = dec.decode(nal) {
+                                    let (w, h) = yuv.dimensions();
+                                    let mut rgb = vec![0u8; w * h * 3];
+                                    yuv.write_rgb8(&mut rgb);
+                                    image::save_buffer("/tmp/rf_h264_test.png", &rgb, w as u32, h as u32, image::ColorType::Rgb8).unwrap();
+                                    println!("H264 decode OK {w}x{h}, kaydedildi /tmp/rf_h264_test.png");
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Ok(other) => println!("frame {i}: diğer paket {other:?}"),

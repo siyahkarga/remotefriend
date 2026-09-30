@@ -40,8 +40,50 @@ pub enum InputEvent {
     MouseMove { x: u32, y: u32 },
     MouseDown { button: MouseButton },
     MouseUp { button: MouseButton },
-    KeyDown { code: u32 },
-    KeyUp { code: u32 },
+    /// Kaydırma: satır sayısı, pozitif = aşağı/sağa
+    Scroll { dx: i32, dy: i32 },
+    /// Tam klavye: basma/bırakma ayrı (modifier/F-tuş/oklar dahil)
+    Key { key: RemoteKey, down: bool },
+}
+
+/// Host'tan bağımsız tuş tanımı (client egui'den, host enigo'ya çevirir)
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKey {
+    Char(char),
+    Enter,
+    Tab,
+    Backspace,
+    Escape,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Up,
+    Down,
+    Left,
+    Right,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Shift,
+    Ctrl,
+    Alt,
+    Meta,
+    CapsLock,
+    NumLock,
+    PrintScreen,
+    Pause,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

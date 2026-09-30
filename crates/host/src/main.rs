@@ -10,8 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-const JPEG_QUALITY: u8 = 80;
-const FPS_MS: u64 = 80; // ~12fps
+const FPS_MS: u64 = 66; // ~15fps (H264 ile hafifler)
 const MAX_W: u32 = 1920; // 1080p aynen, üstünü küçült
 
 /// Son capture'ın geometrisi: client koordinatını host mantıksal koordinata çevirmek için.
@@ -75,35 +74,51 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
 
     let wr = Arc::new(Mutex::new(wr));
 
-    // video gönderici task
+    // video gönderici task (bağlantı başına taze H264 encoder: ilk frame IDR olur)
     let wr2 = wr.clone();
     let video_task = tokio::spawn(async move {
         let mut seq = 0u64;
+        let mut h264 = H264Enc::new();
+        let mut err_n = 0u32;
         loop {
             seq += 1;
-            match capture_jpeg() {
-                Ok((w, h, jpeg)) => {
-                    let ts = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64;
-                    let frame = VideoFrame {
-                        seq,
-                        width: w,
-                        height: h,
-                        codec: VideoCodec::Jpeg,
-                        data: jpeg,
-                        timestamp_ms: ts,
-                    };
-                    let mut g = wr2.lock().await;
-                    if let Err(e) = write_packet(&mut *g, &Packet::Video(frame)).await {
-                        tracing::warn!("video yazma hatası: {e:#}");
-                        break;
+            match capture_rgba() {
+                Ok((w, h, rgba)) => {
+                    match h264.encode_frame(&rgba, w, h) {
+                        Ok(nal) => {
+                            err_n = 0;
+                            let ts = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                            let frame = VideoFrame {
+                                seq,
+                                width: w,
+                                height: h,
+                                codec: VideoCodec::H264,
+                                data: nal,
+                                timestamp_ms: ts,
+                            };
+                            let mut g = wr2.lock().await;
+                            if let Err(e) = write_packet(&mut *g, &Packet::Video(frame)).await {
+                                tracing::warn!("video yazma hatası: {e:#}");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            err_n += 1;
+                            tracing::warn!("h264 encode hatası ({err_n}): {e:#}");
+                            if err_n > 30 {
+                                tracing::warn!("çok hata, encoder sıfırlanıyor");
+                                h264 = H264Enc::new();
+                                err_n = 0;
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    // Wayland-GNOME'da xcap çalışmazsa client askıda kalmasın diye placeholder gönder
-                    tracing::warn!("capture hatası (seq {seq}): {e:#} -- Linux Wayland ise Xorg ile giriş yap ya da Windows'ta host çalıştır");
+                    // capture çalışmazsa client askıda kalmasın diye placeholder gönder
+                    tracing::warn!("capture hatası (seq {seq}): {e:#}");
                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
                     let frame = VideoFrame {
                         seq,
@@ -149,8 +164,10 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
     }
 }
 
-fn capture_jpeg() -> Result<(u32, u32, Vec<u8>)> {
-    let monitors = xcap::Monitor::all().context("monitör listesi alınamadı (Wayland ise portal izni gerek)")?;
+/// Ekran görüntüsü: RGBA + H264 için çift boyut garantili.
+/// Dönen boyutlar her zaman çifttir (YUV420 şartı).
+fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
+    let monitors = xcap::Monitor::all().context("monitör listesi alınamadı")?;
     let mon = monitors.into_iter().next().context("monitör yok")?;
     let scale = mon.scale_factor().unwrap_or(1.0);
     let scale = if scale > 0.0 { scale } else { 1.0 };
@@ -158,10 +175,19 @@ fn capture_jpeg() -> Result<(u32, u32, Vec<u8>)> {
     let img = mon.capture_image().context("ekran yakalanamadı")?;
     let (w, h) = (img.width(), img.height());
 
-    // hız için çok büyük ekranı küçült
     let img = if w > MAX_W {
-        let nh = (h as f32 * (MAX_W as f32 / w as f32)) as u32;
-        image::imageops::resize(&img, MAX_W, nh, image::imageops::FilterType::Triangle)
+        let mut nh = (h as f32 * (MAX_W as f32 / w as f32)) as u32;
+        nh &= !1; // çift yap
+        image::imageops::resize(&img, MAX_W, nh.max(2), image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let (mut w2, mut h2) = (img.width(), img.height());
+    w2 &= !1;
+    h2 &= !1;
+    // tek piksellik kırpma gerekiyorsa (boyut tekti) güvenli kırp
+    let img = if w2 != img.width() || h2 != img.height() {
+        image::imageops::crop_imm(&img, 0, 0, w2.max(2), h2.max(2)).to_image()
     } else {
         img
     };
@@ -177,14 +203,65 @@ fn capture_jpeg() -> Result<(u32, u32, Vec<u8>)> {
         mon_y: my,
     };
 
-    let mut buf = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
-    enc.encode_image(&img).context("jpeg encode")?;
-    Ok((w2, h2, buf))
+    Ok((w2, h2, img.into_raw()))
+}
+
+/// Bağlantı başına bir tane: ilk frame her zaman IDR (SPS/PPS dahil).
+struct H264Enc {
+    enc: Option<openh264::encoder::Encoder>,
+    w: u32,
+    h: u32,
+    frames: u64,
+}
+
+impl H264Enc {
+    fn new() -> Self {
+        Self { enc: None, w: 0, h: 0, frames: 0 }
+    }
+
+    fn encode_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+        use openh264::encoder::{Encoder, EncoderConfig};
+        use openh264::formats::{RgbSliceU8, YUVBuffer};
+
+        if self.enc.is_none() || self.w != w || self.h != h {
+            use openh264::encoder::{
+                BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType,
+            };
+            let config = EncoderConfig::new()
+                .bitrate(BitRate::from_bps(4_000_000))
+                .max_frame_rate(FrameRate::from_hz(15.0))
+                .usage_type(UsageType::ScreenContentRealTime)
+                .intra_frame_period(IntraFramePeriod::from_num_frames(75));
+            let mut enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
+                .context("h264 encoder açılamadı")?;
+            enc.force_intra_frame();
+            self.enc = Some(enc);
+            self.w = w;
+            self.h = h;
+            self.frames = 0;
+        }
+        let enc = self.enc.as_mut().unwrap();
+
+        // RGBA -> RGB (alpha at)
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for px in rgba.chunks_exact(4) {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        let rgb_src = RgbSliceU8::new(&rgb, (w as usize, h as usize));
+        let yuv = YUVBuffer::from_rgb_source(rgb_src);
+        let bitstream = enc.encode(&yuv).context("h264 encode")?;
+        let out = bitstream.to_vec();
+        self.frames += 1;
+        // her 5 sn'de bir keyframe (geç katılan/bozulan stream kendini toparlar)
+        if self.frames % 75 == 0 {
+            enc.force_intra_frame();
+        }
+        Ok(out)
+    }
 }
 
 fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
-    use enigo::{Button, Coordinate, Enigo, Keyboard, Mouse, Settings};
+    use enigo::{Axis, Coordinate, Enigo, Keyboard, Mouse, Settings};
     use remote_friend_common::InputEvent as E;
     // her eventte yeni Enigo (MVP basitliği, sonra kalıcı tut)
     let mut enigo = Enigo::new(&Settings::default()).context("enigo açılamadı")?;
@@ -200,19 +277,61 @@ fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
         }
         E::MouseDown { button } => enigo.button(map_btn(button), enigo::Direction::Press)?,
         E::MouseUp { button } => enigo.button(map_btn(button), enigo::Direction::Release)?,
-        E::KeyDown { code } => {
-            // MVP: code ASCII ise text yaz
-            if let Some(c) = char::from_u32(code) {
-                enigo.key(enigo::Key::Unicode(c), enigo::Direction::Press)?;
+        E::Scroll { dx, dy } => {
+            if dy != 0 {
+                enigo.scroll(dy, Axis::Vertical)?;
+            }
+            if dx != 0 {
+                enigo.scroll(dx, Axis::Horizontal)?;
             }
         }
-        E::KeyUp { code } => {
-            if let Some(c) = char::from_u32(code) {
-                enigo.key(enigo::Key::Unicode(c), enigo::Direction::Release)?;
-            }
+        E::Key { key, down } => {
+            let dir = if down { enigo::Direction::Press } else { enigo::Direction::Release };
+            enigo.key(map_key(key), dir)?;
         }
     }
     Ok(())
+}
+
+fn map_key(k: remote_friend_common::RemoteKey) -> enigo::Key {
+    use remote_friend_common::RemoteKey as R;
+    match k {
+        R::Char(c) => enigo::Key::Unicode(c),
+        R::Enter => enigo::Key::Return,
+        R::Tab => enigo::Key::Tab,
+        R::Backspace => enigo::Key::Backspace,
+        R::Escape => enigo::Key::Escape,
+        R::Delete => enigo::Key::Delete,
+        R::Insert => enigo::Key::Insert,
+        R::Home => enigo::Key::Home,
+        R::End => enigo::Key::End,
+        R::PageUp => enigo::Key::PageUp,
+        R::PageDown => enigo::Key::PageDown,
+        R::Up => enigo::Key::UpArrow,
+        R::Down => enigo::Key::DownArrow,
+        R::Left => enigo::Key::LeftArrow,
+        R::Right => enigo::Key::RightArrow,
+        R::F1 => enigo::Key::F1,
+        R::F2 => enigo::Key::F2,
+        R::F3 => enigo::Key::F3,
+        R::F4 => enigo::Key::F4,
+        R::F5 => enigo::Key::F5,
+        R::F6 => enigo::Key::F6,
+        R::F7 => enigo::Key::F7,
+        R::F8 => enigo::Key::F8,
+        R::F9 => enigo::Key::F9,
+        R::F10 => enigo::Key::F10,
+        R::F11 => enigo::Key::F11,
+        R::F12 => enigo::Key::F12,
+        R::Shift => enigo::Key::Shift,
+        R::Ctrl => enigo::Key::Control,
+        R::Alt => enigo::Key::Alt,
+        R::Meta => enigo::Key::Meta,
+        R::CapsLock => enigo::Key::CapsLock,
+        R::NumLock => enigo::Key::Numlock,
+        R::PrintScreen => enigo::Key::PrintScr,
+        R::Pause => enigo::Key::Pause,
+    }
 }
 
 fn map_btn(b: remote_friend_common::MouseButton) -> enigo::Button {

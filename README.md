@@ -1,37 +1,29 @@
-# RemoteFriend — AnyDesk benzeri, Rust, P2P (LAN MVP hazır)
+# RemoteFriend — AnyDesk benzeri, Rust, P2P (v0.2.0)
 
 Durum: **LAN'da çalışıyor.** İnternet P2P (hole-punch/relay) sonraki faz.
 
-## Ne var?
-- `host`: ekranı paylaşan (xcap + JPEG 10fps, max 1600px) + mouse/klavye uygular (enigo) + dosya alır (`/tmp/rf_*` veya `%TEMP%`)
-- `client`: eframe ile canlı görüntü + tıkla/sürükle mouse gönder + yazı/enter/space klavye gönder + "Dosya Gönder" butonu
-- `common`: bincode protokol (Handshake/Accept/Video/Input/File)
+## Ne var? (v0.2.0)
+- `host`: H264 ekran yayını (openh264, 1080p, ~15fps, ~1-4 Mbps) + tam kontrol (mouse sol/sağ, scroll, tüm klavye: harf/ok/F1-F12/shift/ctrl/alt) + dosya alma
+- `client`: terminal GEREKTİRMEZ — açılışta adres+şifre ekranı; canlı görüntü + tıklama + yazı + scroll + "Dosya Gönder" butonu
+- ÖNEMLİ: v0.2.0 protokolü değiştirdi — **host ve client ikisi de v0.2.0 olmalı**
 
-## Hızlı test (aynı ağ)
-Host PC:
-```
-REMOTE_FRIEND_PASS=1234 ./target/release/remote-friend-host
-# dinler: 0.0.0.0:33200
-```
-Client PC:
-```
-./target/release/remote-friend-client 192.168.178.52:33200 1234
-```
+## Hızlı test (aynı ağ, terminalsiz)
+1. Host PC: `remote-friend-host.exe` çalıştır (şifre: 1234)
+2. Client PC: `remote-friend-client` çalıştır → adres yaz (`192.168.178.31:33200`) → Bağlan
 
-Headless protokol testi (GUI'siz):
+Headless testler (GUI'siz):
 ```
 cargo run -p remote-friend-client --example headless -- 127.0.0.1:33200 1234
+cargo run -p remote-friend-client --example inputtest -- 127.0.0.1:33200 1234
 ```
 
 ## Bu PC (Linux Wayland) notu
-xcap GNOME-Wayland'da `ZwlrScreencopy not found` verir. 2 seçenek:
-1. **Windows laptop = host** (önerilen, sorunsuz), bu Linux = client izler.
-2. Bu Linux host olacaksa: çıkış yap → giriş ekranında "GNOME on Xorg" seç → host çalışır.
+xcap GNOME-Wayland'da bazen portal hatası verir (tekrar dene / Xorg ile giriş yap). **Windows host sorunsuz**, bu Linux = client izler.
 
-## Windows laptop kurulumu
-Bkz: `WINDOWS_KURULUM.md` — 5 dk: Rust kur + klasörü kopyala + `cargo build --release` + firewall izin + çalıştır.
+## Windows kurulumu (derlemesiz)
+Releases'ten indir → çıkar → `HOST_BASLAT.bat` çift tık. Bkz: `WINDOWS_KURULUM.md`.
 
 ## Sonraki faz (yapılmadı)
-- QUIC (quinn) + H264 (openh264) + donanım encode
-- İnternet: iroh/libp2p hole-punch + rendezvous + TURN relay
+- QUIC (quinn) + donanım encode (NVENC/QSV/AMF)
+- İnternet: sinyal sunucusu + hole-punch + TURN relay (AnyDesk-ID benzeri)
 - Ses, pano, çoklu monitör, servis olarak çalıştırma
