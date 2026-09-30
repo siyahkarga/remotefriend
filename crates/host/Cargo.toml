@@ -12,5 +12,6 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 xcap = "0.4"
 openh264 = "0.9"
+hostname = { workspace = true }
 image = { version = "0.25", features = ["jpeg"] }
 enigo = "0.6"

@@ -39,23 +39,66 @@ static GEO: std::sync::Mutex<Geo> = std::sync::Mutex::new(Geo {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let password = std::env::var("REMOTE_FRIEND_PASS").unwrap_or("1234".into());
+    let pc_name = hostname::get()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or("bilinmeyen-pc".into());
     let addr = format!("0.0.0.0:{}", remote_friend_common::DEFAULT_PORT);
     let listener = TcpListener::bind(&addr).await?;
-    tracing::info!("host dinliyor: {addr} | şifre: {password} | bu IP'yi clienta ver");
+    println!("=== RemoteFriend Host: {pc_name} ===");
+    println!("Dinleniyor: {addr} | şifre: {password}");
+    println!("Gelen her bağlantı ONAY ister (E/H). Otomatik kabul için: REMOTE_FRIEND_AUTO_ACCEPT=1");
+    tracing::info!("host dinliyor: {addr}");
+
+    // LAN discovery beacon (clientlar listede görsün)
+    std::thread::spawn({
+        let pc_name = pc_name.clone();
+        move || remote_friend_common::discovery::broadcast_loop(pc_name, remote_friend_common::DEFAULT_PORT)
+    });
 
     loop {
         let (socket, peer) = listener.accept().await?;
         tracing::info!("client bağlandı: {peer}");
         let pw = password.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, &pw).await {
+            if let Err(e) = handle_client(socket, peer.to_string(), &pw).await {
                 tracing::warn!("client kapandı {peer}: {e:#}");
             }
         });
     }
 }
 
-async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
+/// Aynı anda tek onay sorusu (karışmasın diye)
+static APPROVAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Host operatörüne sor. true = kabul. 30 sn cevap yoksa ret.
+fn ask_approval(peer: &str) -> bool {
+    if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false) {
+        println!("*** {peer}: otomatik kabul (REMOTE_FRIEND_AUTO_ACCEPT=1)");
+        return true;
+    }
+    let _guard = APPROVAL_LOCK.lock().unwrap();
+    println!("*** Bağlantı isteği: {peer}");
+    println!("*** Kabul ediyor musun? (E = evet / H = hayır, 30 sn içinde, varsayılan HAYIR)");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(line) => {
+            let ok = matches!(line.trim().to_lowercase().as_str(), "e" | "evet" | "y" | "yes");
+            println!("*** {peer}: {}", if ok { "KABUL" } else { "RET" });
+            ok
+        }
+        Err(_) => {
+            println!("*** {peer}: zaman aşımı, REDDEDİLDİ");
+            false
+        }
+    }
+}
+
+async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Result<()> {
     let (mut rd, mut wr) = socket.into_split();
     // handshake
     let pkt = read_packet(&mut rd).await?;
@@ -69,6 +112,13 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
         write_packet(&mut wr, &Packet::Reject("şifre/version hatalı".into())).await?;
         anyhow::bail!("auth başarısız");
     }
+    // parola doğru ama YETMEZ: operatör onayı şart
+    write_packet(&mut wr, &Packet::WaitingForApproval).await?;
+    tracing::info!("{peer} parola ok, operatör onayı bekleniyor");
+    if !ask_approval(&peer) {
+        write_packet(&mut wr, &Packet::Reject("host bağlantıyı reddetti".into())).await?;
+        anyhow::bail!("operatör reddetti");
+    }
     write_packet(&mut wr, &Packet::Accept).await?;
     tracing::info!("auth ok, yayın başlıyor");
 
@@ -76,7 +126,7 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
 
     // video gönderici task (bağlantı başına taze H264 encoder: ilk frame IDR olur)
     let wr2 = wr.clone();
-    let video_task = tokio::spawn(async move {
+    let _video_task = tokio::spawn(async move {
         let mut seq = 0u64;
         let mut h264 = H264Enc::new();
         let mut err_n = 0u32;
@@ -159,7 +209,7 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
     // video_task abort on disconnect
     #[allow(unreachable_code)]
     {
-        video_task.abort();
+        _video_task.abort();
         Ok(())
     }
 }
@@ -220,7 +270,6 @@ impl H264Enc {
     }
 
     fn encode_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
-        use openh264::encoder::{Encoder, EncoderConfig};
         use openh264::formats::{RgbSliceU8, YUVBuffer};
 
         if self.enc.is_none() || self.w != w || self.h != h {

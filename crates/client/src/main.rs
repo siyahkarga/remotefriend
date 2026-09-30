@@ -4,9 +4,21 @@
 use anyhow::{Context, Result};
 use remote_friend_common::{Handshake, InputEvent, MouseButton, Packet, FileChunk, RemoteKey, PROTOCOL_VERSION};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+mod history;
+use history::RecentEntry;
+
+/// LAN'da bulunan bilgisayar
+#[derive(Clone)]
+struct LanEntry {
+    ip: String,
+    name: String,
+    port: u16,
+    last_seen: Instant,
+}
 
 struct Shared {
     texture: Option<(egui::ColorImage, u32, u32)>, // son frame
@@ -19,20 +31,43 @@ struct Shared {
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args: Vec<String> = std::env::args().collect();
-    let def_host = args.get(1).cloned().unwrap_or("192.168.178.31:33200".into());
+    let def_host = args.get(1).cloned().unwrap_or(String::new());
     let def_pass = args.get(2).cloned().unwrap_or("1234".into());
     let auto = args.len() > 1;
+
+    // LAN discovery dinleyici (bulunanlar listeye düşer)
+    let lan: Arc<Mutex<Vec<LanEntry>>> = Arc::new(Mutex::new(vec![]));
+    let (disc_tx, disc_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || remote_friend_common::discovery::listen_loop(disc_tx));
+    let lan_pump = lan.clone();
+    std::thread::spawn(move || {
+        while let Ok((ip, b)) = disc_rx.recv() {
+            let mut v = lan_pump.lock().unwrap();
+            if let Some(e) = v.iter_mut().find(|e| e.ip == ip && e.port == b.port) {
+                e.name = b.name.clone();
+                e.last_seen = Instant::now();
+            } else {
+                v.push(LanEntry { ip, name: b.name.clone(), port: b.port, last_seen: Instant::now() });
+            }
+        }
+    });
 
     let mut app = App {
         screen: Screen::Login,
         host_field: def_host,
         pass_field: def_pass,
-        login_msg: "Host adresini girip Bağlan'a bas.".into(),
+        login_msg: "Adres yaz ya da listeden seç.".into(),
         shared: None,
         tx_out: None,
+        disconnect_tx: None,
         last_mouse: None,
         mods: [false; 4],
         scroll_acc: (0.0, 0.0),
+        lan,
+        recents: history::load_recents(),
+        current_addr: String::new(),
+        current_name: String::new(),
+        thumb_saved: false,
     };
     if auto {
         app.connect();
@@ -52,10 +87,15 @@ async fn net_loop(
     password: &str,
     shared: Arc<Mutex<Shared>>,
     mut rx_out: UnboundedReceiver<Packet>,
+    mut disconnect: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut socket = tokio::net::TcpStream::connect(host)
-        .await
-        .with_context(|| format!("bağlanamadı: {host}"))?;
+    let mut socket = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(host),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("bağlantı zaman aşımı (host kapalı ya da yanlış adres: {host})"))?
+    .with_context(|| format!("bağlanamadı: {host}"))?;
     let hs = Packet::Handshake(Handshake {
         version: PROTOCOL_VERSION,
         password: password.to_string(),
@@ -63,14 +103,24 @@ async fn net_loop(
         want_input: true,
     });
     write_packet(&mut socket, &hs).await?;
-    let resp = read_packet(&mut socket).await?;
-    match resp {
-        Packet::Accept => shared.lock().unwrap().status = "bağlı".into(),
-        Packet::Reject(m) => {
-            shared.lock().unwrap().status = format!("reddedildi: {m}");
-            anyhow::bail!("reject: {m}");
+    // Accept / Reject / WaitingForApproval döngüsü
+    loop {
+        let resp = read_packet(&mut socket).await?;
+        match resp {
+            Packet::Accept => {
+                shared.lock().unwrap().status = "bağlı".into();
+                break;
+            }
+            Packet::Reject(m) => {
+                shared.lock().unwrap().status = format!("reddedildi: {m}");
+                anyhow::bail!("reject: {m}");
+            }
+            Packet::WaitingForApproval => {
+                shared.lock().unwrap().status =
+                    "host onayı bekleniyor... (host ekranında E'ye basılmalı)".into();
+            }
+            _ => anyhow::bail!("beklenmeyen yanıt"),
         }
-        _ => anyhow::bail!("beklenmeyen yanıt"),
     }
 
     let (mut rd, mut wr) = socket.into_split();
@@ -92,8 +142,22 @@ async fn net_loop(
     let mut n = 0u32;
     let mut total = 0u64;
     let mut h264 = H264Dec::new()?;
+    let mut first_frame = false;
     loop {
-        let pkt = read_packet_split(&mut rd).await?;
+        tokio::select! {
+            _ = disconnect.changed() => {
+                tracing::info!("kullanıcı bağlantıyı kesti");
+                shared.lock().unwrap().status = "bağlantı kesildi".into();
+                break;
+            }
+            res = read_packet_split(&mut rd) => {
+                let pkt = match res {
+                    Ok(p) => p,
+                    Err(e) => {
+                        shared.lock().unwrap().status = format!("bağlantı koptu: {e:#}");
+                        break;
+                    }
+                };
         if let Packet::Video(f) = pkt {
             n += 1;
             total += 1;
@@ -123,8 +187,16 @@ async fn net_loop(
             if total % 50 == 0 {
                 tracing::info!("video akiyor: toplam {total} frame");
             }
+            if !first_frame {
+                first_frame = true;
+                // ilk görüntü geldi: recent kaydı için işareti UI tarafı okur
+                shared.lock().unwrap().status = "bağlı".into();
+            }
         }
+            }
+    };
     }
+    Ok(())
 }
 
 fn decode_jpeg(data: &[u8]) -> Result<egui::ColorImage> {
@@ -179,9 +251,17 @@ struct App {
     // viewer (connect sonrası)
     shared: Option<Arc<Mutex<Shared>>>,
     tx_out: Option<UnboundedSender<Packet>>,
+    disconnect_tx: Option<tokio::sync::watch::Sender<bool>>,
     last_mouse: Option<(u32, u32)>,
     mods: [bool; 4], // shift, ctrl, alt, meta (basılı mı)
     scroll_acc: (f32, f32),
+    // discovery + recents (arka plan thread'lerinden beslenir)
+    lan: Arc<Mutex<Vec<LanEntry>>>,
+    recents: Vec<RecentEntry>,
+    // aktif bağlantı bilgisi (recent kaydı için)
+    current_addr: String,
+    current_name: String,
+    thumb_saved: bool,
 }
 
 impl App {
@@ -202,21 +282,37 @@ impl App {
             fps: 0.0,
         }));
         let (tx_out, rx_out) = unbounded_channel::<Packet>();
+        let (dc_tx, dc_rx) = tokio::sync::watch::channel(false);
         let sh = shared.clone();
+        let host_c = host.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                if let Err(e) = net_loop(&host, &password, sh.clone(), rx_out).await {
+                if let Err(e) = net_loop(&host_c, &password, sh.clone(), rx_out, dc_rx).await {
                     sh.lock().unwrap().status = format!("hata: {e:#}");
                     tracing::warn!("net kapandı: {e:#}");
                 }
             });
         });
+        // recent'e yaz (isim LAN listesinden biliniyorsa)
+        let known_name = self
+            .lan
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| format!("{}:{}", e.ip, e.port) == host)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        history::touch_recent(&mut self.recents, &host, &known_name);
+        self.current_addr = host;
+        self.current_name = known_name;
+        self.thumb_saved = false;
         self.shared = Some(shared);
         self.tx_out = Some(tx_out);
+        self.disconnect_tx = Some(dc_tx);
         self.last_mouse = None;
         self.mods = [false; 4];
         self.scroll_acc = (0.0, 0.0);
@@ -225,6 +321,17 @@ impl App {
 
     fn tx(&self) -> Option<UnboundedSender<Packet>> {
         self.tx_out.clone()
+    }
+
+    /// Bağlantıyı kes ve ana ekrana dön.
+    fn disconnect(&mut self) {
+        if let Some(dc) = self.disconnect_tx.take() {
+            let _ = dc.send(true);
+        }
+        self.tx_out = None;
+        self.shared = None;
+        self.login_msg = "Bağlantı kesildi.".into();
+        self.screen = Screen::Login;
     }
 }
 
@@ -239,32 +346,118 @@ impl eframe::App for App {
 
 impl App {
     fn login_ui(&mut self, ctx: &egui::Context) {
+        // eski LAN kayıtlarını temizle (>8 sn sessiz)
+        self.lan.lock().unwrap().retain(|e| e.last_seen.elapsed().as_secs() < 8);
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
-                ui.heading("RemoteFriend");
-                ui.label("Bağlanılacak bilgisayarın adresi:");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Adres:");
-                    ui.text_edit_singleline(&mut self.host_field);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Şifre: ");
-                    ui.add(egui::TextEdit::singleline(&mut self.pass_field).password(true));
-                });
-                ui.add_space(8.0);
-                if ui.button("Bağlan").clicked() {
+            ui.add_space(10.0);
+            ui.heading("RemoteFriend");
+            ui.small("Aynı ağdaki bilgisayarlar otomatik bulunur. Bağlantı için host onayı şarttır.");
+            ui.add_space(8.0);
+
+            // adres satırı
+            ui.horizontal(|ui| {
+                ui.label("Adres:");
+                let addr_resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.host_field)
+                        .hint_text("192.168.1.20:33200")
+                        .desired_width(220.0),
+                );
+                ui.label("Şifre:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.pass_field)
+                        .password(true)
+                        .desired_width(100.0),
+                );
+                if ui.button("➡ Bağlan").clicked() || (addr_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                     self.connect();
                 }
-                ui.add_space(4.0);
-                ui.label(&self.login_msg);
-                ui.add_space(16.0);
-                ui.small("Örnek: 192.168.178.31:33200 (aynı ağ). İnternet için sinyal sunucusu sonraki fazda.");
+            });
+            if !self.login_msg.is_empty() {
+                ui.small(&self.login_msg);
+            }
+            ui.add_space(8.0);
+            ui.separator();
+
+            // LAN'dakiler
+            ui.add_space(4.0);
+            ui.heading("Ağdaki Bilgisayarlar");
+            {
+                let lan = self.lan.lock().unwrap().clone();
+                if lan.is_empty() {
+                    ui.small("Aranıyor... (host tarafında remote-friend-host çalışmalı)");
+                }
+                for e in lan {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("🖥 {}  ({}:{})", e.name, e.ip, e.port));
+                        if ui.small_button("Bağlan").clicked() {
+                            self.host_field = format!("{}:{}", e.ip, e.port);
+                            self.connect();
+                        }
+                    });
+                }
+            }
+            ui.add_space(8.0);
+            ui.separator();
+
+            // son bağlantılar
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.heading("Son Bağlantılar");
+                if ui.small_button("Temizle").clicked() {
+                    self.recents.clear();
+                    history::save_recents(&self.recents);
+                }
+            });
+            if self.recents.is_empty() {
+                ui.small("Henüz bağlantı yok.");
+            }
+            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                // borrow sorunu için indexle dön
+                let n = self.recents.len();
+                for i in 0..n {
+                    let (addr, name, fav, thumb) = {
+                        let r = &self.recents[i];
+                        (r.addr.clone(), r.name.clone(), r.fav, r.thumb.clone())
+                    };
+                    ui.horizontal(|ui| {
+                        // thumbnail
+                        if let Some(t) = thumb.as_ref().and_then(|f| {
+                            load_thumb_texture(ui.ctx(), f)
+                        }) {
+                            ui.image((t.id(), egui::vec2(96.0, 54.0)));
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(format!("{}{}", if fav { "★ " } else { "" }, name));
+                            ui.small(&addr);
+                        });
+                        if ui.small_button(if fav { "★" } else { "☆" }).clicked() {
+                            self.recents[i].fav = !fav;
+                            history::save_recents(&self.recents);
+                        }
+                        if ui.small_button("Bağlan").clicked() {
+                            self.host_field = addr.clone();
+                            self.connect();
+                            return;
+                        }
+                    });
+                    ui.separator();
+                }
             });
         });
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
+}
 
+fn load_thumb_texture(ctx: &egui::Context, fname: &str) -> Option<egui::TextureHandle> {
+    let data = std::fs::read(history::thumb_path(fname)).ok()?;
+    let img = image::load_from_memory(&data).ok()?.to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], &img.into_raw());
+    Some(ctx.load_texture(format!("thumb_{fname}"), ci, egui::TextureOptions::LINEAR))
+}
+
+impl App {
     fn viewer_ui(&mut self, ctx: &egui::Context) {
         let shared = self.shared.clone().unwrap();
         let tx = self.tx_out.clone().unwrap();
@@ -275,15 +468,37 @@ impl App {
 
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if ui.button("⛔ Kes").clicked() {
+                    self.disconnect();
+                    return;
+                }
                 ui.label(format!("Durum: {status} | Host: {hw}x{hh} | {fps:.1} fps"));
                 if ui.button("Dosya Gönder").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.send_file(path);
                     }
                 }
-                ui.label("Tıkla/sürükle=mouse, klavye=tuş gönderir");
             });
         });
+
+        // ilk görüntü geldi mi? thumbnail kaydet (son bağlantılar için)
+        if !self.thumb_saved {
+            if let Some((img, _, _)) = img_opt.clone() {
+                if let Some(fname) = history::save_thumb(&self.current_addr, &img) {
+                    if let Some(e) = self.recents.iter_mut().find(|e| e.addr == self.current_addr) {
+                        e.thumb = Some(fname);
+                        history::save_recents(&self.recents);
+                    }
+                }
+                self.thumb_saved = true;
+            }
+        }
+
+        // hata durumu: mesaj + geri dön
+        let failed = status.starts_with("hata")
+            || status.starts_with("reddedildi")
+            || status.starts_with("bağlantı koptu")
+            || status.starts_with("bağlantı kesildi");
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some((img, _w, _h)) = img_opt {
@@ -385,9 +600,20 @@ impl App {
                 self.sync_mod(RemoteKey::Ctrl, mctrl);
                 self.sync_mod(RemoteKey::Alt, malt);
                 self.sync_mod(RemoteKey::Meta, mmeta);
+            } else if failed {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("Bağlantı kurulamadı");
+                        ui.label(&status);
+                        ui.add_space(8.0);
+                        if ui.button("⟵ Geri Dön").clicked() {
+                            self.disconnect();
+                        }
+                    });
+                });
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Görüntü bekleniyor... host çalışıyor mu?");
+                    ui.label("Görüntü bekleniyor... (host onayı gerekli olabilir)");
                 });
             }
         });

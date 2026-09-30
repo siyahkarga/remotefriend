@@ -109,6 +109,8 @@ pub enum Packet {
     Handshake(Handshake),
     Accept,
     Reject(String),
+    /// Host operatör onayı bekleniyor (terminalde E/H sorulur)
+    WaitingForApproval,
     Video(VideoFrame),
     Input(InputEvent),
     File(FileChunk),
@@ -120,4 +122,94 @@ pub fn encode(packet: &Packet) -> anyhow::Result<Vec<u8>> {
 
 pub fn decode(buf: &[u8]) -> anyhow::Result<Packet> {
     Ok(bincode::deserialize(buf)?)
+}
+
+// ---- v0.3.0: şifreli QUIC + LAN otomatik bulma ----
+
+/// UDP discovery portu (broadcast beacon'lar)
+pub const DISCOVERY_PORT: u16 = 33201;
+/// QUIC portu (DEFAULT_PORT ile aynı)
+pub const QUIC_PORT: u16 = DEFAULT_PORT;
+/// Protokol nesli: v0.3.0 QUIC'e geçti, eski TCP clientlar reddedilir
+pub const TRANSPORT_GEN: u32 = 3;
+
+/// Host'un LAN'a yayınladığı kimlik
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Beacon {
+    pub v: u32,          // TRANSPORT_GEN olmalı
+    pub name: String,    // bilgisayar adı
+    pub port: u16,       // QUIC portu
+    pub fp: String,      // TLS sertifika SHA256 fingerprint (TOFU)
+    pub proto: u32,      // PROTOCOL_VERSION
+}
+
+/// Sertifika DER -> kısa fingerprint (12 hex karakter, UI'da gösterilir)
+pub fn fingerprint(cert_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(cert_der);
+    hex::encode(&h.finalize()[..6])
+}
+
+/// Sertifika DER -> tam fingerprint (bağlantı doğrulama)
+pub fn fingerprint_full(cert_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(cert_der);
+    hex::encode(h.finalize())
+}
+
+/// UDP LAN discovery (ayrı thread'lerde çalıştır, std blocking socket).
+pub mod discovery {
+    use super::Beacon;
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    /// Host: kimliğini LAN'a yayınla (2 sn'de bir). Dönmez.
+    pub fn broadcast_loop(name: String, port: u16) {
+        let sock = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("discovery bind hatası: {e}");
+                return;
+            }
+        };
+        let _ = sock.set_broadcast(true);
+        let beacon = Beacon {
+            v: super::TRANSPORT_GEN,
+            name,
+            port,
+            fp: String::new(),
+            proto: super::PROTOCOL_VERSION,
+        };
+        let msg = serde_json::to_vec(&beacon).unwrap_or_default();
+        let target = format!("255.255.255.255:{}", super::DISCOVERY_PORT);
+        loop {
+            let _ = sock.send_to(&msg, &target);
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    /// Client: beacon dinle, bulunanları (ip, beacon) olarak gönder. Dönmez.
+    /// Not: port makinede doluysa (2. client) dinleyemez, sorun değil.
+    pub fn listen_loop(tx: std::sync::mpsc::Sender<(String, Beacon)>) {
+        let sock = match UdpSocket::bind(format!("0.0.0.0:{}", super::DISCOVERY_PORT)) {
+            Ok(s) => s,
+            Err(_) => return, // başka client dinliyor, sessiz çık
+        };
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut buf = [0u8; 2048];
+        loop {
+            match sock.recv_from(&mut buf) {
+                Ok((n, addr)) => {
+                    if let Ok(b) = serde_json::from_slice::<Beacon>(&buf[..n]) {
+                        if b.v == super::TRANSPORT_GEN {
+                            let _ = tx.send((addr.ip().to_string(), b));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
 }

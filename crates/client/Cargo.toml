@@ -11,6 +11,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 image = { version = "0.25" }
+serde_json = "1"
 openh264 = "0.9"
 eframe = "0.32"
 egui = "0.32"
