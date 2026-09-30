@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            host_ext: .exe
+            artifact: remotefriend-windows
+          - os: ubuntu-latest
+            host_ext: ""
+            artifact: remotefriend-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux sistem bagimliliklari
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libegl1-mesa-dev libgtk-3-dev
+
+      - name: Release build
+        run: cargo build --release -p remote-friend-host -p remote-friend-client
+
+      - name: Windows paketi hazirla
+        if: runner.os == 'Windows'
+        run: |
+          mkdir dist
+          copy target\release\remote-friend-host.exe dist\
+          copy target\release\remote-friend-client.exe dist\
+          copy HOST_BASLAT.bat dist\
+          copy README.md dist\
+
+      - name: Linux paketi hazirla
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist
+          cp target/release/remote-friend-host target/release/remote-friend-client dist/
+          cp README.md dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/

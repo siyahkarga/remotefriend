@@ -1,0 +1,15 @@
+[package]
+name = "remote-friend-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+remote-friend-common = { path = "../common" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+xcap = "0.4"
+image = { version = "0.25", features = ["jpeg"] }
+enigo = "0.6"

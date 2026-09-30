@@ -1,0 +1,36 @@
+//! Headless test: GUI olmadan hosttan 5 frame al, boyutları yaz.
+//! cargo run -p remote-friend-client --example headless -- 127.0.0.1:33200 1234
+use remote_friend_common::{Handshake, Packet, PROTOCOL_VERSION};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let host = args.get(1).cloned().unwrap_or("127.0.0.1:33200".into());
+    let pass = args.get(2).cloned().unwrap_or("1234".into());
+    let mut s = tokio::net::TcpStream::connect(&host).await.expect("bağlanamadı");
+    let hs = Packet::Handshake(Handshake { version: PROTOCOL_VERSION, password: pass, want_video: true, want_input: true });
+    let b = remote_friend_common::encode(&hs).unwrap();
+    s.write_u32(b.len() as u32).await.unwrap();
+    s.write_all(&b).await.unwrap();
+    let resp = read(&mut s).await.unwrap();
+    println!("yanıt: {resp:?}");
+    for i in 0..5 {
+        match read(&mut s).await {
+            Ok(Packet::Video(f)) => println!("frame {i}: seq={} {}x{} codec={:?} {} byte", f.seq, f.width, f.height, f.codec, f.data.len()),
+            Ok(other) => println!("frame {i}: diğer paket {other:?}"),
+            Err(e) => {
+                println!("frame {i}: HATA (host Wayland ise normal, Xorg/Windows'ta çalışır): {e:#}");
+                // host logunda "capture hatası" görünür, bağlantı kopmaz
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn read(s: &mut tokio::net::TcpStream) -> anyhow::Result<Packet> {
+    let len = s.read_u32().await? as usize;
+    let mut buf = vec![0u8; len];
+    s.read_exact(&mut buf).await?;
+    Ok(remote_friend_common::decode(&buf)?)
+}
