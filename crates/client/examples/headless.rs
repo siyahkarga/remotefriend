@@ -17,7 +17,13 @@ async fn main() {
     println!("yanıt: {resp:?}");
     for i in 0..5 {
         match read(&mut s).await {
-            Ok(Packet::Video(f)) => println!("frame {i}: seq={} {}x{} codec={:?} {} byte", f.seq, f.width, f.height, f.codec, f.data.len()),
+            Ok(Packet::Video(f)) => {
+                println!("frame {i}: seq={} {}x{} codec={:?} {} byte", f.seq, f.width, f.height, f.codec, f.data.len());
+                if i == 0 && matches!(f.codec, remote_friend_common::VideoCodec::Jpeg) {
+                    std::fs::write("/tmp/rf_win_frame.jpg", &f.data).unwrap();
+                    println!("ilk frame kaydedildi: /tmp/rf_win_frame.jpg");
+                }
+            }
             Ok(other) => println!("frame {i}: diğer paket {other:?}"),
             Err(e) => {
                 println!("frame {i}: HATA (host Wayland ise normal, Xorg/Windows'ta çalışır): {e:#}");
