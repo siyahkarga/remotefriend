@@ -10,8 +10,31 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-const JPEG_QUALITY: u8 = 60;
-const FPS_MS: u64 = 100; // 10 fps MVP, sonra artırılacak
+const JPEG_QUALITY: u8 = 80;
+const FPS_MS: u64 = 80; // ~12fps
+const MAX_W: u32 = 1920; // 1080p aynen, üstünü küçült
+
+/// Son capture'ın geometrisi: client koordinatını host mantıksal koordinata çevirmek için.
+/// (Windows %125/%150 ölçekte capture fiziksel piksel, mouse mantıksal piksel ister.)
+#[derive(Clone, Copy)]
+struct Geo {
+    orig_w: u32,
+    orig_h: u32,
+    sent_w: u32,
+    sent_h: u32,
+    scale: f32,
+    mon_x: i32,
+    mon_y: i32,
+}
+static GEO: std::sync::Mutex<Geo> = std::sync::Mutex::new(Geo {
+    orig_w: 0,
+    orig_h: 0,
+    sent_w: 0,
+    sent_h: 0,
+    scale: 1.0,
+    mon_x: 0,
+    mon_y: 0,
+});
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -129,18 +152,30 @@ async fn handle_client(socket: TcpStream, password: &str) -> Result<()> {
 fn capture_jpeg() -> Result<(u32, u32, Vec<u8>)> {
     let monitors = xcap::Monitor::all().context("monitör listesi alınamadı (Wayland ise portal izni gerek)")?;
     let mon = monitors.into_iter().next().context("monitör yok")?;
+    let scale = mon.scale_factor().unwrap_or(1.0);
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
     let img = mon.capture_image().context("ekran yakalanamadı")?;
     let (w, h) = (img.width(), img.height());
 
-    // hız için büyük ekranı küçült (max genişlik 1600)
-    let img = if w > 1600 {
-        let nw = 1600;
-        let nh = (h as f32 * (1600.0 / w as f32)) as u32;
-        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    // hız için çok büyük ekranı küçült
+    let img = if w > MAX_W {
+        let nh = (h as f32 * (MAX_W as f32 / w as f32)) as u32;
+        image::imageops::resize(&img, MAX_W, nh, image::imageops::FilterType::Triangle)
     } else {
         img
     };
     let (w2, h2) = (img.width(), img.height());
+
+    *GEO.lock().unwrap() = Geo {
+        orig_w: w,
+        orig_h: h,
+        sent_w: w2,
+        sent_h: h2,
+        scale,
+        mon_x: mx,
+        mon_y: my,
+    };
 
     let mut buf = Vec::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
@@ -154,7 +189,15 @@ fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
     // her eventte yeni Enigo (MVP basitliği, sonra kalıcı tut)
     let mut enigo = Enigo::new(&Settings::default()).context("enigo açılamadı")?;
     match ev {
-        E::MouseMove { x, y } => enigo.move_mouse(x as i32, y as i32, Coordinate::Abs)?,
+        E::MouseMove { x, y } => {
+            // client koordinatı (gönderilen frame uzayı) -> fiziksel -> mantıksal
+            let g = GEO.lock().unwrap();
+            let fx = if g.sent_w > 0 { x as f32 * g.orig_w as f32 / g.sent_w as f32 } else { x as f32 };
+            let fy = if g.sent_h > 0 { y as f32 * g.orig_h as f32 / g.sent_h as f32 } else { y as f32 };
+            let lx = g.mon_x + (fx / g.scale) as i32;
+            let ly = g.mon_y + (fy / g.scale) as i32;
+            enigo.move_mouse(lx, ly, Coordinate::Abs)?
+        }
         E::MouseDown { button } => enigo.button(map_btn(button), enigo::Direction::Press)?,
         E::MouseUp { button } => enigo.button(map_btn(button), enigo::Direction::Release)?,
         E::KeyDown { code } => {
