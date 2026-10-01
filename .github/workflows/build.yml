@@ -31,7 +31,7 @@ jobs:
           sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libegl1-mesa-dev libgtk-3-dev
 
       - name: Release build
-        run: cargo build --release -p remote-friend-host -p remote-friend-client
+        run: cargo build --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
 
       - name: Windows paketi hazirla
         if: runner.os == 'Windows'
@@ -39,6 +39,7 @@ jobs:
           mkdir dist
           copy target\release\remote-friend-host.exe dist\
           copy target\release\remote-friend-client.exe dist\
+          copy target\release\remote-friend-rendezvous.exe dist\
           copy HOST_BASLAT.bat dist\
           copy README.md dist\
 
@@ -46,7 +47,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir dist
-          cp target/release/remote-friend-host target/release/remote-friend-client dist/
+          cp target/release/remote-friend-host target/release/remote-friend-client target/release/remote-friend-rendezvous dist/
           cp README.md dist/
 
       - uses: actions/upload-artifact@v4

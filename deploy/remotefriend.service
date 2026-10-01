@@ -1,0 +1,24 @@
+[Unit]
+Description=RemoteFriend rendezvous + relay (internet buluşturma)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+WorkingDirectory=/opt/remotefriend
+Environment=RF_RV_PORT=33202
+Environment=RF_WEB_PORT=33201
+Environment=RF_WEB_BIND=0.0.0.0
+Environment=RF_TLS_CERT=/opt/remotefriend/cert.pem
+Environment=RF_TLS_KEY=/opt/remotefriend/key.pem
+ExecStart=/opt/remotefriend/remote-friend-rendezvous
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

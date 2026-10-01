@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-const PAGE: &str = include_str!("webapp.html");
+const PAGE: &str = remote_friend_common::webapp::WEBAPP;
 
 #[derive(Clone)]
 struct WsState {
@@ -138,6 +138,71 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
     video_task.abort();
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     tracing::info!("tarayıcı client ayrıldı ({ts})");
+}
+
+/// Dial-back hattı üzerinden web oturumu (VPS internet yolu).
+/// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
+pub(crate) async fn session_kmsg<R, W>(rd: R, wr: W)
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
+    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
+{
+    use remote_friend_common::io::{read_kmsg, write_kmsg};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let wr = Arc::new(Mutex::new(wr));
+    let wr2 = wr.clone();
+    let video_task = tokio::spawn(async move {
+        let mut h264 = super::H264Enc::new();
+        let mut err_n = 0u32;
+        loop {
+            match super::capture_rgba() {
+                Ok((w, h, rgba)) => match h264.encode_frame(&rgba, w, h) {
+                    Ok(nal) => {
+                        err_n = 0;
+                        let mut msg = Vec::with_capacity(nal.len() + 8);
+                        msg.extend_from_slice(&w.to_le_bytes());
+                        msg.extend_from_slice(&h.to_le_bytes());
+                        msg.extend_from_slice(&nal);
+                        let mut g = wr2.lock().await;
+                        if write_kmsg(&mut *g, 0, &msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        err_n += 1;
+                        if err_n > 30 {
+                            h264 = super::H264Enc::new();
+                            err_n = 0;
+                        } else {
+                            tracing::warn!("h264 encode hatası: {e:#}");
+                        }
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("capture hatası: {e:#}");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(super::FPS_MS)).await;
+        }
+    });
+
+    let mut rd = rd;
+    loop {
+        match read_kmsg(&mut rd).await {
+            Ok((1, payload)) => {
+                if let Ok(t) = String::from_utf8(payload) {
+                    if let Err(e) = handle_json_input(&t) {
+                        tracing::warn!("web input hatası: {e:#}");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    video_task.abort();
+    tracing::info!("kmsg web oturumu kapandı");
 }
 
 fn handle_json_input(t: &str) -> Result<()> {

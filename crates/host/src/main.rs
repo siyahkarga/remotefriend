@@ -64,6 +64,18 @@ async fn main() -> Result<()> {
     println!("Gelen her bağlantı ONAY ister (E/H). Otomatik kabul için: REMOTE_FRIEND_AUTO_ACCEPT=1");
     tracing::info!("host dinliyor: {addr}");
 
+    // Kalıcı internet ID'si (VPS rendezvous için)
+    let host_id = remote_friend_common::identity::load_or_create_host_id();
+    println!(">>> Bu bilgisayarın ID'si: {} <<<", remote_friend_common::format_id(&host_id));
+    match rv_target() {
+        Some(t) => {
+            println!("İnternet (VPS {}) açık.", t.addr);
+            let (id_c, pc_c, pw_c) = (host_id.clone(), pc_name.clone(), password.clone());
+            tokio::spawn(async move { uplink_loop(t, id_c, pc_c, pw_c).await });
+        }
+        None => println!("İnternet kapalı (RF_RV_SERVER yok): sadece LAN."),
+    }
+
     // Tarayıcı client için web sunucusu (kurulumsuz bağlantı)
     let http_port: u16 = std::env::var("RF_HTTP_PORT")
         .ok()
@@ -88,6 +100,21 @@ async fn main() -> Result<()> {
 
     loop {
         let (socket, peer) = listener.accept().await?;
+        // Sertleştirme: tarayıcı/bot yanlışlıkla native porta gelirse
+        // ("GET / HTTP..." devasa paket sanılıp bellek şişmesin) kapıda çevir.
+        {
+            use tokio::io::AsyncReadExt;
+            let mut peek = [0u8; 4];
+            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.peek(&mut peek)).await {
+                Ok(Ok(_)) => {
+                    if peek == *b"GET " || peek == *b"POST" || peek == *b"HEAD" || peek == *b"PUT " {
+                        tracing::warn!("{peer}: native porta HTTP geldi, kapatıldı (tarayıcı :33201'e açılmalı)");
+                        continue;
+                    }
+                }
+                _ => continue, // veri yok/zaman aşımı: kapat
+            }
+        }
         tracing::info!("client bağlandı: {peer}");
         let pw = password.clone();
         tokio::spawn(async move {
@@ -130,7 +157,23 @@ pub(crate) fn ask_approval(peer: &str) -> bool {
 }
 
 async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Result<()> {
-    let (mut rd, mut wr) = socket.into_split();
+    let (rd, wr) = socket.into_split();
+    session_native(rd, wr, peer, password, true).await
+}
+
+/// Native session: LAN TCP veya VPS dial-back (TLS) fark etmez.
+/// need_approval=false ise parola sonrası direkt Accept (onay zaten alındı).
+async fn session_native<R, W>(
+    mut rd: R,
+    mut wr: W,
+    peer: String,
+    password: &str,
+    need_approval: bool,
+) -> Result<()>
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
+    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
+{
     // handshake
     let pkt = read_packet(&mut rd).await?;
     let ok = match &pkt {
@@ -143,12 +186,14 @@ async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Resul
         write_packet(&mut wr, &Packet::Reject("şifre/version hatalı".into())).await?;
         anyhow::bail!("auth başarısız");
     }
-    // parola doğru ama YETMEZ: operatör onayı şart
-    write_packet(&mut wr, &Packet::WaitingForApproval).await?;
-    tracing::info!("{peer} parola ok, operatör onayı bekleniyor");
-    if !ask_approval(&peer) {
-        write_packet(&mut wr, &Packet::Reject("host bağlantıyı reddetti".into())).await?;
-        anyhow::bail!("operatör reddetti");
+    if need_approval {
+        // parola doğru ama YETMEZ: operatör onayı şart
+        write_packet(&mut wr, &Packet::WaitingForApproval).await?;
+        tracing::info!("{peer} parola ok, operatör onayı bekleniyor");
+        if !ask_approval(&peer) {
+            write_packet(&mut wr, &Packet::Reject("host bağlantıyı reddetti".into())).await?;
+            anyhow::bail!("operatör reddetti");
+        }
     }
     write_packet(&mut wr, &Packet::Accept).await?;
     tracing::info!("auth ok, yayın başlıyor");
@@ -242,6 +287,146 @@ async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Resul
     {
         _video_task.abort();
         Ok(())
+    }
+}
+
+// ---- internet uplink (VPS rendezvous) ----
+
+type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+struct RvTarget {
+    addr: String,
+    fp: Option<String>,
+    sni: String,
+}
+
+/// Yoksa None döner (host LAN modunda çalışmaya devam eder).
+fn rv_target() -> Option<RvTarget> {
+    let cfg = remote_friend_common::identity::load_rv_config();
+    let addr = std::env::var("RF_RV_SERVER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| if cfg.server.trim().is_empty() { None } else { Some(cfg.server.clone()) })?;
+    let fp = std::env::var("RF_RV_FP")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| if cfg.fp.trim().is_empty() { None } else { Some(cfg.fp.clone()) });
+    let sni = addr.split(':').next().unwrap_or("rv").to_string();
+    Some(RvTarget { addr, fp, sni })
+}
+
+async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
+    if let Some(fp) = &t.fp {
+        let s = remote_friend_common::tls::tls_connect(&t.addr, &t.sni, Some(fp.clone())).await?;
+        let (r, w) = tokio::io::split(s);
+        Ok((Box::new(r), Box::new(w)))
+    } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+        tracing::warn!("!!! rendezvous DÜZ bağlanıyor (test modu)");
+        let s = tokio::net::TcpStream::connect(&t.addr).await?;
+        let (r, w) = s.into_split();
+        Ok((Box::new(r), Box::new(w)))
+    } else {
+        anyhow::bail!("TLS fingerprint yok (RF_RV_FP) ve RF_PLAIN_OK=1 değil — güvensiz internet yok");
+    }
+}
+
+async fn uplink_loop(target: RvTarget, id: String, pc_name: String, password: String) {
+    loop {
+        match uplink_once(&target, &id, &pc_name, &password).await {
+            Ok(()) => tracing::warn!("uplink kapandı, 5 sn sonra yeniden denenecek"),
+            Err(e) => tracing::warn!("uplink hatası: {e:#} (5 sn sonra yeniden)"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str) -> Result<()> {
+    use remote_friend_common::io::{read_rv, write_rv};
+    use remote_friend_common::RvMsg;
+    use tokio::sync::mpsc;
+
+    let (mut rd, wr) = rv_connect(target).await?;
+    let wr = Arc::new(Mutex::new(wr));
+    // kayıt
+    {
+        let mut g = wr.lock().await;
+        write_rv(&mut *g, &RvMsg::Register { id: id.to_string(), name: pc_name.to_string() }).await?;
+        let resp = read_rv(&mut rd).await?;
+        match resp {
+            RvMsg::RegisteredOk => tracing::info!("rendezvous kaydı OK (ID: {})", remote_friend_common::format_id(id)),
+            RvMsg::RegisterError(m) => anyhow::bail!("kayıt reddedildi: {m}"),
+            _ => anyhow::bail!("kayıt sırasında beklenmeyen yanıt"),
+        }
+    }
+    // giden kanal: heartbeat + hızlı ret
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<RvMsg>();
+    let wr2 = wr.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let mut g = wr2.lock().await;
+                    if write_rv(&mut *g, &RvMsg::Heartbeat).await.is_err() { break; }
+                }
+                msg = out_rx.recv() => {
+                    match msg {
+                        Some(m) => {
+                            let mut g = wr2.lock().await;
+                            if write_rv(&mut *g, &m).await.is_err() { break; }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
+    // gelen: onay istekleri
+    loop {
+        match read_rv(&mut rd).await? {
+            RvMsg::ApprovalRequest { client, addr, kind, token } => {
+                let peer = format!("internet:{client} ({addr}, {kind})");
+                println!("*** Bağlantı isteği: {peer}");
+                let out_tx2 = out_tx.clone();
+                let target2 = RvTarget { addr: target.addr.clone(), fp: target.fp.clone(), sni: target.sni.clone() };
+                let password = password.to_string();
+                tokio::spawn(async move {
+                    let ok = tokio::task::spawn_blocking(move || ask_approval(&peer))
+                        .await
+                        .unwrap_or(false);
+                    if ok {
+                        dial_back(&target2, token, &kind, &password).await;
+                    } else {
+                        let _ = out_tx2.send(RvMsg::ApprovalAnswer { client, allow: false });
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Onaylanan client için sunucuya geri bağlan, oturumu bu hat üzerinden yürüt.
+async fn dial_back(target: &RvTarget, token: u64, kind: &str, password: &str) {
+    use remote_friend_common::io::write_rv;
+    use remote_friend_common::RvMsg;
+    let peer = format!("internet:{token}");
+    match rv_connect(target).await {
+        Ok((mut rd, mut wr)) => {
+            if write_rv(&mut wr, &RvMsg::ConnectBack { token }).await.is_err() {
+                tracing::warn!("{peer}: ConnectBack yazılamadı");
+                return;
+            }
+            tracing::info!("{peer}: dial-back kuruldu ({kind})");
+            if kind == "web" {
+                web::session_kmsg(rd, wr).await;
+            } else {
+                let _ = session_native(rd, wr, peer.clone(), password, false).await;
+            }
+            tracing::info!("{peer}: oturum kapandı");
+        }
+        Err(e) => tracing::warn!("{peer}: dial-back bağlanamadı: {e:#}"),
     }
 }
 
@@ -439,22 +624,8 @@ pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<()> {
     Ok(())
 }
 
-async fn read_packet(r: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Packet> {
-    let len = r.read_u32().await? as usize;
-    if len > 20_000_000 {
-        anyhow::bail!("paket çok büyük: {len}");
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await?;
-    Ok(remote_friend_common::decode(&buf)?)
-}
-
-async fn write_packet(w: &mut tokio::net::tcp::OwnedWriteHalf, p: &Packet) -> Result<()> {
-    let buf = remote_friend_common::encode(p)?;
-    w.write_u32(buf.len() as u32).await?;
-    w.write_all(&buf).await?;
-    Ok(())
-}
+// Framed paket IO ortak modülden (TCP/TLS/dial-back hepsi aynı).
+use remote_friend_common::io::{read_packet, write_packet};
 
 // Cursor import kullanıldı mı kontrolü için (derleyici uyarısını önle)
 #[allow(dead_code)]

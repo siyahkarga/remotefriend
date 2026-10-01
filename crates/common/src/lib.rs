@@ -3,6 +3,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod identity;
+pub mod io;
+pub mod tls;
+pub mod webapp;
+// Not: `discovery` bu dosyada inline tanımlı (aşağıda).
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_PORT: u16 = 33200;
 
@@ -157,6 +163,65 @@ pub fn fingerprint_full(cert_der: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(cert_der);
     hex::encode(h.finalize())
+}
+
+// ---- v0.5.0: internet rendezvous (VPS relay) ----
+
+/// Rendezvous varsayılan portu (TCP+TLS)
+pub const RENDEZVOUS_PORT: u16 = 33202;
+
+/// Kalıcı host kimliği: 9 haneli kod ("123 456 789" diye gösterilir).
+/// İlk çalışmada üretilir, ~/.config/remotefriend/host_id dosyasında saklanır.
+pub fn new_host_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut h = DefaultHasher::new();
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut h);
+    std::process::id().hash(&mut h);
+    format!("{:09}", h.finish() % 1_000_000_000)
+}
+
+pub fn format_id(id: &str) -> String {
+    if id.len() == 9 {
+        format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9])
+    } else {
+        id.to_string()
+    }
+}
+
+/// VPS rendezvous mesajları (TLS tünel içinde, length-prefixed bincode).
+/// Video/input/dosyabaytları ToClient/FromClient içinde OPAK taşınır (sunucu göremez).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RvMsg {
+    // host -> server (kalıcı uplink)
+    Register { id: String, name: String },
+    Heartbeat,
+    ApprovalAnswer { client: String, allow: bool },
+    ToClient { client: String, payload: Vec<u8> },
+    /// Onaylanan client için yeni bağlantı (token eşleşmeli)
+    ConnectBack { token: u64 },
+    // server -> host (uplink üzerinden)
+    RegisteredOk,
+    RegisterError(String),
+    ApprovalRequest { client: String, addr: String, kind: String, token: u64 },
+    FromClient { client: String, payload: Vec<u8> },
+    // client -> server (yeni bağlantı)
+    Hello { id: String },
+    ToHost { payload: Vec<u8> },
+    // server -> client
+    WaitApproval,
+    Rejected(String),
+    Accepted,
+    FromHost { payload: Vec<u8> },
+}
+
+pub fn rv_encode(m: &RvMsg) -> anyhow::Result<Vec<u8>> {
+    Ok(bincode::serialize(m)?)
+}
+
+pub fn rv_decode(buf: &[u8]) -> anyhow::Result<RvMsg> {
+    Ok(bincode::deserialize(buf)?)
 }
 
 /// UDP LAN discovery (ayrı thread'lerde çalıştır, std blocking socket).

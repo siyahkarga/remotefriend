@@ -56,6 +56,7 @@ fn main() -> Result<()> {
         screen: Screen::Login,
         host_field: def_host,
         pass_field: def_pass,
+        server_field: remote_friend_common::identity::load_rv_config().server,
         login_msg: "Adres yaz ya da listeden seç.".into(),
         shared: None,
         tx_out: None,
@@ -86,26 +87,91 @@ async fn net_loop(
     host: &str,
     password: &str,
     shared: Arc<Mutex<Shared>>,
-    mut rx_out: UnboundedReceiver<Packet>,
-    mut disconnect: tokio::sync::watch::Receiver<bool>,
+    rx_out: UnboundedReceiver<Packet>,
+    disconnect: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut socket = tokio::time::timeout(
+    let socket = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::net::TcpStream::connect(host),
     )
     .await
     .map_err(|_| anyhow::anyhow!("bağlantı zaman aşımı (host kapalı ya da yanlış adres: {host})"))?
     .with_context(|| format!("bağlanamadı: {host}"))?;
+    let (rd, wr) = socket.into_split();
+    run_session(rd, wr, password, shared, rx_out, disconnect).await
+}
+
+/// İnternet (VPS) yolu: TLS/plain → Hello(ID) → onay → aynı oturum.
+/// Şifre uçtan uca (iç handshake'te) gider, sunucu görmez.
+async fn net_loop_rv(
+    server: &str,
+    fp: Option<String>,
+    id: &str,
+    password: &str,
+    shared: Arc<Mutex<Shared>>,
+    rx_out: UnboundedReceiver<Packet>,
+    disconnect: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    use remote_friend_common::io::{read_rv, write_rv};
+    use remote_friend_common::RvMsg;
+    shared.lock().unwrap().status = format!("sunucuya bağlanılıyor ({server})...").into();
+    let (rd, wr, mode): (BoxRd, BoxWr, &'static str) = if let Some(fp) = fp {
+        let s = remote_friend_common::tls::tls_connect(server, server.split(':').next().unwrap_or("rv"), Some(fp)).await?;
+        let (r, w) = tokio::io::split(s);
+        (Box::new(r), Box::new(w), "TLS")
+    } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+        let s = tokio::net::TcpStream::connect(server).await?;
+        let (r, w) = s.into_split();
+        (Box::new(r), Box::new(w), "DÜZ")
+    } else {
+        anyhow::bail!("TLS fingerprint yok: sunucu ayarında FP gir ya da test için RF_PLAIN_OK=1");
+    };
+    let _ = mode;
+    let mut rd = rd;
+    let mut wr = wr;
+    write_rv(&mut wr, &RvMsg::Hello { id: id.to_string() }).await?;
+    loop {
+        match read_rv(&mut rd).await? {
+            RvMsg::Accepted => break,
+            RvMsg::Rejected(m) => {
+                shared.lock().unwrap().status = format!("reddedildi: {m}");
+                anyhow::bail!("reject: {m}");
+            }
+            RvMsg::WaitApproval => {
+                shared.lock().unwrap().status = "host onayı bekleniyor...".into();
+            }
+            _ => {}
+        }
+    }
+    run_session(rd, wr, password, shared, rx_out, disconnect).await
+}
+
+type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+/// El sıkışma + onay + video/input döngüleri (her transport için ortak).
+async fn run_session<R, W>(
+    mut rd: R,
+    mut wr: W,
+    password: &str,
+    shared: Arc<Mutex<Shared>>,
+    mut rx_out: UnboundedReceiver<Packet>,
+    mut disconnect: tokio::sync::watch::Receiver<bool>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
+    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
+{
     let hs = Packet::Handshake(Handshake {
         version: PROTOCOL_VERSION,
         password: password.to_string(),
         want_video: true,
         want_input: true,
     });
-    write_packet(&mut socket, &hs).await?;
+    write_packet(&mut wr, &hs).await?;
     // Accept / Reject / WaitingForApproval döngüsü
     loop {
-        let resp = read_packet(&mut socket).await?;
+        let resp = read_packet(&mut rd).await?;
         match resp {
             Packet::Accept => {
                 shared.lock().unwrap().status = "bağlı".into();
@@ -123,17 +189,20 @@ async fn net_loop(
         }
     }
 
-    let (mut rd, mut wr) = socket.into_split();
-
     // gönderici (async recv: thread'i kilitlemez)
+    // Not: ham u32 yazımı (framing) run_session'a özel; write_packet'e dokunmaz.
+    let wr = Arc::new(tokio::sync::Mutex::new(wr));
+    let wr2 = wr.clone();
     tokio::spawn(async move {
         while let Some(p) = rx_out.recv().await {
             let buf = match remote_friend_common::encode(&p) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            if wr.write_u32(buf.len() as u32).await.is_err() { break; }
-            if wr.write_all(&buf).await.is_err() { break; }
+            let mut g = wr2.lock().await;
+            use tokio::io::AsyncWriteExt;
+            if g.write_u32(buf.len() as u32).await.is_err() { break; }
+            if g.write_all(&buf).await.is_err() { break; }
         }
     });
 
@@ -247,6 +316,7 @@ struct App {
     // login ekranı
     host_field: String,
     pass_field: String,
+    server_field: String,
     login_msg: String,
     // viewer (connect sonrası)
     shared: Option<Arc<Mutex<Shared>>>,
@@ -266,12 +336,43 @@ struct App {
 
 impl App {
     /// Bağlan düğmesi / otomatik bağlanma: net thread'i başlat, görüntüye geç.
+    /// 9 hane rakam = internet ID'si (VPS üzerinden), yoksa LAN adresi.
     fn connect(&mut self) {
         let host = self.host_field.trim().to_string();
         let password = self.pass_field.clone();
         if host.is_empty() {
             self.login_msg = "Adres boş olamaz.".into();
             return;
+        }
+        // ID mi adres mi?
+        let digits: String = host.chars().filter(|c| c.is_ascii_digit()).collect();
+        let via_rv = digits.len() == 9 && !host.contains(':') && !host.contains('.');
+        // rendezvous sunucusu: alan > env > config
+        let server = if via_rv {
+            let f = self.server_field.trim().to_string();
+            if !f.is_empty() {
+                Some(f)
+            } else {
+                std::env::var("RF_RV_SERVER").ok().filter(|s| !s.is_empty()).or_else(|| {
+                    let c = remote_friend_common::identity::load_rv_config();
+                    if c.server.is_empty() { None } else { Some(c.server) }
+                })
+            }
+        } else {
+            None
+        };
+        if via_rv && server.is_none() {
+            self.login_msg = "İnternet için sunucu adresi gir (Sunucu satırı) ya da RF_RV_SERVER ver.".into();
+            return;
+        }
+        // sunucuyu hatırla
+        if let Some(ref s) = server {
+            let mut cfg = remote_friend_common::identity::load_rv_config();
+            if cfg.server != *s {
+                cfg.server = s.clone();
+                remote_friend_common::identity::save_rv_config(&cfg);
+            }
+            self.server_field = s.clone();
         }
         tracing::info!("bağlanılıyor: {host}");
         let shared = Arc::new(Mutex::new(Shared {
@@ -291,7 +392,16 @@ impl App {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                if let Err(e) = net_loop(&host_c, &password, sh.clone(), rx_out, dc_rx).await {
+                let r = if via_rv {
+                    let fp = std::env::var("RF_RV_FP").ok().filter(|s| !s.is_empty()).or_else(|| {
+                        let c = remote_friend_common::identity::load_rv_config();
+                        if c.fp.is_empty() { None } else { Some(c.fp) }
+                    });
+                    net_loop_rv(&server.unwrap(), fp, &digits, &password, sh.clone(), rx_out, dc_rx).await
+                } else {
+                    net_loop(&host_c, &password, sh.clone(), rx_out, dc_rx).await
+                };
+                if let Err(e) = r {
                     sh.lock().unwrap().status = format!("hata: {e:#}");
                     tracing::warn!("net kapandı: {e:#}");
                 }
@@ -355,23 +465,31 @@ impl App {
             ui.small("Aynı ağdaki bilgisayarlar otomatik bulunur. Bağlantı için host onayı şarttır.");
             ui.add_space(8.0);
 
-            // adres satırı
+            // adres satırı (9 hane = internet ID'si, yoksa LAN adresi)
             ui.horizontal(|ui| {
-                ui.label("Adres:");
+                ui.label("Adres/ID:");
                 let addr_resp = ui.add(
                     egui::TextEdit::singleline(&mut self.host_field)
-                        .hint_text("192.168.1.20:33200")
-                        .desired_width(220.0),
+                        .hint_text("123 456 789 ya da 192.168.1.20:33200")
+                        .desired_width(240.0),
                 );
                 ui.label("Şifre:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.pass_field)
                         .password(true)
-                        .desired_width(100.0),
+                        .desired_width(90.0),
                 );
                 if ui.button("➡ Bağlan").clicked() || (addr_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                     self.connect();
                 }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Sunucu:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.server_field)
+                        .hint_text("VPS_IP:33202 (sadece internet ID için)")
+                        .desired_width(240.0),
+                );
             });
             if !self.login_msg.is_empty() {
                 ui.small(&self.login_msg);
@@ -705,26 +823,11 @@ fn egui_key_to_remote(k: egui::Key) -> Option<RemoteKey> {
     })
 }
 
-async fn read_packet(s: &mut tokio::net::TcpStream) -> Result<Packet> {
-    let len = s.read_u32().await? as usize;
-    let mut buf = vec![0u8; len];
-    s.read_exact(&mut buf).await?;
-    Ok(remote_friend_common::decode(&buf)?)
-}
-
-async fn read_packet_split(r: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Packet> {
-    let len = r.read_u32().await? as usize;
-    if len > 20_000_000 {
-        anyhow::bail!("paket çok büyük");
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await?;
-    Ok(remote_friend_common::decode(&buf)?)
-}
-
-async fn write_packet(s: &mut tokio::net::TcpStream, p: &Packet) -> Result<()> {
-    let buf = remote_friend_common::encode(p)?;
-    s.write_u32(buf.len() as u32).await?;
-    s.write_all(&buf).await?;
-    Ok(())
+// Framed paket IO ortak modülden. read_packet_split eski adı korur.
+use remote_friend_common::io::{read_packet, write_packet};
+async fn read_packet_split<R>(r: &mut R) -> anyhow::Result<Packet>
+where
+    R: tokio::io::AsyncReadExt + Unpin,
+{
+    read_packet(r).await
 }

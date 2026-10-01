@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/common", "crates/host", "crates/client"]
+members = ["crates/common", "crates/host", "crates/client", "crates/rendezvous"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -18,3 +18,5 @@ hostname = "0.4"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
