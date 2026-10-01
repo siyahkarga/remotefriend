@@ -153,12 +153,18 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
 /// Başlık H264 ile aynı: w(u32 LE) + h(u32 LE) + JPEG baytları.
 async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>) {
     use image::codecs::jpeg::JpegEncoder;
+    // Kalite: RF_JPEG_Q (30-95, varsayılan 72). Yüksek = net yazı, düşük fps.
+    let quality: u8 = std::env::var("RF_JPEG_Q")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&q| (30..=95).contains(&q))
+        .unwrap_or(72);
     loop {
         match super::capture_rgba() {
             Ok((w, h, rgba)) => {
                 let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
                 let mut jpeg = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg, 60);
+                let mut enc = JpegEncoder::new_with_quality(&mut jpeg, quality);
                 use image::RgbImage;
                 match RgbImage::from_raw(w, h, rgb) {
                     Some(img) => {
