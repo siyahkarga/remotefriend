@@ -52,6 +52,7 @@ fn enable_dpi_awareness() {
 #[tokio::main]
 async fn main() -> Result<()> {
     enable_dpi_awareness();
+    remote_friend_common::tls::init_crypto();
     tracing_subscriber::fmt::init();
     let password = std::env::var("REMOTE_FRIEND_PASS").unwrap_or("1234".into());
     let pc_name = hostname::get()

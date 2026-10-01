@@ -4,6 +4,12 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+
+/// rustls kripto sağlayıcısını açıkça kur (ring). TLS kullanan her binary
+/// başında bir kez çağırılmalı (yoksa "Could not determine CryptoProvider").
+pub fn init_crypto() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
 use tokio_rustls::rustls;
 
 #[derive(Debug)]

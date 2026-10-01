@@ -29,6 +29,7 @@ struct Shared {
 }
 
 fn main() -> Result<()> {
+    remote_friend_common::tls::init_crypto();
     tracing_subscriber::fmt::init();
     let args: Vec<String> = std::env::args().collect();
     let def_host = args.get(1).cloned().unwrap_or(String::new());

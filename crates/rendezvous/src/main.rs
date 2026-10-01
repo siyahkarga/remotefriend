@@ -267,6 +267,7 @@ async fn reject_pending(state: &Arc<State>, client_tag: &str, msg: &str) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    remote_friend_common::tls::init_crypto();
     tracing_subscriber::fmt::init();
     let port: u16 = std::env::var("RF_RV_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(RENDEZVOUS_PORT);
     let web_port: u16 = std::env::var("RF_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8080);
