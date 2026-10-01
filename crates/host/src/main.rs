@@ -2,6 +2,8 @@
 //! Native TCP + tarayıcı için HTTP/WebSocket sunar.
 
 mod web;
+#[cfg(target_os = "linux")]
+mod capture_pw;
 
 use anyhow::{Context, Result};
 use remote_friend_common::{Packet, VideoCodec, VideoFrame};
@@ -54,6 +56,8 @@ async fn main() -> Result<()> {
     enable_dpi_awareness();
     remote_friend_common::tls::init_crypto();
     tracing_subscriber::fmt::init();
+    #[cfg(target_os = "linux")]
+    capture_pw::ensure_started();
     let password = std::env::var("REMOTE_FRIEND_PASS").unwrap_or("1234".into());
     let pc_name = hostname::get()
         .map(|s| s.to_string_lossy().into_owned())
@@ -433,13 +437,52 @@ async fn dial_back(target: &RvTarget, token: u64, kind: &str, password: &str) {
 
 /// Ekran görüntüsü: RGBA + H264 için çift boyut garantili.
 /// Dönen boyutlar her zaman çifttir (YUV420 şartı).
+/// Wayland'da önce sessiz PipeWire akışı denenir (deklanşör sesi yok),
+/// hazır değilse klasik xcap yoluna düşülür.
 pub(crate) fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
+    // CI/test için sentetik kare (portal/xcap yok): renk zamanla kayar.
+    if std::env::var("RF_TEST_PATTERN").map(|v| v == "1").unwrap_or(false) {
+        let (w, h) = (960u32, 540u32);
+        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u32;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.push((x * 255 / w) as u8);
+                rgba.push((y * 255 / h) as u8);
+                rgba.push((t / 40 % 256) as u8);
+                rgba.push(255);
+            }
+        }
+        return Ok((w, h, rgba));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((w, h, rgba)) = capture_pw::try_get_frame() {
+        if let Some(img) = image::ImageBuffer::from_raw(w, h, rgba) {
+            return finish_rgba(img, 1.0, 0, 0);
+        }
+    }
+    // Wayland + portal izni beklenirken xcap'e düşme (deklanşör sesi yok):
+    // çağrıcı bu hatada kare atlar, izin gelince sessiz akış başlar.
+    #[cfg(target_os = "linux")]
+    if capture_pw::portal_pending() {
+        anyhow::bail!("portal izni bekleniyor (sessiz)");
+    }
     let monitors = xcap::Monitor::all().context("monitör listesi alınamadı")?;
     let mon = monitors.into_iter().next().context("monitör yok")?;
     let scale = mon.scale_factor().unwrap_or(1.0);
     let scale = if scale > 0.0 { scale } else { 1.0 };
     let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
     let img = mon.capture_image().context("ekran yakalanamadı")?;
+    finish_rgba(img, scale, mx, my)
+}
+
+/// Ortak son işlem: 1080p üstünü küçült + çift boyuta kırp + GEO kaydet.
+fn finish_rgba(
+    img: image::RgbaImage,
+    scale: f32,
+    mx: i32,
+    my: i32,
+) -> Result<(u32, u32, Vec<u8>)> {
     let (w, h) = (img.width(), img.height());
 
     let img = if w > MAX_W {

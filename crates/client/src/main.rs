@@ -70,6 +70,7 @@ fn main() -> Result<()> {
         current_addr: String::new(),
         current_name: String::new(),
         thumb_saved: false,
+        screen_tex: None,
     };
     if auto {
         app.connect();
@@ -333,6 +334,8 @@ struct App {
     current_addr: String,
     current_name: String,
     thumb_saved: bool,
+    // tek GPU texture (sızıntıyı önler)
+    screen_tex: Option<egui::TextureHandle>,
 }
 
 impl App {
@@ -421,6 +424,7 @@ impl App {
         self.current_addr = host;
         self.current_name = known_name;
         self.thumb_saved = false;
+        self.screen_tex = None;
         self.shared = Some(shared);
         self.tx_out = Some(tx_out);
         self.disconnect_tx = Some(dc_tx);
@@ -621,7 +625,18 @@ impl App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some((img, _w, _h)) = img_opt {
-                let tex = ui.ctx().load_texture("screen", img, egui::TextureOptions::LINEAR);
+                // TEK texture: her frame yenisini açmak GB'larca sızdırır!
+                let [iw, ih] = img.size;
+                let same = self.screen_tex.as_ref().is_some_and(|t| t.size() == [iw, ih]);
+                if !same {
+                    self.screen_tex = Some(ui.ctx().load_texture(
+                        "screen",
+                        egui::ColorImage::example(),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                let tex = self.screen_tex.as_mut().unwrap();
+                tex.set(img, egui::TextureOptions::LINEAR);
                 // resmi panele sığdır
                 let avail = ui.available_size();
                 let img_size = tex.size_vec2();

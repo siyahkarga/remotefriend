@@ -20,6 +20,10 @@ son bağlantılar hatırlanır. ⛔ Kes ile çıkılır.
 - Her bağlantı host ONAYI ister (E/H, 30 sn, varsayılan ret). Onaysız yayın başlamaz.
 - Bir host'a aynı anda birden fazla izleyici bağlanabilir.
 - v0.4.0 protokolü değiştirdi: iki taraf da v0.4.0 olmalı.
+- Linux/Wayland: host ilk açılışta BİR kez "Ekranı paylaş?" diye sorar (sistem
+  izni). Onayla → izin hatırlanır, sonraki açılışlar sessizdir. İzin gelene
+  kadar görüntü gitmez ama bağlantı kopmaz; reddedilirse klasik yakalamaya
+  düşülür.
 
 ## Ortam değişkenleri (host)
 - `REMOTE_FRIEND_PASS` — şifre (varsayılan 1234)

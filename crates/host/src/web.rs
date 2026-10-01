@@ -56,16 +56,17 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
     let (sink, mut stream) = socket.split();
     let tx = Arc::new(Mutex::new(sink));
 
-    // 1. hello (15 sn)
+    // 1. hello (15 sn). WebCodecs'siz tarayıcı (ya da Firefox) JPEG ister.
     let hello = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
-    let password_ok = match hello {
+    let (password_ok, want_jpeg) = match hello {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<serde_json::Value>(&t) {
-            Ok(v) => {
-                v.get("password").and_then(|p| p.as_str()).unwrap_or("") == state.password
-            }
-            Err(_) => false,
+            Ok(v) => (
+                v.get("password").and_then(|p| p.as_str()).unwrap_or("") == state.password,
+                v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false),
+            ),
+            Err(_) => (false, false),
         },
-        _ => false,
+        _ => (false, false),
     };
     if !password_ok {
         let _ = ws_send_text(&tx, r#"{"t":"reject","msg":"şifre hatalı"}"#).await;
@@ -81,12 +82,20 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
         let _ = ws_send_text(&tx, r#"{"t":"reject","msg":"host bağlantıyı reddetti"}"#).await;
         return;
     }
-    let _ = ws_send_text(&tx, r#"{"t":"welcome"}"#).await;
-    tracing::info!("tarayıcı client kabul edildi");
+    if want_jpeg {
+        let _ = ws_send_text(&tx, r#"{"t":"welcome","jpeg":true}"#).await;
+    } else {
+        let _ = ws_send_text(&tx, r#"{"t":"welcome"}"#).await;
+    }
+    tracing::info!("tarayıcı client kabul edildi (jpeg={want_jpeg})");
 
-    // 3. video gönderici
+    // 3. video gönderici (H264 WebCodecs ya da düz JPEG)
     let tx2 = tx.clone();
     let video_task = tokio::spawn(async move {
+        if want_jpeg {
+            jpeg_loop(tx2).await;
+            return;
+        }
         let mut h264 = super::H264Enc::new();
         let mut err_n = 0u32;
         loop {
@@ -140,6 +149,43 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
     tracing::info!("tarayıcı client ayrıldı ({ts})");
 }
 
+/// WebCodecs'siz tarayıcılar için düz JPEG akışı (her kare bağımsız resim).
+/// Başlık H264 ile aynı: w(u32 LE) + h(u32 LE) + JPEG baytları.
+async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>) {
+    use image::codecs::jpeg::JpegEncoder;
+    loop {
+        match super::capture_rgba() {
+            Ok((w, h, rgba)) => {
+                let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
+                let mut jpeg = Vec::new();
+                let mut enc = JpegEncoder::new_with_quality(&mut jpeg, 60);
+                use image::RgbImage;
+                match RgbImage::from_raw(w, h, rgb) {
+                    Some(img) => {
+                        let _ = enc.encode_image(&img);
+                        let mut msg = Vec::with_capacity(jpeg.len() + 8);
+                        msg.extend_from_slice(&w.to_le_bytes());
+                        msg.extend_from_slice(&h.to_le_bytes());
+                        msg.extend_from_slice(&jpeg);
+                        let mut g = tx.lock().await;
+                        if g.send(Message::Binary(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("capture hatası: {e:#}");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(super::FPS_MS)).await;
+    }
+}
+/// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
 /// Dial-back hattı üzerinden web oturumu (VPS internet yolu).
 /// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
 pub(crate) async fn session_kmsg<R, W>(rd: R, wr: W)

@@ -120,6 +120,7 @@ const $ = id => document.getElementById(id);
 const pill = $('pill'), errBox = $('err'), errMsg = $('errMsg'), meta = $('meta');
 const canvas = $('screen'), ctx = canvas.getContext('2d');
 let ws = null, connected = false, mode = 'id';
+let useJpeg = false; // WebCodecs yoksa host JPEG gönderir (her tarayıcıda çalışır)
 let decoder = null, sps = null, pps = null, cfgW = 0, cfgH = 0, hostW = 0, hostH = 0;
 let frames = 0, fpsT = 0, ts = 0;
 const FALLBACK_CODECS = ['avc1.420028', 'avc1.4D0028', 'avc1.640028'];
@@ -212,31 +213,38 @@ function connect() {
   ws = new WebSocket(proto + base + '/ws');
   ws.binaryType = 'arraybuffer';
   ws._mode = mode; ws._id = t.id;
-  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', password: pw, id: t.id || undefined }));
+  const noWc = (typeof VideoDecoder === 'undefined');
+  const forceJpeg = new URLSearchParams(location.search).has('jpeg');
+  ws._done = false;
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', password: pw, id: t.id || undefined, jpeg: (noWc || forceJpeg) || undefined }));
   ws.onclose = () => onClose('Bağlantı kapandı (host kapalı ya da onay vermedi).');
   ws.onerror = () => onClose('Bağlanamadı. Adres/kod ve ağını kontrol et.');
   ws.onmessage = onMsg;
 }
-function disconnect() { if (ws) ws.close(); }
+function disconnect() { if (ws) { ws._silent = true; ws.close(); } }
 function onClose(msg) {
+  if (ws && ws._done) return; // zaten gösterildi
+  if (ws) ws._done = true;
+  const silent = ws && ws._silent;
   const was = connected;
   connected = false;
   if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
-  sps = pps = null; cfgW = cfgH = 0;
+  sps = pps = null; cfgW = cfgH = 0; useJpeg = false;
   $('view').style.display = 'none';
   $('loginCard').style.display = 'block';
   setPill('hazır', '');
-  if (msg && (was || !$('view').dataset.ok)) showErr(msg);
+  if (msg && !silent && (was || !$('view').dataset.ok)) showErr(msg);
   delete $('view').dataset.ok;
 }
 
 function onMsg(ev) {
   if (typeof ev.data === 'string') {
     const m = JSON.parse(ev.data);
-    if (m.t === 'reject') { ws.close(); onClose('Reddedildi: ' + (m.msg || '')); }
+    if (m.t === 'reject') { onClose('Reddedildi: ' + (m.msg || '')); ws.close(); }
     else if (m.t === 'wait') { setPill('host onayı bekleniyor...', 'wait', true); }
     else if (m.t === 'welcome') {
       connected = true;
+      useJpeg = !!m.jpeg;
       $('view').dataset.ok = '1';
       hideErr();
       $('loginCard').style.display = 'none';
@@ -251,6 +259,7 @@ function onMsg(ev) {
   }
   const buf = new Uint8Array(ev.data);
   if (buf.length < 12) return;
+  if (useJpeg) { feedJpeg(buf.subarray(8)); return; }
   const dv = new DataView(ev.data, 0, 8);
   hostW = dv.getUint32(0, true); hostH = dv.getUint32(4, true);
   if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
@@ -329,7 +338,7 @@ function ensureDecoder() {
 }
 
 function feed(annexb) {
-  if (typeof VideoDecoder === 'undefined') { showErr('WebCodecs yok. Chrome/Edge ile aç.'); ws.close(); return; }
+  if (typeof VideoDecoder === 'undefined') { showErr('Bu tarayıcıda H264 çözücü yok ve sunucu eski (JPEG modu yok). Chrome/Edge ile dene ya da hostu güncelle.'); return; }
   const nals = splitNals(annexb);
   let hasVcl = false;
   for (const n of nals) {
@@ -345,6 +354,22 @@ function feed(annexb) {
   try {
     decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts++, data: avcc }));
   } catch (e) {}
+}
+
+// WebCodecs'siz tarayıcı yolu: her binary bir JPEG resimdir.
+function feedJpeg(bytes) {
+  createImageBitmap(new Blob([bytes], { type: 'image/jpeg' })).then(bmp => {
+    hostW = bmp.width; hostH = bmp.height;
+    if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    frames++;
+    const now = performance.now();
+    if (now - fpsT >= 1000) {
+      meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps (JPEG)';
+      frames = 0; fpsT = now;
+    }
+  }).catch(() => {});
 }
 
 function drawFrame(f) {

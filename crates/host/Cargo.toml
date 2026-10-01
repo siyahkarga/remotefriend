@@ -23,3 +23,10 @@ base64 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_HiDpi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wayland sessiz yakalama (Portal ScreenCast + PipeWire). Xorg'da xcap yeterli.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "pipewire"] }
+pipewire = "0.9"
+memmap2 = "0.9"
+libc = "0.2"
