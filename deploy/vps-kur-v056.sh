@@ -6,8 +6,14 @@ set -euo pipefail
 
 VERSION="v0.5.6"
 REPO="https://github.com/siyahkarga/remotefriend"
-# Bu VPS'in dış IP'si (nginx sadece buna bakar). Farklıysa: SERVER_IP=x.x.x.x ... | sudo bash
-SERVER_IP="${SERVER_IP:-169.58.37.61}"
+# Bu VPS'in dış IP'si otomatik bulunur (repoda IP yazmaz).
+# Bulunamazsa: SERVER_IP=x.x.x.x curl ... | sudo bash
+SERVER_IP="${SERVER_IP:-$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null || true)}"
+if [ -z "$SERVER_IP" ]; then
+  echo "Dış IP bulunamadı. Şöyle çalıştır:" >&2
+  echo "  curl -sL ... | sudo SERVER_IP=x.x.x.x bash" >&2
+  exit 1
+fi
 INSTALL_DIR="/opt/remotefriend"
 DATA_DIR="/var/lib/remotefriend"
 SERVICE_FILE="/etc/systemd/system/remotefriend.service"
