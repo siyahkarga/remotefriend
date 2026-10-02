@@ -136,6 +136,9 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
 
     let _listener = stream
         .add_local_listener_with_user_data(())
+        .state_changed(|_, _, old, new| {
+            tracing::info!("pipewire stream durumu: {old:?} -> {new:?}");
+        })
         .param_changed(|_, _, id, param| {
             let Some(param) = param else { return };
             if id != spa::param::ParamType::Format.as_raw() {
@@ -251,9 +254,9 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
             Choice,
             Range,
             Fraction,
-            spa::utils::Fraction { num: 30, denom: 1 },
-            spa::utils::Fraction { num: 5, denom: 1 },
-            spa::utils::Fraction { num: 60, denom: 1 }
+            spa::utils::Fraction { num: 15, denom: 1 },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            spa::utils::Fraction { num: 30, denom: 1 }
         ),
     );
     let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
@@ -272,6 +275,10 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
         pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
         &mut params,
     )?;
+    // Bağlantı sonrası akışı açıkça başlat; yoksa düğüm suspended kalabilir.
+    if let Err(e) = stream.set_active(true) {
+        tracing::warn!("pipewire activate başarısız: {e:#}");
+    };
     tracing::info!("pipewire stream bağlandı, sessiz kareler alınıyor");
     mainloop.run();
     Ok(())
