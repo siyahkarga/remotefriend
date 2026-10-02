@@ -50,12 +50,17 @@ pub fn ensure_started() {
     });
 }
 
-/// Çağrıcı (capture_rgba) her karede buraya bakar. Frame hazırsa kullanır.
+/// Çağrıcı en yeni kareyi sahipliğiyle alır; çok MB'lık RGBA tamponu her
+/// tick'te kopyalanmaz. Yeni kare henüz gelmediyse None döner.
 pub fn try_get_frame() -> Option<(u32, u32, Vec<u8>)> {
     if !READY.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    LATEST.lock().ok()?.clone()
+    LATEST.lock().ok()?.take()
+}
+
+pub fn is_ready() -> bool {
+    READY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Portal hâlâ izin turundaysa true: çağrıcı kare atlayıp bekler
@@ -246,9 +251,9 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
             Choice,
             Range,
             Fraction,
-            spa::utils::Fraction { num: 15, denom: 1 },
-            spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction { num: 30, denom: 1 }
+            spa::utils::Fraction { num: 30, denom: 1 },
+            spa::utils::Fraction { num: 5, denom: 1 },
+            spa::utils::Fraction { num: 60, denom: 1 }
         ),
     );
     let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
@@ -285,7 +290,13 @@ fn load_restore_token() -> Option<String> {
 }
 
 fn save_restore_token(t: &str) {
-    let _ = std::fs::write(token_path(), t);
+    let path = token_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = remote_friend_common::identity::write_private(&path, t.as_bytes()) {
+        tracing::warn!("pipewire restore token yazılamadı: {e}");
+    }
 }
 
 /// MemFd'yi salt-okunur map'le. fd pool'a ait, dup'lanıp hemen kapatılır.
@@ -325,7 +336,8 @@ fn convert_row(
     if stride < (w as usize) * 4 {
         return None;
     }
-    let need = offset + stride * (h as usize);
+    let rows = stride.checked_mul(h as usize)?;
+    let need = offset.checked_add(rows)?;
     if mem.len() < need {
         return None;
     }

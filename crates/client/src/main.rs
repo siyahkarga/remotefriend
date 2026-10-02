@@ -1,12 +1,13 @@
 //! Client: izleyen + kontrol eden taraf.
-//! JPEG decode + eframe görüntü + mouse/klavye gönder + dosya gönder.
+//! H.264/JPEG decode + eframe görüntü + mouse/klavye gönder + dosya gönder.
 
 use anyhow::{Context, Result};
 use remote_friend_common::{Handshake, InputEvent, MouseButton, Packet, FileChunk, RemoteKey, PROTOCOL_VERSION};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::io::Read as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 mod history;
 use history::RecentEntry;
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args: Vec<String> = std::env::args().collect();
     let def_host = args.get(1).cloned().unwrap_or(String::new());
-    let def_pass = args.get(2).cloned().unwrap_or("1234".into());
+    let def_pass = args.get(2).cloned().unwrap_or_default();
     let auto = args.len() > 1;
 
     // LAN discovery dinleyici (bulunanlar listeye düşer)
@@ -89,7 +90,7 @@ async fn net_loop(
     host: &str,
     password: &str,
     shared: Arc<Mutex<Shared>>,
-    rx_out: UnboundedReceiver<Packet>,
+    rx_out: Receiver<Packet>,
     disconnect: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let socket = tokio::time::timeout(
@@ -103,15 +104,15 @@ async fn net_loop(
     run_session(rd, wr, password, shared, rx_out, disconnect).await
 }
 
-/// İnternet (VPS) yolu: TLS/plain → Hello(ID) → onay → aynı oturum.
-/// Şifre uçtan uca (iç handshake'te) gider, sunucu görmez.
+/// İnternet (VPS) yolu: TLS/plain → Hello(ID+auth) → onay → aynı oturum.
+/// Not: TLS VPS'te sonlanır; mevcut relay tasarımında VPS operatörü trafiği görebilir.
 async fn net_loop_rv(
     server: &str,
     fp: Option<String>,
     id: &str,
     password: &str,
     shared: Arc<Mutex<Shared>>,
-    rx_out: UnboundedReceiver<Packet>,
+    rx_out: Receiver<Packet>,
     disconnect: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     use remote_friend_common::io::{read_rv, write_rv};
@@ -122,7 +123,12 @@ async fn net_loop_rv(
         let (r, w) = tokio::io::split(s);
         (Box::new(r), Box::new(w), "TLS")
     } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
-        let s = tokio::net::TcpStream::connect(server).await?;
+        let s = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::TcpStream::connect(server),
+        )
+        .await
+        .context("rendezvous TCP bağlantı zaman aşımı")??;
         let (r, w) = s.into_split();
         (Box::new(r), Box::new(w), "DÜZ")
     } else {
@@ -131,7 +137,7 @@ async fn net_loop_rv(
     let _ = mode;
     let mut rd = rd;
     let mut wr = wr;
-    write_rv(&mut wr, &RvMsg::Hello { id: id.to_string() }).await?;
+    write_rv(&mut wr, &RvMsg::Hello { id: id.to_string(), auth: Some(password.to_string()) }).await?;
     loop {
         match read_rv(&mut rd).await? {
             RvMsg::Accepted => break,
@@ -157,7 +163,7 @@ async fn run_session<R, W>(
     mut wr: W,
     password: &str,
     shared: Arc<Mutex<Shared>>,
-    mut rx_out: UnboundedReceiver<Packet>,
+    mut rx_out: Receiver<Packet>,
     mut disconnect: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()>
 where
@@ -197,19 +203,15 @@ where
     let wr2 = wr.clone();
     tokio::spawn(async move {
         while let Some(p) = rx_out.recv().await {
-            let buf = match remote_friend_common::encode(&p) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
             let mut g = wr2.lock().await;
-            use tokio::io::AsyncWriteExt;
-            if g.write_u32(buf.len() as u32).await.is_err() { break; }
-            if g.write_all(&buf).await.is_err() { break; }
+            if remote_friend_common::io::write_packet(&mut *g, &p).await.is_err() {
+                break;
+            }
         }
     });
 
     // alıcı: video (bağlantı başına taze decoder: P-frame'ler için şart)
-    let mut last = SystemTime::now();
+    let mut last = Instant::now();
     let mut n = 0u32;
     let mut total = 0u64;
     let mut h264 = H264Dec::new()?;
@@ -248,20 +250,23 @@ where
             let mut s = shared.lock().unwrap();
             s.host_w = f.width;
             s.host_h = f.height;
+            // Sadece en yeni kare tutulur. UI henüz tüketmediyse eski kare burada düşer;
+            // böylece görüntü kuyruğu büyüyüp saniyeler geriden gelmez.
             s.texture = Some((img, f.width, f.height));
-            let el = last.elapsed().unwrap().as_secs_f32();
+            let el = last.elapsed().as_secs_f32();
             if el >= 1.0 {
                 s.fps = n as f32 / el;
                 n = 0;
-                last = SystemTime::now();
-            }
-            if total % 50 == 0 {
-                tracing::info!("video akiyor: toplam {total} frame");
+                last = Instant::now();
             }
             if !first_frame {
                 first_frame = true;
-                // ilk görüntü geldi: recent kaydı için işareti UI tarafı okur
-                shared.lock().unwrap().status = "bağlı".into();
+                // Aynı Mutex yeniden kilitlenmemeli; aksi halde ilk karede deadlock olur.
+                s.status = "bağlı".into();
+            }
+            drop(s);
+            if total % 50 == 0 {
+                tracing::info!("video akiyor: toplam {total} frame");
             }
         }
             }
@@ -322,7 +327,7 @@ struct App {
     login_msg: String,
     // viewer (connect sonrası)
     shared: Option<Arc<Mutex<Shared>>>,
-    tx_out: Option<UnboundedSender<Packet>>,
+    tx_out: Option<Sender<Packet>>,
     disconnect_tx: Option<tokio::sync::watch::Sender<bool>>,
     last_mouse: Option<(u32, u32)>,
     mods: [bool; 4], // shift, ctrl, alt, meta (basılı mı)
@@ -386,7 +391,7 @@ impl App {
             host_h: 0,
             fps: 0.0,
         }));
-        let (tx_out, rx_out) = unbounded_channel::<Packet>();
+        let (tx_out, rx_out) = channel::<Packet>(256);
         let (dc_tx, dc_rx) = tokio::sync::watch::channel(false);
         let sh = shared.clone();
         let host_c = host.clone();
@@ -434,7 +439,7 @@ impl App {
         self.screen = Screen::Viewer;
     }
 
-    fn tx(&self) -> Option<UnboundedSender<Packet>> {
+    fn tx(&self) -> Option<Sender<Packet>> {
         self.tx_out.clone()
     }
 
@@ -445,6 +450,7 @@ impl App {
         }
         self.tx_out = None;
         self.shared = None;
+        self.screen_tex = None;
         self.login_msg = "Bağlantı kesildi.".into();
         self.screen = Screen::Login;
     }
@@ -584,10 +590,39 @@ impl App {
     fn viewer_ui(&mut self, ctx: &egui::Context) {
         let shared = self.shared.clone().unwrap();
         let tx = self.tx_out.clone().unwrap();
-        let (img_opt, status, hw, hh, fps) = {
-            let s = shared.lock().unwrap();
-            (s.texture.clone(), s.status.clone(), s.host_w, s.host_h, s.fps)
+        let (new_frame, status, hw, hh, fps) = {
+            let mut s = shared.lock().unwrap();
+            // Kareyi kopyalamak yerine sahipliğini UI'ya aktar. Bir 1080p RGBA kare yaklaşık
+            // 8 MiB'dir; clone etmek hem CPU hem bellek bant genişliğini gereksiz tüketir.
+            (s.texture.take(), s.status.clone(), s.host_w, s.host_h, s.fps)
         };
+
+        // Yalnızca gerçekten yeni kare geldiğinde GPU texture'ını güncelle.
+        if let Some((img, _w, _h)) = new_frame {
+            if !self.thumb_saved {
+                if let Some(fname) = history::save_thumb(&self.current_addr, &img) {
+                    if let Some(e) = self.recents.iter_mut().find(|e| e.addr == self.current_addr) {
+                        e.thumb = Some(fname);
+                        history::save_recents(&self.recents);
+                    }
+                }
+                self.thumb_saved = true;
+            }
+
+            let [iw, ih] = img.size;
+            let same = self.screen_tex.as_ref().is_some_and(|t| t.size() == [iw, ih]);
+            if same {
+                if let Some(tex) = self.screen_tex.as_mut() {
+                    tex.set(img, egui::TextureOptions::LINEAR);
+                }
+            } else {
+                self.screen_tex = Some(ctx.load_texture(
+                    "screen",
+                    img,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
 
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -604,93 +639,74 @@ impl App {
             });
         });
 
-        // ilk görüntü geldi mi? thumbnail kaydet (son bağlantılar için)
-        if !self.thumb_saved {
-            if let Some((img, _, _)) = img_opt.clone() {
-                if let Some(fname) = history::save_thumb(&self.current_addr, &img) {
-                    if let Some(e) = self.recents.iter_mut().find(|e| e.addr == self.current_addr) {
-                        e.thumb = Some(fname);
-                        history::save_recents(&self.recents);
-                    }
-                }
-                self.thumb_saved = true;
-            }
-        }
-
-        // hata durumu: mesaj + geri dön
         let failed = status.starts_with("hata")
             || status.starts_with("reddedildi")
             || status.starts_with("bağlantı koptu")
             || status.starts_with("bağlantı kesildi");
 
+        // TextureHandle klonu yalnızca küçük bir referans klonudur; piksel verisini kopyalamaz.
+        // Böylece closure içinde self'in input alanlarını güvenle değiştirebiliriz.
+        let display_tex = self.screen_tex.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some((img, _w, _h)) = img_opt {
-                // TEK texture: her frame yenisini açmak GB'larca sızdırır!
-                let [iw, ih] = img.size;
-                let same = self.screen_tex.as_ref().is_some_and(|t| t.size() == [iw, ih]);
-                if !same {
-                    self.screen_tex = Some(ui.ctx().load_texture(
-                        "screen",
-                        egui::ColorImage::example(),
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
-                let tex = self.screen_tex.as_mut().unwrap();
-                tex.set(img, egui::TextureOptions::LINEAR);
-                // resmi panele sığdır
+            if let Some(tex) = display_tex.as_ref() {
                 let avail = ui.available_size();
                 let img_size = tex.size_vec2();
                 let scale = (avail.x / img_size.x).min(avail.y / img_size.y).max(0.1);
                 let disp = img_size * scale;
                 let (rect, resp) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
 
-                ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                ui.painter().image(
+                    tex.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
 
-                // mouse -> host koordinatı
                 let to_host = |pos: egui::Pos2| -> Option<(u32, u32)> {
                     if hw == 0 || hh == 0 { return None; }
                     let p = pos - rect.min;
                     if p.x < 0.0 || p.y < 0.0 || p.x > rect.width() || p.y > rect.height() {
                         return None;
                     }
-                    Some(((p.x / rect.width() * hw as f32) as u32, (p.y / rect.height() * hh as f32) as u32))
+                    Some((
+                        (p.x / rect.width() * hw as f32) as u32,
+                        (p.y / rect.height() * hh as f32) as u32,
+                    ))
                 };
 
                 if let Some(pos) = resp.hover_pos() {
                     if let Some((x, y)) = to_host(pos) {
-                        // ayni koordinati spamleme: sadece degisince gonder
                         if self.last_mouse != Some((x, y)) {
                             self.last_mouse = Some((x, y));
-                            let _ = tx.send(Packet::Input(InputEvent::MouseMove { x, y }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
                         }
                     }
                 }
                 if resp.clicked() {
                     if let Some(p) = resp.interact_pointer_pos() {
                         if let Some((x, y)) = to_host(p) {
-                            let _ = tx.send(Packet::Input(InputEvent::MouseMove { x, y }));
-                            let _ = tx.send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Left }));
-                            let _ = tx.send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Left }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Left }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Left }));
                         }
                     }
                 }
                 if resp.secondary_clicked() {
                     if let Some(p) = resp.interact_pointer_pos() {
                         if let Some((x, y)) = to_host(p) {
-                            let _ = tx.send(Packet::Input(InputEvent::MouseMove { x, y }));
-                            let _ = tx.send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Right }));
-                            let _ = tx.send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Right }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Right }));
+                            let _ = tx.try_send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Right }));
                         }
                     }
                 }
 
-                // klavye: yazılabilir harfler Text ile, özel tuşlar Key ile (basma+bırakma)
                 let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
                 for ev in events {
                     match &ev {
                         egui::Event::Text(t) => {
                             for c in t.chars() {
-                                if c.is_control() { continue; } // Enter/Tab vb Key yolundan gider
+                                if c.is_control() { continue; }
                                 self.send_key(RemoteKey::Char(c), true);
                                 self.send_key(RemoteKey::Char(c), false);
                             }
@@ -702,8 +718,6 @@ impl App {
                             }
                         }
                         egui::Event::MouseWheel { unit, delta, .. } => {
-                            // imleç resim üstündeyken hosta kaydırma gönder
-                            // (egui +y = içerik aşağı = protokol +dy = aşağı, birebir)
                             if resp.hover_pos().is_some() {
                                 let mult = match unit {
                                     egui::MouseWheelUnit::Point => 1.0 / 50.0,
@@ -717,7 +731,7 @@ impl App {
                                 if dx != 0 || dy != 0 {
                                     self.scroll_acc.0 -= dx as f32;
                                     self.scroll_acc.1 -= dy as f32;
-                                    let _ = tx.send(Packet::Input(InputEvent::Scroll { dx, dy }));
+                                    let _ = tx.try_send(Packet::Input(InputEvent::Scroll { dx, dy }));
                                 }
                             }
                         }
@@ -725,7 +739,6 @@ impl App {
                     }
                 }
 
-                // modifierlar (basılı takibi)
                 let (mshift, mctrl, malt, mmeta) = ctx.input(|i| {
                     let m = &i.modifiers;
                     (m.shift, m.ctrl, m.alt, m.mac_cmd || (m.command && !m.ctrl))
@@ -751,14 +764,15 @@ impl App {
                 });
             }
         });
-        ctx.request_repaint_after(std::time::Duration::from_millis(66)); // ~15fps refresh
+        // Input gecikmesini düşürür; texture yalnızca yeni kare olduğunda güncellenir.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
 
 impl App {
     fn send_key(&self, key: RemoteKey, down: bool) {
         if let Some(tx) = self.tx() {
-            let _ = tx.send(Packet::Input(InputEvent::Key { key, down }));
+            let _ = tx.try_send(Packet::Input(InputEvent::Key { key, down }));
         }
     }
 
@@ -779,27 +793,66 @@ impl App {
     fn send_file(&self, path: std::path::PathBuf) {
         let Some(tx) = self.tx() else { return };
         std::thread::spawn(move || {
-            let data = match std::fs::read(&path) {
-                Ok(d) => d,
+            const CHUNK: usize = 64 * 1024;
+            const DEFAULT_MAX: u64 = 512 * 1024 * 1024;
+            let max = std::env::var("RF_MAX_FILE_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_MAX);
+            let total = match std::fs::metadata(&path) {
+                Ok(m) if m.is_file() => m.len(),
+                Ok(_) => {
+                    tracing::warn!("yalnızca normal dosya gönderilebilir");
+                    return;
+                }
                 Err(e) => {
-                    tracing::warn!("dosya okunamadı: {e}");
+                    tracing::warn!("dosya bilgisi okunamadı: {e}");
+                    return;
+                }
+            };
+            if total == 0 || total > max {
+                tracing::warn!("dosya boyutu sınır dışında: {total} (üst sınır {max})");
+                return;
+            }
+            let mut file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("dosya açılamadı: {e}");
                     return;
                 }
             };
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("dosya").to_string();
-            let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            let total = data.len() as u64;
-            for (i, chunk) in data.chunks(60_000).enumerate() {
-                let last = (i + 1) * 60_000 >= data.len();
+            let id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| (d.as_nanos() as u64).max(1))
+                .unwrap_or(1);
+            let mut offset = 0u64;
+            let mut buf = vec![0u8; CHUNK];
+            while offset < total {
+                let want = ((total - offset) as usize).min(CHUNK);
+                let n = match file.read(&mut buf[..want]) {
+                    Ok(0) => {
+                        tracing::warn!("dosya beklenenden erken bitti: {name}");
+                        return;
+                    }
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("dosya okunamadı: {e}");
+                        return;
+                    }
+                };
+                let end = offset + n as u64;
                 let fc = FileChunk {
                     transfer_id: id,
                     name: name.clone(),
-                    offset: (i * 60_000) as u64,
+                    offset,
                     total,
-                    data: chunk.to_vec(),
-                    last,
+                    data: buf[..n].to_vec(),
+                    last: end == total,
                 };
-                if tx.send(Packet::File(fc)).is_err() { break; }
+                if tx.blocking_send(Packet::File(fc)).is_err() { return; }
+                offset = end;
             }
             tracing::info!("dosya gönderildi: {name} ({total} byte)");
         });

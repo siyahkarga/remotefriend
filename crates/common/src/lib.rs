@@ -1,5 +1,5 @@
 //! Ortak protokol: host <-> client arası tüm mesajlar.
-//! MVP: bincode ile encode, QUIC stream üzerinden length-prefixed gönderim.
+//! Bincode ile encode, TCP/TLS akışında length-prefixed gönderim.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,14 +9,14 @@ pub mod tls;
 pub mod webapp;
 // Not: `discovery` bu dosyada inline tanımlı (aşağıda).
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 33200;
 
 /// Bağlantı kurarken ilk mesaj
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Handshake {
     pub version: u32,
-    pub password: String, // MVP: düz parola, sonra PAKE/Noise
+    pub password: String, // TLS/VPN dışında ağda düz görünür; LAN native yolunda dikkat
     pub want_video: bool,
     pub want_input: bool,
 }
@@ -123,28 +123,38 @@ pub enum Packet {
 }
 
 pub fn encode(packet: &Packet) -> anyhow::Result<Vec<u8>> {
-    Ok(bincode::serialize(packet)?)
+    use bincode::Options as _;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(packet)?)
 }
 
 pub fn decode(buf: &[u8]) -> anyhow::Result<Packet> {
-    Ok(bincode::deserialize(buf)?)
+    use bincode::Options as _;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(24_000_000)
+        .reject_trailing_bytes()
+        .deserialize(buf)?)
 }
 
-// ---- v0.3.0: şifreli QUIC + LAN otomatik bulma ----
+// ---- LAN otomatik bulma + transport nesli ----
 
 /// UDP discovery portu (broadcast beacon'lar)
 pub const DISCOVERY_PORT: u16 = 33201;
-/// QUIC portu (DEFAULT_PORT ile aynı)
-pub const QUIC_PORT: u16 = DEFAULT_PORT;
-/// Protokol nesli: v0.3.0 QUIC'e geçti, eski TCP clientlar reddedilir
-pub const TRANSPORT_GEN: u32 = 3;
+/// Native TCP portu (DEFAULT_PORT ile aynı)
+pub const NATIVE_PORT: u16 = DEFAULT_PORT;
+#[deprecated(note = "QUIC kullanılmıyor; NATIVE_PORT kullan")]
+pub const QUIC_PORT: u16 = NATIVE_PORT;
+/// Transport/protokol nesli; uyumsuz eski istemcileri ayırmak için.
+pub const TRANSPORT_GEN: u32 = 4;
 
 /// Host'un LAN'a yayınladığı kimlik
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Beacon {
     pub v: u32,          // TRANSPORT_GEN olmalı
     pub name: String,    // bilgisayar adı
-    pub port: u16,       // QUIC portu
+    pub port: u16,       // native TCP portu
     pub fp: String,      // TLS sertifika SHA256 fingerprint (TOFU)
     pub proto: u32,      // PROTOCOL_VERSION
 }
@@ -173,13 +183,21 @@ pub const RENDEZVOUS_PORT: u16 = 33202;
 /// Kalıcı host kimliği: 9 haneli kod ("123 456 789" diye gösterilir).
 /// İlk çalışmada üretilir, ~/.config/remotefriend/host_id dosyasında saklanır.
 pub fn new_host_id() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut h = DefaultHasher::new();
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut h);
-    std::process::id().hash(&mut h);
-    format!("{:09}", h.finish() % 1_000_000_000)
+    // ID tek başına bir kimlik sırrı değildir; yine de öngörülebilir olmaması gerekir.
+    let n = rand::random::<u32>() % 1_000_000_000;
+    format!("{n:09}")
+}
+
+/// 256-bit CSPRNG sır, küçük harf hex.
+pub fn new_secret_hex() -> String {
+    let bytes = rand::random::<[u8; 32]>();
+    hex::encode(bytes)
+}
+
+/// Ortam değişkeni verilmediyse bu çalıştırma için güçlü bir parola üret.
+pub fn new_session_password() -> String {
+    let bytes = rand::random::<[u8; 12]>();
+    hex::encode(bytes)
 }
 
 pub fn format_id(id: &str) -> String {
@@ -191,23 +209,24 @@ pub fn format_id(id: &str) -> String {
 }
 
 /// VPS rendezvous mesajları (TLS tünel içinde, length-prefixed bincode).
-/// Video/input/dosyabaytları ToClient/FromClient içinde OPAK taşınır (sunucu göremez).
+/// ÖNEMLİ: TLS VPS'te sonlanır; relay işleten kişi trafiği teknik olarak görebilir.
+/// Gerçek uçtan uca şifreleme ayrı bir Noise/PAKE katmanı gerektirir.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RvMsg {
     // host -> server (kalıcı uplink)
-    Register { id: String, name: String },
+    Register { id: String, name: String, secret: String },
     Heartbeat,
     ApprovalAnswer { client: String, allow: bool },
     ToClient { client: String, payload: Vec<u8> },
     /// Onaylanan client için yeni bağlantı (token eşleşmeli)
-    ConnectBack { token: u64 },
+    ConnectBack { token: u128, id: String, secret: String },
     // server -> host (uplink üzerinden)
     RegisteredOk,
     RegisterError(String),
-    ApprovalRequest { client: String, addr: String, kind: String, token: u64 },
+    ApprovalRequest { client: String, addr: String, kind: String, token: u128, auth: Option<String> },
     FromClient { client: String, payload: Vec<u8> },
     // client -> server (yeni bağlantı)
-    Hello { id: String },
+    Hello { id: String, auth: Option<String> },
     ToHost { payload: Vec<u8> },
     // server -> client
     WaitApproval,
@@ -217,11 +236,19 @@ pub enum RvMsg {
 }
 
 pub fn rv_encode(m: &RvMsg) -> anyhow::Result<Vec<u8>> {
-    Ok(bincode::serialize(m)?)
+    use bincode::Options as _;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(m)?)
 }
 
 pub fn rv_decode(buf: &[u8]) -> anyhow::Result<RvMsg> {
-    Ok(bincode::deserialize(buf)?)
+    use bincode::Options as _;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(1_000_000)
+        .reject_trailing_bytes()
+        .deserialize(buf)?)
 }
 
 /// UDP LAN discovery (ayrı thread'lerde çalıştır, std blocking socket).
@@ -276,5 +303,54 @@ pub mod discovery {
                 Err(_) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_round_trip_and_trailing_bytes_rejected() {
+        let packet = Packet::Handshake(Handshake {
+            version: PROTOCOL_VERSION,
+            password: "test-password".into(),
+            want_video: true,
+            want_input: true,
+        });
+        let encoded = encode(&packet).expect("encode");
+        let decoded = decode(&encoded).expect("decode");
+        match decoded {
+            Packet::Handshake(h) => {
+                assert_eq!(h.version, PROTOCOL_VERSION);
+                assert_eq!(h.password, "test-password");
+            }
+            other => panic!("beklenmeyen paket: {other:?}"),
+        }
+
+        let mut with_trailing = encoded;
+        with_trailing.push(0);
+        assert!(decode(&with_trailing).is_err());
+    }
+
+    #[test]
+    fn generated_identity_material_has_expected_shape() {
+        let id = new_host_id();
+        assert_eq!(id.len(), 9);
+        assert!(id.bytes().all(|b| b.is_ascii_digit()));
+
+        let secret = new_secret_hex();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let password = new_session_password();
+        assert_eq!(password.len(), 24);
+        assert!(password.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn id_formatting_is_stable() {
+        assert_eq!(format_id("123456789"), "123 456 789");
+        assert_eq!(format_id("invalid"), "invalid");
     }
 }

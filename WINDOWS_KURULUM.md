@@ -1,24 +1,36 @@
-# Windows Laptop — kurulum yok, 2 dk
+# Windows kurulumu
 
-## 1. İndir
-https://github.com/siyahkarga/remotefriend/releases → en yeni sürüm →
-`remote-friend-host.exe` + `HOST_BASLAT.bat` indir, aynı klasöre koy.
+## Hazır binary ile
 
-## 2. Firewall (Admin PowerShell, bir kez)
+`remote-friend-host.exe`, `remote-friend-client.exe` ve gerekiyorsa `HOST_BASLAT.bat` dosyalarını aynı klasöre koy.
+
+Firewall'u yalnızca gerekli ağ profillerinde aç. Yönetici PowerShell:
+
 ```powershell
-netsh advfirewall firewall add rule name="RemoteFriend" dir=in action=allow protocol=TCP localport=33200
-netsh advfirewall firewall add rule name="RemoteFriendWeb" dir=in action=allow protocol=TCP localport=33201
+netsh advfirewall firewall add rule name="RemoteFriend Native LAN" dir=in action=allow protocol=TCP localport=33200 profile=private
+netsh advfirewall firewall add rule name="RemoteFriend Web LAN" dir=in action=allow protocol=TCP localport=33201 profile=private
 ```
 
-## 3. Çalıştır
-`HOST_BASLAT.bat` çift tık. Ekranda şunu görürsün:
-```
-Tarayıcı ile bağlan: http://192.168.X.X:33201  (aynı ağdan)
+`33200` ve `33201` portlarını modemde internete yönlendirme.
+
+`HOST_BASLAT.bat` çalıştır. `REMOTE_FRIEND_PASS` önceden ayarlanmamışsa host terminalde rastgele bir şifre gösterecek. İstemcide bu şifreyi kullan ve host terminalinde bağlantıyı `E` ile onayla.
+
+Akıcı görüntü için `remote-friend-client.exe` önerilir. LAN tarayıcı sayfası düz HTTP nedeniyle JPEG moduna düşebilir.
+
+## Dengeli ayar
+
+```bat
+set RF_FPS=30
+set RF_MAX_WIDTH=1600
+set RF_BITRATE_BPS=6000000
+HOST_BASLAT.bat
 ```
 
-## 4. Bağlan (istemci taraf)
-- Aynı WiFi'deki telefon/PC/tablet: tarayıcıda yukarıdaki adresi aç (Chrome/Edge).
-- Şifre: `1234` → Bağlan.
-- **Bu laptopta terminalde `E` tuşuna bas (onay).** Onay yoksa görüntü gitmez!
+Kalıcı bir parola kullanılacaksa en az 16 rastgele karakter seç:
 
-Hepsi bu. Rust kurmana, derlemene gerek yok.
+```bat
+set REMOTE_FRIEND_PASS=buraya_guclu_rastgele_sifre
+HOST_BASLAT.bat
+```
+
+Komut geçmişi ve `.bat` dosyası içinde gerçek parolayı bırakmamaya dikkat et.

@@ -24,7 +24,8 @@ if %errorlevel% neq 0 (
 )
 
 echo Firewall izni ekleniyor (admin gerekli)...
-netsh advfirewall firewall add rule name="RemoteFriend" dir=in action=allow protocol=TCP localport=33200 >nul 2>nul
+netsh advfirewall firewall add rule name="RemoteFriend Native LAN" dir=in action=allow protocol=TCP localport=33200 profile=private >nul 2>nul
+netsh advfirewall firewall add rule name="RemoteFriend Web LAN" dir=in action=allow protocol=TCP localport=33201 profile=private >nul 2>nul
 
 echo.
 echo === HAZIR ===

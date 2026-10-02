@@ -1,6 +1,6 @@
 //! TLS yardımcısı: fingerprint-pin'li istemci + sunucu acceptor.
-//! Güvenlik modeli: sertifika parmak izi eşleşirse MITM imkânsızdır.
-//! (RF_RV_INSECURE=1 sadece localhost testleri içindir.)
+//! Güvenlik modeli: istemci tam sertifika SHA-256 parmak izini pinler ve
+//! TLS handshake imzasını rustls ile doğrular. İsim/CA doğrulaması yerine pin kullanılır.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -26,9 +26,6 @@ impl rustls::client::danger::ServerCertVerifier for FpVerifier {
         _ocsp: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        if std::env::var("RF_RV_INSECURE").map(|v| v == "1").unwrap_or(false) {
-            return Ok(rustls::client::danger::ServerCertVerified::assertion());
-        }
         match &self.expected {
             Some(fp) => {
                 let norm = |s: &str| s.replace(':', "").to_lowercase();
@@ -41,27 +38,39 @@ impl rustls::client::danger::ServerCertVerifier for FpVerifier {
                 }
             }
             None => Err(rustls::Error::General(
-                "sunucu fingerprint yok: RF_RV_FP veya güvensiz mod gerekli".into(),
+                "sunucu fingerprint yok: RF_RV_FP gerekli".into(),
             )),
         }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -77,9 +86,13 @@ pub async fn tls_connect(
     server_name: &str,
     fp: Option<String>,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
-    let stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .with_context(|| format!("TCP bağlantı zaman aşımı: {addr}"))?
+    .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(FpVerifier { expected: fp }))
@@ -87,10 +100,13 @@ pub async fn tls_connect(
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|_| anyhow::anyhow!("geçersiz sunucu adı"))?;
-    connector
-        .connect(name, stream)
-        .await
-        .context("TLS handshake başarısız")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        connector.connect(name, stream),
+    )
+    .await
+    .context("TLS handshake zaman aşımı")?
+    .context("TLS handshake başarısız")
 }
 
 /// Sunucu tarafı TLS acceptor (sertifika dosyalarından).

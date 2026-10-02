@@ -8,14 +8,40 @@ mod capture_pw;
 use anyhow::{Context, Result};
 use remote_friend_common::{Packet, VideoCodec, VideoFrame};
 use std::io::Cursor;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-pub(crate) const FPS_MS: u64 = 66; // ~15fps (H264 ile hafifler)
-const MAX_W: u32 = 1920; // 1080p aynen, üstünü küçült
+pub(crate) fn target_fps() -> u32 {
+    std::env::var("RF_FPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|fps: &u32| (5..=30).contains(fps))
+        .unwrap_or(30)
+}
+
+pub(crate) fn frame_duration() -> Duration {
+    Duration::from_micros(1_000_000 / target_fps() as u64)
+}
+
+fn max_width() -> u32 {
+    std::env::var("RF_MAX_WIDTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|w: &u32| (640..=3840).contains(w))
+        .map(|w| w & !1)
+        .unwrap_or(1920)
+}
+
+fn bitrate_bps() -> u32 {
+    std::env::var("RF_BITRATE_BPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|bps: &u32| (500_000..=30_000_000).contains(bps))
+        .unwrap_or(6_000_000)
+}
 
 /// Son capture'ın geometrisi: client koordinatını host mantıksal koordinata çevirmek için.
 /// (Windows %125/%150 ölçekte capture fiziksel piksel, mouse mantıksal piksel ister.)
@@ -58,25 +84,44 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     #[cfg(target_os = "linux")]
     capture_pw::ensure_started();
-    let password = std::env::var("REMOTE_FRIEND_PASS").unwrap_or("1234".into());
+    let configured_password = std::env::var("REMOTE_FRIEND_PASS")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let password = configured_password
+        .clone()
+        .unwrap_or_else(remote_friend_common::new_session_password);
+    if password.len() < 10 || password == "1234" {
+        tracing::warn!("zayıf REMOTE_FRIEND_PASS: en az 10 karakter kullan");
+    }
     let pc_name = hostname::get()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or("bilinmeyen-pc".into());
-    let addr = format!("0.0.0.0:{}", remote_friend_common::DEFAULT_PORT);
+    let native_bind = std::env::var("RF_NATIVE_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    let addr = format!("{native_bind}:{}", remote_friend_common::DEFAULT_PORT);
     let listener = TcpListener::bind(&addr).await?;
     println!("=== RemoteFriend Host: {pc_name} ===");
-    println!("Dinleniyor: {addr} | şifre: {password}");
+    if configured_password.is_none() {
+        println!("Bu çalıştırma için üretilen şifre: {password}");
+    } else {
+        println!("Şifre REMOTE_FRIEND_PASS ortam değişkeninden alındı (ekrana yazılmadı).");
+    }
+    println!("Dinleniyor: {addr}");
     println!("Gelen her bağlantı ONAY ister (E/H). Otomatik kabul için: REMOTE_FRIEND_AUTO_ACCEPT=1");
+    if native_bind != "127.0.0.1" && native_bind != "::1" {
+        println!("UYARI: LAN native bağlantısı şimdilik düz TCP'dir; yalnızca güvenilir LAN/VPN'de kullan.");
+    }
+    println!("Video profili: {} FPS, en çok {} px genişlik, {} bit/s H.264", target_fps(), max_width(), bitrate_bps());
     tracing::info!("host dinliyor: {addr}");
 
-    // Kalıcı internet ID'si (VPS rendezvous için)
+    // Kalıcı internet ID'si + bu ID'yi VPS üzerinde sahiplenen cihaz sırrı.
     let host_id = remote_friend_common::identity::load_or_create_host_id();
+    let host_secret = remote_friend_common::identity::load_or_create_host_secret();
     println!(">>> Bu bilgisayarın ID'si: {} <<<", remote_friend_common::format_id(&host_id));
     match rv_target() {
         Some(t) => {
             println!("İnternet (VPS {}) açık.", t.addr);
-            let (id_c, pc_c, pw_c) = (host_id.clone(), pc_name.clone(), password.clone());
-            tokio::spawn(async move { uplink_loop(t, id_c, pc_c, pw_c).await });
+            let (id_c, secret_c, pc_c, pw_c) = (host_id.clone(), host_secret.clone(), pc_name.clone(), password.clone());
+            tokio::spawn(async move { uplink_loop(t, id_c, secret_c, pc_c, pw_c).await });
         }
         None => println!("İnternet kapalı (RF_RV_SERVER yok): sadece LAN."),
     }
@@ -90,9 +135,13 @@ async fn main() -> Result<()> {
         .map(|ip| ip.to_string())
         .unwrap_or("127.0.0.1".into());
     println!("Tarayıcı ile bağlan: http://{lan_ip}:{http_port}  (aynı ağdan)");
+    println!("Not: LAN HTTP güvenli bağlam değildir; tarayıcı çoğunlukla JPEG moduna düşer. Akıcı video için native istemci veya HTTPS/WSS kullan.");
+    let web_bind = std::env::var("RF_WEB_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    let shown_web_host = if web_bind == "0.0.0.0" || web_bind == "::" { lan_ip.clone() } else { web_bind.clone() };
+    println!("Tarayıcı web bind: {web_bind}:{http_port}; açılacak adres: http://{shown_web_host}:{http_port}");
     let web_pw = password.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(format!("0.0.0.0:{http_port}"), web_pw).await {
+        if let Err(e) = web::serve(format!("{web_bind}:{http_port}"), web_pw).await {
             tracing::warn!("web sunucusu kapandı: {e:#}");
         }
     });
@@ -103,8 +152,22 @@ async fn main() -> Result<()> {
         move || remote_friend_common::discovery::broadcast_loop(pc_name, remote_friend_common::DEFAULT_PORT)
     });
 
+    let native_limit = std::env::var("RF_MAX_NATIVE_SESSIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(8);
+    let native_slots = Arc::new(tokio::sync::Semaphore::new(native_limit));
     loop {
         let (socket, peer) = listener.accept().await?;
+        let permit = match native_slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("native oturum limiti dolu; {peer} reddedildi");
+                drop(socket);
+                continue;
+            }
+        };
         // Sertleştirme: tarayıcı/bot yanlışlıkla native porta gelirse
         // ("GET / HTTP..." devasa paket sanılıp bellek şişmesin) kapıda çevir.
         {
@@ -123,6 +186,7 @@ async fn main() -> Result<()> {
         tracing::info!("client bağlandı: {peer}");
         let pw = password.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_client(socket, peer.to_string(), &pw).await {
                 tracing::warn!("client kapandı {peer}: {e:#}");
             }
@@ -166,6 +230,19 @@ async fn handle_client(socket: TcpStream, peer: String, password: &str) -> Resul
     session_native(rd, wr, peer, password, true).await
 }
 
+/// Basit sabit-zamanlı parola karşılaştırması. Uzunluk bilgisi gizli sayılmaz;
+/// eşit uzunlukta ilk farklı baytta erken dönmez.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+        == 0
+}
+
 /// Native session: LAN TCP veya VPS dial-back (TLS) fark etmez.
 /// need_approval=false ise parola sonrası direkt Accept (onay zaten alındı).
 async fn session_native<R, W>(
@@ -180,14 +257,20 @@ where
     W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
 {
     // handshake
-    let pkt = read_packet(&mut rd).await?;
+    let pkt = tokio::time::timeout(
+        Duration::from_secs(15),
+        remote_friend_common::io::read_packet_limited(&mut rd, 64 * 1024),
+    )
+        .await
+        .context("handshake zaman aşımı")??;
     let ok = match &pkt {
         Packet::Handshake(h) => {
-            h.version == remote_friend_common::PROTOCOL_VERSION && h.password == password
+            h.version == remote_friend_common::PROTOCOL_VERSION && constant_time_eq(&h.password, password)
         }
         _ => false,
     };
     if !ok {
+        tokio::time::sleep(Duration::from_millis(250)).await;
         write_packet(&mut wr, &Packet::Reject("şifre/version hatalı".into())).await?;
         anyhow::bail!("auth başarısız");
     }
@@ -195,7 +278,11 @@ where
         // parola doğru ama YETMEZ: operatör onayı şart
         write_packet(&mut wr, &Packet::WaitingForApproval).await?;
         tracing::info!("{peer} parola ok, operatör onayı bekleniyor");
-        if !ask_approval(&peer) {
+        let prompt_peer = peer.clone();
+        let approved = tokio::task::spawn_blocking(move || ask_approval(&prompt_peer))
+            .await
+            .unwrap_or(false);
+        if !approved {
             write_packet(&mut wr, &Packet::Reject("host bağlantıyı reddetti".into())).await?;
             anyhow::bail!("operatör reddetti");
         }
@@ -205,74 +292,42 @@ where
 
     let wr = Arc::new(Mutex::new(wr));
 
-    // video gönderici task (bağlantı başına taze H264 encoder: ilk frame IDR olur)
+    // Tek global capture+encode hattına abone ol. Yavaş istemci kare biriktirmez;
+    // broadcast kuyruğu dolarsa eski kareleri atlayıp en güncele yetişir.
     let wr2 = wr.clone();
+    let mut video_rx = video_sender().subscribe();
     let _video_task = tokio::spawn(async move {
-        let mut seq = 0u64;
-        let mut h264 = H264Enc::new();
-        let mut err_n = 0u32;
         loop {
-            seq += 1;
-            match capture_rgba() {
-                Ok((w, h, rgba)) => {
-                    match h264.encode_frame(&rgba, w, h) {
-                        Ok(nal) => {
-                            err_n = 0;
-                            let ts = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                            let frame = VideoFrame {
-                                seq,
-                                width: w,
-                                height: h,
-                                codec: VideoCodec::H264,
-                                data: nal,
-                                timestamp_ms: ts,
-                            };
-                            let mut g = wr2.lock().await;
-                            if let Err(e) = write_packet(&mut *g, &Packet::Video(frame)).await {
-                                tracing::warn!("video yazma hatası: {e:#}");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            err_n += 1;
-                            tracing::warn!("h264 encode hatası ({err_n}): {e:#}");
-                            if err_n > 30 {
-                                tracing::warn!("çok hata, encoder sıfırlanıyor");
-                                h264 = H264Enc::new();
-                                err_n = 0;
-                            }
-                        }
-                    }
+            let frame = match video_rx.recv().await {
+                Ok(frame) => frame,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!("istemci {n} video karesi geride kaldı; eski kareler atlandı");
+                    continue;
                 }
-                Err(e) => {
-                    // capture çalışmazsa client askıda kalmasın diye placeholder gönder
-                    tracing::warn!("capture hatası (seq {seq}): {e:#}");
-                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                    let frame = VideoFrame {
-                        seq,
-                        width: 640,
-                        height: 360,
-                        codec: VideoCodec::RawRgba,
-                        data: vec![((seq * 7) % 255) as u8; 64],
-                        timestamp_ms: ts,
-                    };
-                    let mut g = wr2.lock().await;
-                    if let Err(e2) = write_packet(&mut *g, &Packet::Video(frame)).await {
-                        tracing::warn!("video yazma hatası: {e2:#}");
-                        break;
-                    }
-                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            let packet = Packet::Video(VideoFrame {
+                seq: frame.seq,
+                width: frame.width,
+                height: frame.height,
+                codec: VideoCodec::H264,
+                data: frame.data.as_ref().clone(),
+                timestamp_ms: frame.timestamp_ms,
+            });
+            let mut g = wr2.lock().await;
+            if let Err(e) = write_packet(&mut *g, &packet).await {
+                tracing::warn!("video yazma hatası: {e:#}");
+                break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(FPS_MS)).await;
         }
     });
 
-    // input + dosya alıcı (bu taskte)
-    loop {
-        let pkt = read_packet(&mut rd).await?;
+    // input + dosya alıcı. Bağlantı bitince video göndericiyi mutlaka durdur.
+    let session_result: Result<()> = loop {
+        let pkt = match remote_friend_common::io::read_packet_limited(&mut rd, 1_000_000).await {
+            Ok(pkt) => pkt,
+            Err(e) => break Err(e),
+        };
         match pkt {
             Packet::Input(ev) => {
                 if let Err(e) = apply_input(ev) {
@@ -286,13 +341,10 @@ where
             }
             _ => {}
         }
-    }
-    // video_task abort on disconnect
-    #[allow(unreachable_code)]
-    {
-        _video_task.abort();
-        Ok(())
-    }
+    };
+    _video_task.abort();
+    session_result
+
 }
 
 // ---- internet uplink (VPS rendezvous) ----
@@ -336,9 +388,9 @@ async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
     }
 }
 
-async fn uplink_loop(target: RvTarget, id: String, pc_name: String, password: String) {
+async fn uplink_loop(target: RvTarget, id: String, secret: String, pc_name: String, password: String) {
     loop {
-        match uplink_once(&target, &id, &pc_name, &password).await {
+        match uplink_once(&target, &id, &secret, &pc_name, &password).await {
             Ok(()) => tracing::warn!("uplink kapandı, 5 sn sonra yeniden denenecek"),
             Err(e) => tracing::warn!("uplink hatası: {e:#} (5 sn sonra yeniden)"),
         }
@@ -346,7 +398,7 @@ async fn uplink_loop(target: RvTarget, id: String, pc_name: String, password: St
     }
 }
 
-async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str) -> Result<()> {
+async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, password: &str) -> Result<()> {
     use remote_friend_common::io::{read_rv, write_rv};
     use remote_friend_common::RvMsg;
     use tokio::sync::mpsc;
@@ -356,7 +408,7 @@ async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str)
     // kayıt
     {
         let mut g = wr.lock().await;
-        write_rv(&mut *g, &RvMsg::Register { id: id.to_string(), name: pc_name.to_string() }).await?;
+        write_rv(&mut *g, &RvMsg::Register { id: id.to_string(), name: pc_name.to_string(), secret: secret.to_string() }).await?;
         let resp = read_rv(&mut rd).await?;
         match resp {
             RvMsg::RegisteredOk => tracing::info!("rendezvous kaydı OK (ID: {})", remote_friend_common::format_id(id)),
@@ -365,7 +417,7 @@ async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str)
         }
     }
     // giden kanal: heartbeat + hızlı ret
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<RvMsg>();
+    let (out_tx, mut out_rx) = mpsc::channel::<RvMsg>(64);
     let wr2 = wr.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
@@ -390,20 +442,28 @@ async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str)
     // gelen: onay istekleri
     loop {
         match read_rv(&mut rd).await? {
-            RvMsg::ApprovalRequest { client, addr, kind, token } => {
+            RvMsg::ApprovalRequest { client, addr, kind, token, auth } => {
                 let peer = format!("internet:{client} ({addr}, {kind})");
-                println!("*** Bağlantı isteği: {peer}");
+                let auth_ok = auth.as_deref().is_some_and(|candidate| constant_time_eq(candidate, password));
+                if !auth_ok {
+                    tracing::warn!("{peer}: parola doğrulaması başarısız; kullanıcıya onay sorulmadı");
+                    let _ = out_tx.try_send(RvMsg::ApprovalAnswer { client, allow: false });
+                    continue;
+                }
                 let out_tx2 = out_tx.clone();
                 let target2 = RvTarget { addr: target.addr.clone(), fp: target.fp.clone(), sni: target.sni.clone() };
                 let password = password.to_string();
+                let id = id.to_string();
+                let secret = secret.to_string();
                 tokio::spawn(async move {
-                    let ok = tokio::task::spawn_blocking(move || ask_approval(&peer))
+                    let peer_for_prompt = peer.clone();
+                    let ok = tokio::task::spawn_blocking(move || ask_approval(&peer_for_prompt))
                         .await
                         .unwrap_or(false);
                     if ok {
-                        dial_back(&target2, token, &kind, &password).await;
+                        dial_back(&target2, token, &kind, &password, &id, &secret).await;
                     } else {
-                        let _ = out_tx2.send(RvMsg::ApprovalAnswer { client, allow: false });
+                        let _ = out_tx2.try_send(RvMsg::ApprovalAnswer { client, allow: false });
                     }
                 });
             }
@@ -413,13 +473,13 @@ async fn uplink_once(target: &RvTarget, id: &str, pc_name: &str, password: &str)
 }
 
 /// Onaylanan client için sunucuya geri bağlan, oturumu bu hat üzerinden yürüt.
-async fn dial_back(target: &RvTarget, token: u64, kind: &str, password: &str) {
+async fn dial_back(target: &RvTarget, token: u128, kind: &str, password: &str, id: &str, secret: &str) {
     use remote_friend_common::io::write_rv;
     use remote_friend_common::RvMsg;
     let peer = format!("internet:{token}");
     match rv_connect(target).await {
         Ok((mut rd, mut wr)) => {
-            if write_rv(&mut wr, &RvMsg::ConnectBack { token }).await.is_err() {
+            if write_rv(&mut wr, &RvMsg::ConnectBack { token, id: id.to_string(), secret: secret.to_string() }).await.is_err() {
                 tracing::warn!("{peer}: ConnectBack yazılamadı");
                 return;
             }
@@ -435,6 +495,153 @@ async fn dial_back(target: &RvTarget, token: u64, kind: &str, password: &str) {
         }
         Err(e) => tracing::warn!("{peer}: dial-back bağlanamadı: {e:#}"),
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct EncodedFrame {
+    pub(crate) seq: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) data: Arc<Vec<u8>>,
+    pub(crate) timestamp_ms: u64,
+}
+
+static VIDEO_TX: OnceLock<tokio::sync::broadcast::Sender<Arc<EncodedFrame>>> = OnceLock::new();
+
+/// Capture + yazılımsal H.264 encode yalnızca bir kez yapılır. Her istemci aynı
+/// düşük gecikmeli akışa abone olur; yavaş istemci eski kareleri biriktirmez.
+pub(crate) fn video_sender() -> &'static tokio::sync::broadcast::Sender<Arc<EncodedFrame>> {
+    VIDEO_TX.get_or_init(|| {
+        let (tx, _) = tokio::sync::broadcast::channel::<Arc<EncodedFrame>>(3);
+        let worker_tx = tx.clone();
+        std::thread::Builder::new()
+            .name("rf-capture-h264".into())
+            .spawn(move || {
+                let mut encoder = H264Enc::new();
+                let mut seq = 0u64;
+                let mut errors = 0u32;
+                let period = frame_duration();
+                let mut next = Instant::now();
+                let mut last_receivers = 0usize;
+                let mut stat_started = Instant::now();
+                let mut stat_attempts = 0u32;
+                let mut stat_encoded = 0u32;
+                let mut stat_encode_attempts = 0u32;
+                let mut stat_capture = Duration::ZERO;
+                let mut stat_encode = Duration::ZERO;
+                let mut stat_size = (0u32, 0u32);
+                loop {
+                    let receivers = worker_tx.receiver_count();
+                    if receivers == 0 {
+                        last_receivers = 0;
+                        stat_started = Instant::now();
+                        stat_attempts = 0;
+                        stat_encoded = 0;
+                        stat_encode_attempts = 0;
+                        stat_capture = Duration::ZERO;
+                        stat_encode = Duration::ZERO;
+                        std::thread::sleep(Duration::from_millis(100));
+                        next = Instant::now();
+                        continue;
+                    }
+                    if receivers > last_receivers {
+                        // Yeni izleyici P-frame zincirinin ortasına girmesin. Encoder'ı
+                        // yenilemek SPS/PPS + IDR başlangıcı üretir; mevcut decoderlar da
+                        // bu temiz ana kare ile devam edebilir.
+                        encoder = H264Enc::new();
+                    }
+                    last_receivers = receivers;
+
+                    seq = seq.wrapping_add(1);
+                    stat_attempts = stat_attempts.saturating_add(1);
+                    let capture_started = Instant::now();
+                    let captured = capture_rgba();
+                    stat_capture += capture_started.elapsed();
+                    match captured {
+                        Ok((width, height, rgba)) => {
+                            stat_size = (width, height);
+                            stat_encode_attempts = stat_encode_attempts.saturating_add(1);
+                            let encode_started = Instant::now();
+                            let encoded = encoder.encode_frame(&rgba, width, height);
+                            stat_encode += encode_started.elapsed();
+                            match encoded {
+                                Ok(data) if !data.is_empty() => {
+                                    stat_encoded = stat_encoded.saturating_add(1);
+                                    errors = 0;
+                                    let timestamp_ms = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64;
+                                    let _ = worker_tx.send(Arc::new(EncodedFrame {
+                                        seq,
+                                        width,
+                                        height,
+                                        data: Arc::new(data),
+                                        timestamp_ms,
+                                    }));
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    errors += 1;
+                                    if errors <= 3 || errors % 30 == 0 {
+                                        tracing::warn!("global h264 encode hatası ({errors}): {e:#}");
+                                    }
+                                    if errors >= 30 {
+                                        encoder = H264Enc::new();
+                                        errors = 0;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            errors += 1;
+                            if errors <= 3 || errors % 60 == 0 {
+                                tracing::warn!("global capture hatası ({errors}): {e:#}");
+                            }
+                        }
+                    }
+
+                    let stat_elapsed = stat_started.elapsed();
+                    if stat_elapsed >= Duration::from_secs(5) {
+                        let seconds = stat_elapsed.as_secs_f64().max(0.001);
+                        let attempts = stat_attempts.max(1) as f64;
+                        let encode_attempts = stat_encode_attempts.max(1) as f64;
+                        tracing::info!(
+                            "video ölçüm: {:.1} fps, capture {:.1} ms, encode {:.1} ms, {}x{}, izleyici {}",
+                            stat_encoded as f64 / seconds,
+                            stat_capture.as_secs_f64() * 1000.0 / attempts,
+                            stat_encode.as_secs_f64() * 1000.0 / encode_attempts,
+                            stat_size.0,
+                            stat_size.1,
+                            receivers,
+                        );
+                        stat_started = Instant::now();
+                        stat_attempts = 0;
+                        stat_encoded = 0;
+                        stat_encode_attempts = 0;
+                        stat_capture = Duration::ZERO;
+                        stat_encode = Duration::ZERO;
+                    }
+
+                    next = next + period;
+                    let now = Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                    } else {
+                        // İşlem süresi hedef periyodu aştıysa fazladan uyuma ve gecikme biriktirme.
+                        next = now;
+                    }
+                }
+            })
+            .expect("capture/encode thread başlatılamadı");
+        tx
+    })
+}
+
+thread_local! {
+    /// xcap monitor listesini her karede yeniden taramak pahalıdır. Her capture
+    /// thread'i seçili monitörü saklar; capture hata verirse bir sonraki karede yeniler.
+    static XCAP_MONITOR: std::cell::RefCell<Option<xcap::Monitor>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Ekran görüntüsü: RGBA + H264 için çift boyut garantili.
@@ -458,9 +665,14 @@ pub(crate) fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
         return Ok((w, h, rgba));
     }
     #[cfg(target_os = "linux")]
-    if let Some((w, h, rgba)) = capture_pw::try_get_frame() {
-        if let Some(img) = image::ImageBuffer::from_raw(w, h, rgba) {
-            return finish_rgba(img, 1.0, 0, 0);
+    {
+        if let Some((w, h, rgba)) = capture_pw::try_get_frame() {
+            if let Some(img) = image::ImageBuffer::from_raw(w, h, rgba) {
+                return finish_rgba(img, 1.0, 0, 0);
+            }
+        }
+        if capture_pw::is_ready() {
+            anyhow::bail!("pipewire yeni karesi bekleniyor");
         }
     }
     // Wayland + portal izni beklenirken xcap'e düşme (deklanşör sesi yok):
@@ -469,12 +681,31 @@ pub(crate) fn capture_rgba() -> Result<(u32, u32, Vec<u8>)> {
     if capture_pw::portal_pending() {
         anyhow::bail!("portal izni bekleniyor (sessiz)");
     }
-    let monitors = xcap::Monitor::all().context("monitör listesi alınamadı")?;
-    let mon = monitors.into_iter().next().context("monitör yok")?;
-    let scale = mon.scale_factor().unwrap_or(1.0);
-    let scale = if scale > 0.0 { scale } else { 1.0 };
-    let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
-    let img = mon.capture_image().context("ekran yakalanamadı")?;
+    let (img, scale, mx, my) = XCAP_MONITOR.with(|slot| -> Result<_> {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(
+                xcap::Monitor::all()
+                    .context("monitör listesi alınamadı")?
+                    .into_iter()
+                    .next()
+                    .context("monitör yok")?,
+            );
+        }
+        let result = {
+            let mon = slot.as_ref().expect("monitor az önce oluşturuldu");
+            let scale = mon.scale_factor().unwrap_or(1.0);
+            let scale = if scale > 0.0 { scale } else { 1.0 };
+            let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
+            mon.capture_image()
+                .context("ekran yakalanamadı")
+                .map(|img| (img, scale, mx, my))
+        };
+        if result.is_err() {
+            *slot = None;
+        }
+        result
+    })?;
     finish_rgba(img, scale, mx, my)
 }
 
@@ -487,10 +718,11 @@ fn finish_rgba(
 ) -> Result<(u32, u32, Vec<u8>)> {
     let (w, h) = (img.width(), img.height());
 
-    let img = if w > MAX_W {
-        let mut nh = (h as f32 * (MAX_W as f32 / w as f32)) as u32;
+    let max_w = max_width();
+    let img = if w > max_w {
+        let mut nh = (h as f32 * (max_w as f32 / w as f32)) as u32;
         nh &= !1; // çift yap
-        image::imageops::resize(&img, MAX_W, nh.max(2), image::imageops::FilterType::Triangle)
+        image::imageops::resize(&img, max_w, nh.max(2), image::imageops::FilterType::Triangle)
     } else {
         img
     };
@@ -518,7 +750,7 @@ fn finish_rgba(
     Ok((w2, h2, img.into_raw()))
 }
 
-/// Bağlantı başına bir tane: ilk frame her zaman IDR (SPS/PPS dahil).
+/// Encoder ilk kurulduğunda IDR/SPS/PPS üretir; global yayın hattı bunu paylaşır.
 pub(crate) struct H264Enc {
     enc: Option<openh264::encoder::Encoder>,
     w: u32,
@@ -537,15 +769,19 @@ impl H264Enc {
         if self.enc.is_none() || self.w != w || self.h != h {
             use openh264::encoder::{
                 BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Level, Profile,
-                UsageType,
+                UsageType, VuiConfig,
             };
+            let fps = target_fps();
             let config = EncoderConfig::new()
-                .bitrate(BitRate::from_bps(4_000_000))
-                .max_frame_rate(FrameRate::from_hz(15.0))
+                .bitrate(BitRate::from_bps(bitrate_bps()))
+                .max_frame_rate(FrameRate::from_hz(fps as f32))
                 .usage_type(UsageType::ScreenContentRealTime)
                 .profile(Profile::Baseline)
                 .level(Level::Level_4_0)
-                .intra_frame_period(IntraFramePeriod::from_num_frames(75));
+                .skip_frames(true)
+                .num_threads(0)
+                .vui(VuiConfig::bt709())
+                .intra_frame_period(IntraFramePeriod::from_num_frames(fps));
             let mut enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
                 .context("h264 encoder açılamadı")?;
             enc.force_intra_frame();
@@ -566,19 +802,57 @@ impl H264Enc {
         let bitstream = enc.encode(&yuv).context("h264 encode")?;
         let out = bitstream.to_vec();
         self.frames += 1;
-        // her 5 sn'de bir keyframe (geç katılan/bozulan stream kendini toparlar)
-        if self.frames % 75 == 0 {
+        // Her ~1 saniyede bir keyframe: global akışa yeni katılan istemci hızlı başlar.
+        if self.frames % target_fps() as u64 == 0 {
             enc.force_intra_frame();
         }
         Ok(out)
     }
 }
 
+static INPUT_TX: OnceLock<std::sync::mpsc::SyncSender<remote_friend_common::InputEvent>> = OnceLock::new();
+
+fn input_sender() -> &'static std::sync::mpsc::SyncSender<remote_friend_common::InputEvent> {
+    INPUT_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<remote_friend_common::InputEvent>(512);
+        std::thread::Builder::new()
+            .name("rf-input".into())
+            .spawn(move || {
+                use enigo::{Enigo, Settings};
+                let mut enigo = match Enigo::new(&Settings::default()) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::error!("enigo açılamadı: {e}");
+                        return;
+                    }
+                };
+                while let Ok(ev) = rx.recv() {
+                    if let Err(e) = apply_input_now(&mut enigo, ev) {
+                        tracing::warn!("input uygulama hatası: {e:#}");
+                    }
+                }
+            })
+            .expect("input thread başlatılamadı");
+        tx
+    })
+}
+
 pub(crate) fn apply_input(ev: remote_friend_common::InputEvent) -> Result<()> {
-    use enigo::{Axis, Coordinate, Enigo, Keyboard, Mouse, Settings};
+    use remote_friend_common::InputEvent;
+    use std::sync::mpsc::TrySendError;
+    match input_sender().try_send(ev) {
+        Ok(()) => Ok(()),
+        // Mouse hareketinde en yeni koordinat kısa süre sonra geleceği için eskiyi düşürmek,
+        // input kuyruğunun büyüyüp saniyeler geriden gelmesinden daha doğrudur.
+        Err(TrySendError::Full(InputEvent::MouseMove { .. })) => Ok(()),
+        Err(TrySendError::Full(_)) => anyhow::bail!("input kuyruğu dolu"),
+        Err(TrySendError::Disconnected(_)) => anyhow::bail!("input worker kapalı"),
+    }
+}
+
+fn apply_input_now(enigo: &mut enigo::Enigo, ev: remote_friend_common::InputEvent) -> Result<()> {
+    use enigo::{Axis, Coordinate, Keyboard, Mouse};
     use remote_friend_common::InputEvent as E;
-    // her eventte yeni Enigo (MVP basitliği, sonra kalıcı tut)
-    let mut enigo = Enigo::new(&Settings::default()).context("enigo açılamadı")?;
     match ev {
         E::MouseMove { x, y } => {
             // client koordinatı (gönderilen frame uzayı) -> fiziksel -> mantıksal
@@ -656,17 +930,153 @@ fn map_btn(b: remote_friend_common::MouseButton) -> enigo::Button {
     }
 }
 
+struct IncomingTransfer {
+    file: std::fs::File,
+    part_path: std::path::PathBuf,
+    final_path: std::path::PathBuf,
+    expected: u64,
+    total: u64,
+    updated: Instant,
+}
+
+static TRANSFERS: OnceLock<std::sync::Mutex<std::collections::HashMap<u64, IncomingTransfer>>> = OnceLock::new();
+
+fn transfer_map() -> &'static std::sync::Mutex<std::collections::HashMap<u64, IncomingTransfer>> {
+    TRANSFERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn max_file_bytes() -> u64 {
+    std::env::var("RF_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &u64| *n > 0)
+        .unwrap_or(512 * 1024 * 1024)
+}
+
+fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("dosya");
+    let mut out = String::with_capacity(base.len().min(128));
+    for c in base.chars().take(128) {
+        if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        "dosya".into()
+    } else {
+        out
+    }
+}
+
 pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<()> {
-    use std::io::{Seek, SeekFrom, Write};
-    let dir = std::env::var("REMOTE_FRIEND_DIR").unwrap_or("/tmp".into());
+    use std::io::Write as _;
+
+    const MAX_CHUNK: usize = 256 * 1024;
+    if c.transfer_id == 0 {
+        anyhow::bail!("geçersiz transfer ID");
+    }
+    if c.total == 0 || c.total > max_file_bytes() {
+        anyhow::bail!("dosya boyutu sınır dışında: {}", c.total);
+    }
+    if c.data.is_empty() || c.data.len() > MAX_CHUNK {
+        anyhow::bail!("dosya parçası sınır dışında: {}", c.data.len());
+    }
+    let end = c.offset
+        .checked_add(c.data.len() as u64)
+        .context("dosya offset taşması")?;
+    if end > c.total {
+        anyhow::bail!("dosya parçası bildirilen toplamı aşıyor");
+    }
+    // Hatalı son-parça işaretini dosyayı oluşturmadan/yazmadan önce reddet.
+    // Aksi halde saldırgan geçersiz ilk chunk'larla transfer yuvalarını 10 dakika
+    // boyunca doldurabilirdi.
+    let reached_end = end == c.total;
+    if c.last != reached_end {
+        anyhow::bail!("dosya son-parça işareti toplam boyutla uyuşmuyor");
+    }
+
+    let dir = std::env::var("REMOTE_FRIEND_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| remote_friend_common::identity::config_dir().join("received"));
     std::fs::create_dir_all(&dir)?;
-    // güvenlik: sadece dosya adı, path traversal yok
-    let safe: String = c.name.rsplit(['/', '\\']).next().unwrap_or("dosya").to_string();
-    let path = format!("{dir}/rf_{}_{safe}", c.transfer_id);
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).open(&path)?;
-    f.seek(SeekFrom::Start(c.offset))?;
-    f.write_all(&c.data)?;
-    tracing::info!("dosya parçası: {path} {}/{} last={}", c.offset + c.data.len() as u64, c.total, c.last);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut transfers = transfer_map().lock().unwrap();
+    // Yarım kalan transferleri sonsuza kadar açık tutma.
+    let stale: Vec<u64> = transfers
+        .iter()
+        .filter(|(_, t)| t.updated.elapsed() > Duration::from_secs(600))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in stale {
+        if let Some(t) = transfers.remove(&id) {
+            let _ = std::fs::remove_file(t.part_path);
+        }
+    }
+
+    if c.offset == 0 {
+        if transfers.len() >= 8 {
+            anyhow::bail!("çok fazla eşzamanlı dosya transferi");
+        }
+        if transfers.contains_key(&c.transfer_id) {
+            anyhow::bail!("transfer ID zaten kullanımda");
+        }
+        let safe = safe_file_name(&c.name);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let random = remote_friend_common::new_secret_hex();
+        let final_path = dir.join(format!("rf_{stamp}_{}_{}", &random[..8], safe));
+        let part_path = final_path.with_extension("part");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(&part_path)?;
+        transfers.insert(c.transfer_id, IncomingTransfer {
+            file,
+            part_path,
+            final_path,
+            expected: 0,
+            total: c.total,
+            updated: Instant::now(),
+        });
+    }
+
+    let complete = {
+        let state = transfers
+            .get_mut(&c.transfer_id)
+            .context("transfer ilk parça ile başlamadı")?;
+        if state.total != c.total || state.expected != c.offset {
+            anyhow::bail!("dosya parçaları sırasız veya toplam boyut değişti");
+        }
+        state.file.write_all(&c.data)?;
+        state.expected = end;
+        state.updated = Instant::now();
+        debug_assert_eq!(state.expected == state.total, reached_end);
+        reached_end
+    };
+
+    if complete {
+        let mut state = transfers.remove(&c.transfer_id).expect("transfer az önce vardı");
+        state.file.flush()?;
+        state.file.sync_all()?;
+        drop(state.file);
+        std::fs::rename(&state.part_path, &state.final_path)?;
+        tracing::info!("dosya tamamlandı: {} ({} byte)", state.final_path.display(), state.total);
+    } else {
+        tracing::debug!("dosya parçası: id={} {}/{}", c.transfer_id, end, c.total);
+    }
     Ok(())
 }
 

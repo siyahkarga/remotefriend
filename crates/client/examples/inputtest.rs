@@ -1,5 +1,5 @@
 //! Sentetik input testi: Scroll + Key + MouseMove gönder, 3 frame oku.
-//! cargo run -p remote-friend-client --example inputtest -- 127.0.0.1:33200 1234
+//! cargo run -p remote-friend-client --example inputtest -- 127.0.0.1:33200 GUCLU_SIFRE
 use remote_friend_common::{Handshake, InputEvent, MouseButton, Packet, RemoteKey, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let host = args.get(1).cloned().unwrap_or("127.0.0.1:33200".into());
-    let pass = args.get(2).cloned().unwrap_or("1234".into());
+    let pass = args.get(2).cloned().unwrap_or_default();
     let mut s = tokio::net::TcpStream::connect(&host).await.expect("bağlanamadı");
     let hs = Packet::Handshake(Handshake { version: PROTOCOL_VERSION, password: pass, want_video: true, want_input: true });
     write(&mut s, &hs).await;

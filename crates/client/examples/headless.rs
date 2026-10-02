@@ -1,5 +1,5 @@
 //! Headless test: GUI olmadan hosttan 5 frame al, boyutları yaz.
-//! cargo run -p remote-friend-client --example headless -- 127.0.0.1:33200 1234
+//! cargo run -p remote-friend-client --example headless -- 127.0.0.1:33200 GUCLU_SIFRE
 use remote_friend_common::{Handshake, Packet, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let host = args.get(1).cloned().unwrap_or("127.0.0.1:33200".into());
-    let pass = args.get(2).cloned().unwrap_or("1234".into());
+    let pass = args.get(2).cloned().unwrap_or_default();
     let mut s = tokio::net::TcpStream::connect(&host).await.expect("bağlanamadı");
     let hs = Packet::Handshake(Handshake { version: PROTOCOL_VERSION, password: pass, want_video: true, want_input: true });
     let b = remote_friend_common::encode(&hs).unwrap();

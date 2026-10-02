@@ -110,7 +110,7 @@
       <span class="meta" id="meta">—</span>
     </div>
     <div id="stage"><canvas id="screen"></canvas></div>
-    <div id="hint"><kbd>Tık</kbd> mouse • <kbd>Tekerlek</kbd> scroll • <kbd>Sağ tık</kbd> çalışır • Klavyen doğrudan gider</div>
+    <div id="viewHint"><kbd>Tık</kbd> mouse • <kbd>Tekerlek</kbd> scroll • <kbd>Sağ tık</kbd> çalışır • Klavyen doğrudan gider</div>
   </div>
 </main>
 
@@ -120,9 +120,10 @@ const $ = id => document.getElementById(id);
 const pill = $('pill'), errBox = $('err'), errMsg = $('errMsg'), meta = $('meta');
 const canvas = $('screen'), ctx = canvas.getContext('2d');
 let ws = null, connected = false, mode = 'id';
-let useJpeg = false; // WebCodecs yoksa host JPEG gönderir (her tarayıcıda çalışır)
+let useJpeg = false; // WebCodecs/güvenli bağlam yoksa host JPEG gönderir
 let decoder = null, sps = null, pps = null, cfgW = 0, cfgH = 0, hostW = 0, hostH = 0;
-let frames = 0, fpsT = 0, ts = 0;
+let frames = 0, fpsT = 0, ts = 0, targetFps = 30, needKey = true;
+let jpegBusy = false, pendingJpeg = null;
 const FALLBACK_CODECS = ['avc1.420028', 'avc1.4D0028', 'avc1.640028'];
 
 function setPill(txt, cls, spin) {
@@ -145,14 +146,22 @@ $('idInput').addEventListener('input', () => {
   const host = location.hostname || '127.0.0.1';
   const port = location.port || '33201';
   $('addr').value = host + ':' + port;
-  // VPS'ten sunuluyorsa ID sekmesi zaten varsayılan; host'tan sunuluyorsa da ID çalışır (aynı sunucu değilse fallback adres)
-  const saved = localStorage.getItem('rf_pw');
-  if (saved) $('pw').value = saved;
+  // Parola localStorage'a yazılmaz. LAN IP'sindeki düz HTTP güvenli bağlam değildir;
+  // bu durumda WebCodecs kapalı kalabilir ve daha yavaş JPEG yolu kullanılır.
+  if (!window.isSecureContext || typeof VideoDecoder === 'undefined') {
+    $('loginHint').textContent += ' Bu sayfa güvenli HTTPS bağlamında değil; tarayıcı JPEG moduna düşebilir.';
+  }
   renderRecents();
 })();
 
+function loadRecents() {
+  try {
+    const v = JSON.parse(localStorage.getItem('rf_recents') || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch (_) { return []; }
+}
 function renderRecents() {
-  const list = JSON.parse(localStorage.getItem('rf_recents') || '[]');
+  const list = loadRecents();
   const box = $('recentList'); box.innerHTML = '';
   if (!list.length) { box.innerHTML = '<span style="color:var(--dim);font-size:13px">Henüz bağlantı yok.</span>'; return; }
   for (const u of list.slice(0, 8)) {
@@ -162,7 +171,7 @@ function renderRecents() {
     d.innerHTML = '<div><b>' + esc(u.label) + '</b></div><div class="t">' + esc(when) + '</div><span class="x" title="Sil">×</span>';
     d.querySelector('.x').onclick = (ev) => {
       ev.stopPropagation();
-      localStorage.setItem('rf_recents', JSON.stringify(JSON.parse(localStorage.getItem('rf_recents') || '[]').filter(x => x.target !== u.target)));
+      localStorage.setItem('rf_recents', JSON.stringify(loadRecents().filter(x => x.target !== u.target)));
       renderRecents();
     };
     d.onclick = () => {
@@ -177,7 +186,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<':
 function toIdMode() { $('tabId').click(); }
 function toAddrMode() { $('tabAddr').click(); }
 function touchRecent(kind, target, label) {
-  let list = JSON.parse(localStorage.getItem('rf_recents') || '[]').filter(x => x.target !== target);
+  let list = loadRecents().filter(x => x.target !== target);
   list.unshift({ kind, target, label, ts: Date.now() });
   localStorage.setItem('rf_recents', JSON.stringify(list.slice(0, 10)));
   renderRecents();
@@ -205,7 +214,6 @@ function connect() {
   const pw = $('pw').value;
   if (mode === 'id' && t.id.length !== 9) { showErr('9 haneli kodu eksiksiz yaz.'); return; }
   if (mode === 'addr' && !t.addr) { showErr('Adres boş.'); return; }
-  localStorage.setItem('rf_pw', pw);
   setPill('bağlanıyor...', '', true);
   // ID modunda bu sayfanın sunucusuna (VPS), adres modunda yazılan adrese gidilir
   const base = mode === 'id' ? (location.host) : t.addr;
@@ -213,7 +221,7 @@ function connect() {
   ws = new WebSocket(proto + base + '/ws');
   ws.binaryType = 'arraybuffer';
   ws._mode = mode; ws._id = t.id;
-  const noWc = (typeof VideoDecoder === 'undefined');
+  const noWc = (!window.isSecureContext || typeof VideoDecoder === 'undefined');
   const forceJpeg = new URLSearchParams(location.search).has('jpeg');
   ws._done = false;
   ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', password: pw, id: t.id || undefined, jpeg: (noWc || forceJpeg) || undefined }));
@@ -230,6 +238,7 @@ function onClose(msg) {
   connected = false;
   if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
   sps = pps = null; cfgW = cfgH = 0; useJpeg = false;
+  needKey = true; ts = 0; targetFps = 30; jpegBusy = false; pendingJpeg = null;
   $('view').style.display = 'none';
   $('loginCard').style.display = 'block';
   setPill('hazır', '');
@@ -239,17 +248,24 @@ function onClose(msg) {
 
 function onMsg(ev) {
   if (typeof ev.data === 'string') {
-    const m = JSON.parse(ev.data);
-    if (m.t === 'reject') { onClose('Reddedildi: ' + (m.msg || '')); ws.close(); }
+    let m;
+    try { m = JSON.parse(ev.data); }
+    catch (_) { showErr('Sunucudan geçersiz yanıt geldi.'); return; }
+    if (m.t === 'reject') { onClose('Reddedildi: ' + (m.msg || '')); if (ws) ws.close(); }
     else if (m.t === 'wait') { setPill('host onayı bekleniyor...', 'wait', true); }
     else if (m.t === 'welcome') {
       connected = true;
       useJpeg = !!m.jpeg;
+      targetFps = Math.max(5, Math.min(60, Number(m.fps) || (useJpeg ? 10 : 30)));
+      needKey = true; ts = 0;
       $('view').dataset.ok = '1';
       hideErr();
       $('loginCard').style.display = 'none';
       $('view').style.display = 'block';
       setPill('bağlı', 'on');
+      meta.textContent = useJpeg
+        ? 'JPEG modu • HTTPS/WebCodecs ile daha hızlı olur'
+        : 'H.264 • görüntü bekleniyor';
       const t = target();
       touchRecent(t.kind, t.kind === 'id' ? $('idInput').value : t.addr,
         t.kind === 'id' ? ('ID ' + $('idInput').value) : t.addr);
@@ -258,16 +274,20 @@ function onMsg(ev) {
     return;
   }
   const buf = new Uint8Array(ev.data);
-  if (buf.length < 12) return;
-  if (useJpeg) { feedJpeg(buf.subarray(8)); return; }
+  if (buf.length < 8) return;
   const dv = new DataView(ev.data, 0, 8);
   hostW = dv.getUint32(0, true); hostH = dv.getUint32(4, true);
+  if (!hostW || !hostH || hostW > 8192 || hostH > 8192) return;
   if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
+  if (useJpeg) { feedJpeg(buf.subarray(8)); return; }
   feed(buf.subarray(8));
+}
+
+function markFrame(codec) {
   frames++;
   const now = performance.now();
   if (now - fpsT >= 1000) {
-    meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps';
+    meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps' + (codec ? ' (' + codec + ')' : '');
     frames = 0; fpsT = now;
   }
 }
@@ -319,26 +339,37 @@ function nalsToAvcc(nals) {
   return out;
 }
 
+function closeDecoder() {
+  if (decoder) { try { decoder.close(); } catch (_) {} }
+  decoder = null; cfgW = cfgH = 0;
+}
+
 function ensureDecoder() {
   if (decoder && cfgW === hostW && cfgH === hostH) return true;
-  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
+  closeDecoder();
   if (!sps || !pps) return false;
   const desc = avccDesc(sps, pps);
   const codecs = ['avc1.' + [desc[1], desc[2], desc[3]].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase()];
   for (const c of [...codecs, ...FALLBACK_CODECS]) {
     try {
-      decoder = new VideoDecoder({ output: drawFrame, error: () => { setPill('decode hatası', 'err'); decoder = null; } });
+      decoder = new VideoDecoder({
+        output: drawFrame,
+        error: () => { setPill('decode hatası', 'err'); closeDecoder(); needKey = true; }
+      });
       decoder.configure({ codec: c, codedWidth: hostW, codedHeight: hostH, description: desc });
       cfgW = hostW; cfgH = hostH;
       return true;
-    } catch (e) { decoder = null; }
+    } catch (_) { closeDecoder(); }
   }
-  showErr('Tarayıcın H264 çözemiyor (WebCodecs yok). Chrome/Edge dene.');
+  showErr('Tarayıcın H.264 çözemiyor. Güncel Chrome/Edge ve HTTPS dene.');
   return false;
 }
 
 function feed(annexb) {
-  if (typeof VideoDecoder === 'undefined') { showErr('Bu tarayıcıda H264 çözücü yok ve sunucu eski (JPEG modu yok). Chrome/Edge ile dene ya da hostu güncelle.'); return; }
+  if (!window.isSecureContext || typeof VideoDecoder === 'undefined') {
+    showErr('WebCodecs güvenli bağlamda kullanılamıyor; hosttan JPEG modu istenmeliydi. HTTPS veya yerel istemci kullan.');
+    return;
+  }
   const nals = splitNals(annexb);
   let hasVcl = false;
   for (const n of nals) {
@@ -347,34 +378,55 @@ function feed(annexb) {
     if (n.type === 5 || n.type === 1) hasVcl = true;
   }
   if (!hasVcl) return;
+  const isKey = nals.some(n => n.type === 5);
+
+  // Decode kuyruğu büyürse gecikme saniyelerce birikmesin. Zincir bozulduğu için
+  // delta kareleri bir sonraki IDR/key frame gelene kadar atlarız.
+  if (decoder && decoder.decodeQueueSize > 2) {
+    closeDecoder();
+    needKey = true;
+  }
+  if (needKey && !isKey) return;
   if (!ensureDecoder()) return;
+
   const avcc = nalsToAvcc(nals);
   if (!avcc.length) return;
-  const isKey = nals.some(n => n.type === 5);
   try {
-    decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts++, data: avcc }));
-  } catch (e) {}
+    decoder.decode(new EncodedVideoChunk({
+      type: isKey ? 'key' : 'delta',
+      timestamp: ts,
+      data: avcc
+    }));
+    ts += Math.round(1000000 / targetFps); // WebCodecs zaman damgası mikrosaniyedir.
+    if (isKey) needKey = false;
+  } catch (_) {
+    closeDecoder();
+    needKey = true;
+  }
 }
 
-// WebCodecs'siz tarayıcı yolu: her binary bir JPEG resimdir.
+// JPEG decode yavaşsa kuyruk yapmak yerine yalnızca en yeni bekleyen kareyi tut.
 function feedJpeg(bytes) {
+  if (jpegBusy) { pendingJpeg = bytes; return; }
+  jpegBusy = true;
   createImageBitmap(new Blob([bytes], { type: 'image/jpeg' })).then(bmp => {
     hostW = bmp.width; hostH = bmp.height;
     if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
-    frames++;
-    const now = performance.now();
-    if (now - fpsT >= 1000) {
-      meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps (JPEG)';
-      frames = 0; fpsT = now;
-    }
-  }).catch(() => {});
+    markFrame('JPEG');
+  }).catch(() => {}).finally(() => {
+    jpegBusy = false;
+    const next = pendingJpeg;
+    pendingJpeg = null;
+    if (next) feedJpeg(next);
+  });
 }
 
 function drawFrame(f) {
   ctx.drawImage(f, 0, 0);
   f.close();
+  markFrame('H.264');
 }
 
 // ---- input ----
@@ -387,10 +439,19 @@ function toHost(e) {
 }
 function send(o) { if (connected && ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
-let lastM = null;
+let lastM = null, pendingMouse = null, mouseRaf = 0;
 canvas.addEventListener('mousemove', e => {
   const p = toHost(e); if (!p) return;
-  if (!lastM || lastM.x !== p.x || lastM.y !== p.y) { lastM = p; send({ t: 'mouse', x: p.x, y: p.y }); }
+  pendingMouse = p;
+  if (mouseRaf) return;
+  mouseRaf = requestAnimationFrame(() => {
+    mouseRaf = 0;
+    const q = pendingMouse; pendingMouse = null;
+    if (q && (!lastM || lastM.x !== q.x || lastM.y !== q.y)) {
+      lastM = q;
+      send({ t: 'mouse', x: q.x, y: q.y });
+    }
+  });
 });
 canvas.addEventListener('mousedown', e => {
   const p = toHost(e); if (!p) return;
@@ -424,21 +485,43 @@ document.addEventListener('keyup', e => {
 
 // ---- dosya ----
 $('fileBtn').onclick = () => $('filePick').click();
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+async function waitSocketDrain() {
+  while (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 2 * 1024 * 1024) {
+    await sleep(20);
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('bağlantı kapandı');
+}
 $('filePick').addEventListener('change', async () => {
   const f = $('filePick').files[0];
   if (!f) return;
-  const id = Math.floor(Date.now() / 1000);
-  const buf = new Uint8Array(await f.arrayBuffer());
-  const CH = 200 * 1024;
-  for (let off = 0; off < buf.length; off += CH) {
-    const part = buf.slice(off, off + CH);
-    let bin = '';
-    for (let i = 0; i < part.length; i += 8192)
-      bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
-    send({ t: 'file', transfer_id: id, name: f.name, offset: off, total: buf.length,
-           data: btoa(bin), last: off + CH >= buf.length });
+  const MAX = 512 * 1024 * 1024;
+  if (!f.size || f.size > MAX) {
+    showErr('Dosya boş veya 512 MiB sınırından büyük.');
+    $('filePick').value = '';
+    return;
   }
-  $('filePick').value = '';
+  const rnd = new Uint32Array(1);
+  crypto.getRandomValues(rnd);
+  const id = Date.now() * 1000 + (rnd[0] % 1000); // Number güvenli tamsayı aralığında
+  const CH = 64 * 1024;
+  try {
+    for (let off = 0; off < f.size; off += CH) {
+      const part = new Uint8Array(await f.slice(off, Math.min(off + CH, f.size)).arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < part.length; i += 8192)
+        bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
+      await waitSocketDrain();
+      ws.send(JSON.stringify({
+        t: 'file', transfer_id: id, name: f.name, offset: off, total: f.size,
+        data: btoa(bin), last: off + part.length === f.size
+      }));
+    }
+  } catch (e) {
+    showErr('Dosya gönderilemedi: ' + (e && e.message ? e.message : e));
+  } finally {
+    $('filePick').value = '';
+  }
 });
 </script>
 </body>

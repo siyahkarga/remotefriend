@@ -14,3 +14,4 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
+rand = { workspace = true }
