@@ -36,6 +36,8 @@ install -d -o remotefriend -g remotefriend -m 0700 "$DATA_DIR"
 
 echo "=== 3/6 binary ($VERSION) ==="
 echo "(70MB civari, birkaç dakika sürebilir...)"
+# Önce servisi durdur: çalışan dosyanın üstüne yazılamaz.
+systemctl stop remotefriend 2>/dev/null || true
 curl -sSL --retry 3 --max-time 600 "$REPO/releases/download/$VERSION/remote-friend-rendezvous" -o "$INSTALL_DIR/remote-friend-rendezvous" \
   || { echo "DOWNLOAD FAILED: interneti veya release adını kontrol et." >&2; exit 1; }
 if [ "$(stat -c%s "$INSTALL_DIR/remote-friend-rendezvous")" -lt 1000000 ]; then
