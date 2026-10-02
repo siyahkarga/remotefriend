@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RemoteFriend v0.5.6 VPS kurulum/güncelleme (tek seferde çalışır).
-# Kullanım: curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/vps-kur-v056.sh | sudo bash
+# Kullanım: curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/setup-vps.sh | sudo bash
 # Mevcut sertifika VARSA korunur (istemcilerdeki fingerprint bozulmaz).
 set -euo pipefail
 

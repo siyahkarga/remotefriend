@@ -45,7 +45,8 @@ jobs:
           copy target\release\remote-friend-host.exe dist\
           copy target\release\remote-friend-client.exe dist\
           copy target\release\remote-friend-rendezvous.exe dist\
-          copy HOST_BASLAT.bat dist\
+          copy start-host-windows.bat dist\
+          copy setup-firewall-windows.bat dist\
 
       - name: Linux paketi
         if: runner.os == 'Linux'
