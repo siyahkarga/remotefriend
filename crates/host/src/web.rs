@@ -149,30 +149,41 @@ async fn handle_ws(socket: WebSocket, state: WsState) {
     tracing::info!("tarayıcı client ayrıldı ({ts})");
 }
 
-/// WebCodecs'siz tarayıcılar için düz JPEG akışı (her kare bağımsız resim).
-/// Başlık H264 ile aynı: w(u32 LE) + h(u32 LE) + JPEG baytları.
-async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>) {
+/// JPEG karesi kodla: w(u32 LE) + h(u32 LE) + JPEG baytları.
+/// Kalite RF_JPEG_Q ile verilir (30-95).
+fn encode_jpeg_frame(w: u32, h: u32, rgba: &[u8], quality: u8) -> Option<Vec<u8>> {
     use image::codecs::jpeg::JpegEncoder;
+    use image::RgbImage;
+    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
+    let img = RgbImage::from_raw(w, h, rgb)?;
+    let mut jpeg = Vec::new();
+    let mut enc = JpegEncoder::new_with_quality(&mut jpeg, quality);
+    enc.encode_image(&img).ok()?;
+    let mut msg = Vec::with_capacity(jpeg.len() + 8);
+    msg.extend_from_slice(&w.to_le_bytes());
+    msg.extend_from_slice(&h.to_le_bytes());
+    msg.extend_from_slice(&jpeg);
+    Some(msg)
+}
+
+fn jpeg_quality() -> u8 {
     // Kalite: RF_JPEG_Q (30-95, varsayılan 72). Yüksek = net yazı, düşük fps.
-    let quality: u8 = std::env::var("RF_JPEG_Q")
+    std::env::var("RF_JPEG_Q")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&q| (30..=95).contains(&q))
-        .unwrap_or(72);
+        .unwrap_or(72)
+}
+
+/// WebCodecs'siz tarayıcılar için düz JPEG akışı (her kare bağımsız resim).
+/// Başlık H264 ile aynı: w(u32 LE) + h(u32 LE) + JPEG baytları.
+async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>) {
+    let quality = jpeg_quality();
     loop {
         match super::capture_rgba() {
             Ok((w, h, rgba)) => {
-                let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
-                let mut jpeg = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg, quality);
-                use image::RgbImage;
-                match RgbImage::from_raw(w, h, rgb) {
-                    Some(img) => {
-                        let _ = enc.encode_image(&img);
-                        let mut msg = Vec::with_capacity(jpeg.len() + 8);
-                        msg.extend_from_slice(&w.to_le_bytes());
-                        msg.extend_from_slice(&h.to_le_bytes());
-                        msg.extend_from_slice(&jpeg);
+                match encode_jpeg_frame(w, h, &rgba, quality) {
+                    Some(msg) => {
                         let mut g = tx.lock().await;
                         if g.send(Message::Binary(msg)).await.is_err() {
                             break;
@@ -191,7 +202,6 @@ async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Mess
         tokio::time::sleep(std::time::Duration::from_millis(super::FPS_MS)).await;
     }
 }
-/// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
 /// Dial-back hattı üzerinden web oturumu (VPS internet yolu).
 /// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
 pub(crate) async fn session_kmsg<R, W>(rd: R, wr: W)
@@ -255,6 +265,55 @@ where
     }
     video_task.abort();
     tracing::info!("kmsg web oturumu kapandı");
+}
+
+/// VPS internet yolunda WebCodecs'siz tarayıcı: kmsg üzerinden JPEG.
+/// (Rendezvous welcome'da {"jpeg":true} gönderir, sayfa createImageBitmap ile çizer.)
+pub(crate) async fn session_kmsg_jpeg<R, W>(rd: R, wr: W)
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
+    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
+{
+    use remote_friend_common::io::{read_kmsg, write_kmsg};
+    let quality = jpeg_quality();
+    let wr = Arc::new(Mutex::new(wr));
+    let wr2 = wr.clone();
+    let video_task = tokio::spawn(async move {
+        loop {
+            match super::capture_rgba() {
+                Ok((w, h, rgba)) => {
+                    if let Some(msg) = encode_jpeg_frame(w, h, &rgba, quality) {
+                        let mut g = wr2.lock().await;
+                        if write_kmsg(&mut *g, 0, &msg).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("capture hatası: {e:#}");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(super::FPS_MS)).await;
+        }
+    });
+
+    let mut rd = rd;
+    loop {
+        match read_kmsg(&mut rd).await {
+            Ok((1, payload)) => {
+                if let Ok(t) = String::from_utf8(payload) {
+                    if let Err(e) = handle_json_input(&t) {
+                        tracing::warn!("web input hatası: {e:#}");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    video_task.abort();
+    tracing::info!("kmsg jpeg oturumu kapandı");
 }
 
 fn handle_json_input(t: &str) -> Result<()> {

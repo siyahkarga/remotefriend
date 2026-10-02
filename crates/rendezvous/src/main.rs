@@ -32,7 +32,7 @@ struct HostEntry {
 
 enum PendingKind {
     Native { rd: Option<BoxRd>, wr: Option<BoxWr> },
-    Web { sink: Option<WsSink>, stream: Option<WsStream> },
+    Web { sink: Option<WsSink>, stream: Option<WsStream>, jpeg: bool },
 }
 
 struct Pending {
@@ -225,10 +225,14 @@ async fn handle_native(
                     splice_framed(c_rd, c_wr, rd, wr).await;
                     Ok(())
                 }
-                Some(Pending { kind: PendingKind::Web { sink: Some(mut sink), stream: Some(stream) }, .. }) => {
+                Some(Pending { kind: PendingKind::Web { sink: Some(mut sink), stream: Some(stream), jpeg }, .. }) => {
                     use axum::extract::ws::Message;
                     use futures_util::SinkExt;
-                    sink.send(Message::Text(r#"{"t":"welcome"}"#.into())).await?;
+                    if jpeg {
+                        sink.send(Message::Text(r#"{"t":"welcome","jpeg":true}"#.into())).await?;
+                    } else {
+                        sink.send(Message::Text(r#"{"t":"welcome"}"#.into())).await?;
+                    }
                     splice_ws(sink, stream, rd, wr).await;
                     Ok(())
                 }
@@ -360,14 +364,17 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
 
     async fn handle_web(socket: WebSocket, state: Arc<State>) {
         let (mut sink, mut stream) = socket.split();
-        // hello (15 sn): {t:"hello", id:"123456789"}
+        // hello (15 sn): {t:"hello", id:"123456789", jpeg:true?}
         let hello = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
-        let id = match hello {
+        let (id, jpeg) = match hello {
             Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(&t)
                 .ok()
-                .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(|s| s.replace(' ', "")))
+                .map(|v| (
+                    v.get("id").and_then(|x| x.as_str()).map(|s| s.replace(' ', "")).unwrap_or_default(),
+                    v.get("jpeg").and_then(|x| x.as_bool()).unwrap_or(false),
+                ))
                 .unwrap_or_default(),
-            _ => String::new(),
+            _ => (String::new(), false),
         };
         if !valid_id(&id) {
             let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"9 haneli ID gerekli"}"#.into())).await;
@@ -382,9 +389,10 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
         let client_tag = format!("c{token}");
         state.pending.lock().await.insert(
             token,
-            Pending { host_id: id.clone(), kind: PendingKind::Web { sink: Some(sink), stream: Some(stream) }, created: std::time::Instant::now() },
+            Pending { host_id: id.clone(), kind: PendingKind::Web { sink: Some(sink), stream: Some(stream), jpeg }, created: std::time::Instant::now() },
         );
-        let _ = cmd_tx.send(RvMsg::ApprovalRequest { client: client_tag.clone(), addr: "tarayıcı".into(), kind: "web".into(), token });
+        let kind = if jpeg { "web-jpeg" } else { "web" };
+        let _ = cmd_tx.send(RvMsg::ApprovalRequest { client: client_tag.clone(), addr: "tarayıcı".into(), kind: kind.into(), token });
         tracing::info!("{client_tag} (web) -> {id} ({hname}) onay bekleniyor");
         // sonrası: dial-back / ret / timeout halleder, bu task biter
     }

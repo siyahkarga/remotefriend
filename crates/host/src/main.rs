@@ -424,7 +424,9 @@ async fn dial_back(target: &RvTarget, token: u64, kind: &str, password: &str) {
                 return;
             }
             tracing::info!("{peer}: dial-back kuruldu ({kind})");
-            if kind == "web" {
+            if kind == "web-jpeg" {
+                web::session_kmsg_jpeg(rd, wr).await;
+            } else if kind == "web" {
                 web::session_kmsg(rd, wr).await;
             } else {
                 let _ = session_native(rd, wr, peer.clone(), password, false).await;
