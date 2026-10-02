@@ -1,5 +1,5 @@
 /target/
-# Yerel sırlar (sunucu/parola) asla repoya girmez
-AYARLARIM.bat
-ayarlarim.env
+# Local secrets (server/password) never enter the repo
+settings.local.bat
+local.env
 *.zip
