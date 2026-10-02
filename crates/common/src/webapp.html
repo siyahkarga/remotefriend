@@ -57,7 +57,7 @@
   #toolbar .meta { color:var(--dim); font-size:13px; margin-left:auto; font-variant-numeric:tabular-nums; }
   #stage { position:relative; background:#000; border:1px solid var(--line); border-radius:12px; overflow:hidden;
     box-shadow:0 12px 44px #00000066; }
-  #screen { display:block; width:100%; cursor:crosshair; }
+  #screen { display:block; width:100%; cursor:crosshair; touch-action:none; }
   #err { display:none; background:#3d1a1c; border:1px solid var(--err); border-radius:12px; padding:14px 16px; margin-bottom:14px; }
   #err b { display:block; margin-bottom:4px; }
   #hint { color:var(--dim); font-size:12.5px; margin-top:12px; line-height:1.7; }
@@ -440,8 +440,35 @@ function toHost(e) {
 function send(o) { if (connected && ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 let lastM = null, pendingMouse = null, mouseRaf = 0;
+let lastTouchTs = 0, touchTwoFinger = false; // dokunmatik fareöykünmesini bastırır
+function freshMouseEvent() { return Date.now() - lastTouchTs > 500; }
+canvas.addEventListener('touchstart', e => {
+  lastTouchTs = Date.now();
+  if (e.touches.length === 2) { touchTwoFinger = true; }
+  const t = e.changedTouches[0];
+  const p = toHost(t); if (!p) { e.preventDefault(); return; }
+  lastM = p;
+  send({ t: 'mouse', x: p.x, y: p.y });
+  send({ t: 'down', b: 'left' });
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  lastTouchTs = Date.now();
+  const t = e.changedTouches[0];
+  const p = toHost(t); if (!p) { e.preventDefault(); return; }
+  if (!lastM || lastM.x !== p.x || lastM.y !== p.y) { lastM = p; send({ t: 'mouse', x: p.x, y: p.y }); }
+  e.preventDefault();
+}, { passive: false });
+function touchEnd(e) {
+  lastTouchTs = Date.now();
+  send({ t: 'up', b: touchTwoFinger ? 'right' : 'left' });
+  touchTwoFinger = false;
+  e.preventDefault();
+}
+canvas.addEventListener('touchend', touchEnd, { passive: false });
+canvas.addEventListener('touchcancel', touchEnd, { passive: false });
 canvas.addEventListener('mousemove', e => {
-  const p = toHost(e); if (!p) return;
+  if (!freshMouseEvent()) return;
   pendingMouse = p;
   if (mouseRaf) return;
   mouseRaf = requestAnimationFrame(() => {
@@ -454,12 +481,14 @@ canvas.addEventListener('mousemove', e => {
   });
 });
 canvas.addEventListener('mousedown', e => {
+  if (!freshMouseEvent()) { e.preventDefault(); return; }
   const p = toHost(e); if (!p) return;
   send({ t: 'mouse', x: p.x, y: p.y });
   send({ t: 'down', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
   e.preventDefault();
 });
 canvas.addEventListener('mouseup', e => {
+  if (!freshMouseEvent()) return;
   send({ t: 'up', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
 });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
