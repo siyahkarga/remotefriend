@@ -25,7 +25,7 @@ if [ -z "${RF_RV_SERVER:-}" ]; then
   read -r -p "Server [example 1.2.3.4:33202, empty=LAN]: " RF_RV_SERVER || true
 fi
 if [ -n "${RF_RV_SERVER:-}" ] && [ -z "${RF_RV_FP:-}" ]; then
-  read -r -p "Certificate fingerprint: " RF_RV_FP || true
+  echo "First run will ask once to trust the server, then remembers."
 fi
 if [ -z "${REMOTE_FRIEND_PASS:-}" ]; then
   echo "No password set: the program generates a new one on every start."

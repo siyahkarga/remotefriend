@@ -27,8 +27,9 @@ if not defined RF_RV_SERVER (
   set /p RF_RV_SERVER=Server [example 1.2.3.4:33202, empty=LAN]:
 )
 if defined RF_RV_SERVER (
+  REM First run asks once in the app and remembers; RF_RV_FP override stays optional.
   if not defined RF_RV_FP (
-    set /p RF_RV_FP=Certificate fingerprint:
+    echo First run will ask once to trust the server, then remembers.
   )
 )
 

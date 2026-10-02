@@ -393,11 +393,59 @@ async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
                     let (r, w) = s.into_split();
                     Ok((Box::new(r), Box::new(w)))
                 } else {
-                    anyhow::bail!("TLS doğrulanamadı ({e:#}); IP + self-signed için RF_RV_FP ver ya da test için RF_PLAIN_OK=1");
+                    // TOFU: sunucuya ilk kez bağlanılıyor. Parmak izini göster, operatör
+                    // onaylarsa kalıcı kaydet ve pinli bağlan. Bir daha sorulmaz.
+                    tracing::warn!("sistem sertifikasıyla doğrulanamadı ({e:#}); TOFU soruluyor");
+                    match tofu_approve_server(&t.addr, &t.sni).await? {
+                        Some(fp) => {
+                            let s = remote_friend_common::tls::tls_connect(&t.addr, &t.sni, Some(fp)).await?;
+                            let (r, w) = tokio::io::split(s);
+                            Ok((Box::new(r), Box::new(w)))
+                        }
+                        None => anyhow::bail!("sunucu parmak izi onaylanmadı"),
+                    }
                 }
             }
         }
     }
+}
+
+/// TOFU: bilinmeyen sunucunun parmak izini terminalde göster, operatör
+/// onaylarsa config'e kalıcı kaydet. Reddedilirse/zaman aşımında None.
+/// Ret bir kez verildiyse bu çalıştırmada tekrar sorulmaz.
+static TOFU_DECLINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn tofu_approve_server(addr: &str, sni: &str) -> Result<Option<String>> {
+    if TOFU_DECLINED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let fp = remote_friend_common::tls::fetch_server_fingerprint(addr, sni).await?;
+    println!("*** Bu sunucuya ilk kez bağlanılıyor: {addr}");
+    println!("*** Sertifika parmak izi: {fp}");
+    println!("*** Güvenip kalıcı kaydetmek istiyor musun? (E = evet / H = hayır, 60 sn)");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let ok = match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(line) => matches!(line.trim().to_lowercase().as_str(), "e" | "evet" | "y" | "yes"),
+        Err(_) => {
+            println!("*** zaman aşımı, vazgeçildi");
+            false
+        }
+    };
+    if !ok {
+        TOFU_DECLINED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(None);
+    }
+    let mut cfg = remote_friend_common::identity::load_rv_config();
+    cfg.server = addr.to_string();
+    cfg.fp = fp.clone();
+    remote_friend_common::identity::save_rv_config(&cfg);
+    println!("*** parmak izi kaydedildi, bir daha sorulmayacak");
+    Ok(Some(fp))
 }
 
 async fn uplink_loop(target: RvTarget, id: String, secret: String, pc_name: String, password: String) {

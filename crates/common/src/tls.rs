@@ -121,6 +121,74 @@ pub async fn tls_connect(
     .context("TLS handshake başarısız")
 }
 
+/// Sunucunun o anki sertifika parmak izini DOĞRULAMADAN okur.
+/// SADECE TOFU (ilk bağlanışta kullanıcıya gösterip onay almak) için kullanılır.
+/// Bu bağlantı üzerinden hassas veri gönderilmez; onay sonrası pinli bağlanılır.
+pub async fn fetch_server_fingerprint(addr: &str, server_name: &str) -> Result<String> {
+    #[derive(Debug)]
+    struct AcceptAny;
+    impl rustls::client::danger::ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .with_context(|| format!("TCP bağlantı zaman aşımı: {addr}"))?
+    .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAny))
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|_| anyhow::anyhow!("geçersiz sunucu adı"))?;
+    let tls = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        connector.connect(name, stream),
+    )
+    .await
+    .context("TLS handshake zaman aşımı")?
+    .context("TLS handshake başarısız")?;
+    let (_, conn) = tls.get_ref();
+    let cert = conn
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .context("sunucu sertifika göndermedi")?;
+    Ok(super::fingerprint_full(cert.as_ref()))
+}
 /// Sunucu tarafı TLS acceptor (sertifika dosyalarından).
 pub fn tls_acceptor(
     cert_path: &str,

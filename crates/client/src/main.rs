@@ -27,6 +27,9 @@ struct Shared {
     host_w: u32,
     host_h: u32,
     fps: f32,
+    /// TOFU: (sunucu, parmak izi) onay bekliyor; cevap None ise kararsız.
+    tofu_pending: Option<(String, String)>,
+    tofu_answer: Option<bool>,
 }
 
 fn main() -> Result<()> {
@@ -118,32 +121,79 @@ async fn net_loop_rv(
     use remote_friend_common::io::{read_rv, write_rv};
     use remote_friend_common::RvMsg;
     shared.lock().unwrap().status = format!("sunucuya bağlanılıyor ({server})...").into();
-    let (rd, wr, mode): (BoxRd, BoxWr, &'static str) = if let Some(fp) = fp {
-        let s = remote_friend_common::tls::tls_connect(server, server.split(':').next().unwrap_or("rv"), Some(fp)).await?;
-        let (r, w) = tokio::io::split(s);
-        (Box::new(r), Box::new(w), "TLS")
-    } else {
-        // Parmak izi yoksa sistem kök sertifikalarıyla dene (domain + LE kuruluysa sorunsuz).
-        match remote_friend_common::tls::tls_connect(server, server.split(':').next().unwrap_or("rv"), None).await {
-            Ok(s) => {
-                let (r, w) = tokio::io::split(s);
-                (Box::new(r), Box::new(w), "TLS-CA")
+    let sni = server.split(':').next().unwrap_or("rv").to_string();
+    // 1. pinli ya da sistem sertifikasıyla dene
+    let mut pinned: Option<String> = fp;
+    let mut tls_stream = None;
+    if pinned.is_none() {
+        match remote_friend_common::tls::tls_connect(server, &sni, None).await {
+            Ok(s) => tls_stream = Some(s),
+            Err(_) => {} // aşağıda TOFU / düz yol dener
+        }
+    }
+    // 2. TOFU: sunucu bilinmiyorsa parmak izini göster, kullanıcı onaylarsa kaydet
+    if tls_stream.is_none() && pinned.is_none() {
+        if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+            // test modu: doğrulamasız düz bağlantı (aşağıda)
+        } else if let Ok(fp_fetched) =
+            remote_friend_common::tls::fetch_server_fingerprint(server, &sni).await
+        {
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.status = "sunucu parmak izi onayı bekleniyor...".into();
+                sh.tofu_pending = Some((server.to_string(), fp_fetched.clone()));
+                sh.tofu_answer = None;
             }
-            Err(e) => {
-                if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
-                    let s = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        tokio::net::TcpStream::connect(server),
-                    )
-                    .await
-                    .context("rendezvous TCP bağlantı zaman aşımı")??;
-                    let (r, w) = s.into_split();
-                    (Box::new(r), Box::new(w), "DÜZ")
-                } else {
-                    anyhow::bail!("TLS doğrulanamadı ({e:#}); IP + self-signed için sunucu ayarında FP gir ya da test için RF_PLAIN_OK=1");
+            // Kullanıcı kararını bekle (120 sn)
+            let mut answer = None;
+            for _ in 0..600 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if disconnect.has_changed().unwrap_or(true) {
+                    break;
+                }
+                if let Some(a) = shared.lock().unwrap().tofu_answer {
+                    answer = Some(a);
+                    break;
+                }
+            }
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.tofu_pending = None;
+                sh.tofu_answer = None;
+            }
+            match answer {
+                Some(true) => {
+                    let mut cfg = remote_friend_common::identity::load_rv_config();
+                    cfg.server = server.to_string();
+                    cfg.fp = fp_fetched.clone();
+                    remote_friend_common::identity::save_rv_config(&cfg);
+                    pinned = Some(fp_fetched);
+                }
+                _ => {
+                    shared.lock().unwrap().status = "sunucu güven onayı verilmedi".into();
+                    anyhow::bail!("TOFU reddedildi/zaman aşımı");
                 }
             }
         }
+    }
+    let (rd, wr, mode): (BoxRd, BoxWr, &'static str) = if let Some(fp) = pinned {
+        let s = remote_friend_common::tls::tls_connect(server, &sni, Some(fp)).await?;
+        let (r, w) = tokio::io::split(s);
+        (Box::new(r), Box::new(w), "TLS")
+    } else if let Some(s) = tls_stream {
+        let (r, w) = tokio::io::split(s);
+        (Box::new(r), Box::new(w), "TLS-CA")
+    } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+        let s = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::TcpStream::connect(server),
+        )
+        .await
+        .context("rendezvous TCP bağlantı zaman aşımı")??;
+        let (r, w) = s.into_split();
+        (Box::new(r), Box::new(w), "DÜZ")
+    } else {
+        anyhow::bail!("sunucuya güvenli bağlanılamadı");
     };
     let _ = mode;
     let mut rd = rd;
@@ -401,6 +451,8 @@ impl App {
             host_w: 0,
             host_h: 0,
             fps: 0.0,
+            tofu_pending: None,
+            tofu_answer: None,
         }));
         let (tx_out, rx_out) = channel::<Packet>(256);
         let (dc_tx, dc_rx) = tokio::sync::watch::channel(false);
@@ -649,6 +701,29 @@ impl App {
                 }
             });
         });
+
+        // TOFU: bilinmeyen sunucu ilk bağlanışta parmak iziyle sorulur.
+        if let Some((srv, fp)) = shared.lock().unwrap().tofu_pending.clone() {
+            egui::Window::new("Sunucuya ilk kez bağlanılıyor")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!("Sunucu: {srv}"));
+                    ui.add_space(4.0);
+                    ui.monospace(&fp);
+                    ui.add_space(4.0);
+                    ui.small("Bu soru ilk bağlanışta normaldir. Onaylarsan hatırlanır.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Güven ve Bağlan").clicked() {
+                            shared.lock().unwrap().tofu_answer = Some(true);
+                        }
+                        if ui.button("Vazgeç").clicked() {
+                            shared.lock().unwrap().tofu_answer = Some(false);
+                        }
+                    });
+                });
+        }
 
         let failed = status.starts_with("hata")
             || status.starts_with("reddedildi")

@@ -74,7 +74,8 @@ Ayrıntılar: `SECURITY.md`, `PERFORMANCE.md`, `PATCH_NOTES_v0.5.6.md`.
 ### İnternet/VPS
 
 - `RF_RV_SERVER`: `sunucu:33202`.
-- `RF_RV_FP`: VPS TLS sertifikasının tam SHA-256 fingerprint'i.
+- `RF_RV_FP`: gerekmez; ilk bağlanışta parmak izi sorulup hatırlanır (TOFU).
+  Yalnızca manuel sabitlemek istersen VPS sertifikasının tam SHA-256 fingerprint'i.
 - `RF_PLAIN_OK=1`: yalnızca kontrollü yerel test için düz rendezvous bağlantısı; internette kullanma.
 - `RF_ALLOWED_ORIGIN`: gerekirse virgülle ayrılmış ek izinli WebSocket origin'leri.
 - `RF_MAX_PENDING`: relay'de onay bekleyen toplam oturum sınırı, varsayılan `256`.
