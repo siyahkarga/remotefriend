@@ -6,6 +6,8 @@ set -euo pipefail
 
 VERSION="v0.5.6"
 REPO="https://github.com/siyahkarga/remotefriend"
+# Bu VPS'in dış IP'si (nginx sadece buna bakar). Farklıysa: SERVER_IP=x.x.x.x ... | sudo bash
+SERVER_IP="${SERVER_IP:-169.58.37.61}"
 INSTALL_DIR="/opt/remotefriend"
 DATA_DIR="/var/lib/remotefriend"
 SERVICE_FILE="/etc/systemd/system/remotefriend.service"
@@ -54,16 +56,16 @@ sleep 2
 echo "=== 6/6 nginx + firewall ==="
 if [ ! -f "$NGINX_SITE" ]; then
   # SADECE bu IP'ye gelen istekler buraya düşer; diğer sitelere dokunmaz.
-  cat > "$NGINX_SITE" <<'EOF'
+  cat > "$NGINX_SITE" <<EOF
 server {
   listen 80;
-  server_name 169.58.37.61;
+  server_name $SERVER_IP;
   location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
+    proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-Proto http;
-    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
