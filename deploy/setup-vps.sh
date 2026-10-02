@@ -35,7 +35,13 @@ install -d -o root -g remotefriend -m 0750 "$INSTALL_DIR"
 install -d -o remotefriend -g remotefriend -m 0700 "$DATA_DIR"
 
 echo "=== 3/6 binary ($VERSION) ==="
-curl -sL "$REPO/releases/download/$VERSION/remote-friend-rendezvous" -o "$INSTALL_DIR/remote-friend-rendezvous"
+echo "(70MB civari, birkaç dakika sürebilir...)"
+curl -sSL --retry 3 --max-time 600 "$REPO/releases/download/$VERSION/remote-friend-rendezvous" -o "$INSTALL_DIR/remote-friend-rendezvous" \
+  || { echo "DOWNLOAD FAILED: interneti veya release adını kontrol et." >&2; exit 1; }
+if [ "$(stat -c%s "$INSTALL_DIR/remote-friend-rendezvous")" -lt 1000000 ]; then
+  echo "DOWNLOAD FAILED: dosya çok küçük, indirme bozuk." >&2
+  exit 1
+fi
 chmod +x "$INSTALL_DIR/remote-friend-rendezvous"
 chown root:remotefriend "$INSTALL_DIR/remote-friend-rendezvous"
 
