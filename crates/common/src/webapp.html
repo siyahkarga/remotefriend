@@ -33,6 +33,8 @@
   label.lbl { display:block; font-size:12.5px; color:var(--dim); margin:12px 0 6px; font-weight:600; }
   input[type=text], input[type=password] { background:#0e1119; border:1px solid var(--line); color:var(--txt);
     border-radius:10px; padding:12px 14px; font-size:15px; outline:none; width:100%; transition:border .15s; }
+  select { background:#0e1119; border:1px solid var(--line); color:var(--txt);
+    border-radius:8px; padding:7px 9px; font-size:13px; outline:none; }
   input:focus { border-color:var(--acc); box-shadow:0 0 0 3px #4f7cff33; }
   #idInput { font-size:22px; letter-spacing:3px; text-align:center; font-weight:700; font-variant-numeric:tabular-nums; }
   .bigbtn { width:100%; margin-top:16px; padding:13px; font-size:16px; }
@@ -107,6 +109,20 @@
       <button class="ghost" id="fileBtn">📁 Dosya</button>
       <button class="ghost" id="fsBtn">⛶ Tam Ekran</button>
       <input type="file" id="filePick" style="display:none">
+      <span id="jpegCtl" style="display:none; align-items:center; gap:6px;">
+        <label class="lbl" style="margin:0" for="qSel">Kalite</label>
+        <select id="qSel">
+          <option value="45">Düşük</option>
+          <option value="60" selected>Orta</option>
+          <option value="75">Yüksek</option>
+        </select>
+        <label class="lbl" style="margin:0 0 0 6px" for="fSel">Hız</label>
+        <select id="fSel">
+          <option value="5">5</option>
+          <option value="8" selected>8</option>
+          <option value="12">12</option>
+        </select>
+      </span>
       <span class="meta" id="meta">—</span>
     </div>
     <div id="stage"><canvas id="screen"></canvas></div>
@@ -201,6 +217,8 @@ $('fsBtn').onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else if (st.requestFullscreen) st.requestFullscreen();
 };
+$('qSel').onchange = () => send({ t: 'quality', q: Number($('qSel').value) });
+$('fSel').onchange = () => send({ t: 'fps', fps: Number($('fSel').value) });
 
 function target() {
   if (mode === 'id') return { kind: 'id', id: $('idInput').value.replace(/\D/g, '') };
@@ -256,6 +274,7 @@ function onMsg(ev) {
     else if (m.t === 'welcome') {
       connected = true;
       useJpeg = !!m.jpeg;
+      $('jpegCtl').style.display = useJpeg ? 'inline-flex' : 'none';
       targetFps = Math.max(5, Math.min(60, Number(m.fps) || (useJpeg ? 10 : 30)));
       needKey = true; ts = 0;
       $('view').dataset.ok = '1';

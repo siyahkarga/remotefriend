@@ -210,7 +210,16 @@ fn encode_jpeg_frame(w: u32, h: u32, rgba: &[u8], quality: u8) -> Option<Vec<u8>
     Some(msg)
 }
 
+/// JPEG hattının canlı ayarları (sayfadaki Kalite/Hız kutularından değişir).
+/// Tüm JPEG izleyiciler aynı hattı paylaşır; son seçilen değer geçerlidir.
+static JPEG_Q: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static JPEG_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn jpeg_fps() -> u32 {
+    let cur = JPEG_FPS.load(std::sync::atomic::Ordering::Relaxed);
+    if cur != 0 {
+        return cur;
+    }
     std::env::var("RF_JPEG_FPS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -220,11 +229,28 @@ fn jpeg_fps() -> u32 {
 
 fn jpeg_quality() -> u8 {
     // Kalite: RF_JPEG_Q (30-95, varsayılan 68). Yüksek = net yazı, daha fazla CPU/ağ.
+    let cur = JPEG_Q.load(std::sync::atomic::Ordering::Relaxed);
+    if cur != 0 {
+        return cur;
+    }
     std::env::var("RF_JPEG_Q")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&q| (30..=95).contains(&q))
         .unwrap_or(68)
+}
+
+/// Sayfadan gelen canlı ayar: {"t":"quality","q":55} / {"t":"fps","fps":8}.
+pub(crate) fn set_jpeg_quality(q: u8) {
+    let q = q.clamp(30, 95);
+    JPEG_Q.store(q, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("JPEG kalite: {q}");
+}
+
+pub(crate) fn set_jpeg_fps(fps: u32) {
+    let fps = fps.clamp(2, 15);
+    JPEG_FPS.store(fps, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("JPEG fps: {fps}");
 }
 
 static JPEG_TX: OnceLock<tokio::sync::broadcast::Sender<Arc<Vec<u8>>>> = OnceLock::new();
@@ -238,8 +264,6 @@ fn jpeg_sender() -> &'static tokio::sync::broadcast::Sender<Arc<Vec<u8>>> {
         std::thread::Builder::new()
             .name("rf-capture-jpeg".into())
             .spawn(move || {
-                let quality = jpeg_quality();
-                let period = Duration::from_micros(1_000_000 / jpeg_fps() as u64);
                 let mut next = Instant::now();
                 let mut errors = 0u32;
                 loop {
@@ -248,6 +272,8 @@ fn jpeg_sender() -> &'static tokio::sync::broadcast::Sender<Arc<Vec<u8>>> {
                         next = Instant::now();
                         continue;
                     }
+                    let quality = jpeg_quality();
+                    let period = Duration::from_micros(1_000_000 / jpeg_fps() as u64);
                     match super::capture_rgba() {
                         Ok((w, h, rgba)) => match encode_jpeg_frame(w, h, &rgba, quality) {
                             Some(msg) => {
@@ -418,6 +444,17 @@ fn handle_json_input(t: &str) -> Result<()> {
             let down = v.get("down").and_then(|x| x.as_bool()).unwrap_or(true);
             if let Some(k) = map_key_str(code) {
                 super::apply_input(InputEvent::Key { key: k, down })?;
+            }
+        }
+        // Sayfadaki Kalite/Hız kutuları (JPEG izleyiciler için canlı ayar).
+        Some("quality") => {
+            if let Some(q) = v.get("q").and_then(|n| n.as_u64()) {
+                set_jpeg_quality(q as u8);
+            }
+        }
+        Some("fps") => {
+            if let Some(f) = v.get("fps").and_then(|n| n.as_u64()) {
+                set_jpeg_fps(f as u32);
             }
         }
         Some("file") => {
