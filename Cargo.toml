@@ -21,6 +21,7 @@ base64 = "0.22"
 tokio-rustls = "0.26"
 rand = "0.9"
 rustls-pemfile = "2"
+webpki-roots = "0.26"
 
 [profile.release]
 opt-level = 3

@@ -17,3 +17,4 @@ rustls = { workspace = true, features = ["ring"] }
 rustls-pemfile = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
+webpki-roots = { workspace = true }

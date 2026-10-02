@@ -122,17 +122,28 @@ async fn net_loop_rv(
         let s = remote_friend_common::tls::tls_connect(server, server.split(':').next().unwrap_or("rv"), Some(fp)).await?;
         let (r, w) = tokio::io::split(s);
         (Box::new(r), Box::new(w), "TLS")
-    } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
-        let s = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::net::TcpStream::connect(server),
-        )
-        .await
-        .context("rendezvous TCP bağlantı zaman aşımı")??;
-        let (r, w) = s.into_split();
-        (Box::new(r), Box::new(w), "DÜZ")
     } else {
-        anyhow::bail!("TLS fingerprint yok: sunucu ayarında FP gir ya da test için RF_PLAIN_OK=1");
+        // Parmak izi yoksa sistem kök sertifikalarıyla dene (domain + LE kuruluysa sorunsuz).
+        match remote_friend_common::tls::tls_connect(server, server.split(':').next().unwrap_or("rv"), None).await {
+            Ok(s) => {
+                let (r, w) = tokio::io::split(s);
+                (Box::new(r), Box::new(w), "TLS-CA")
+            }
+            Err(e) => {
+                if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+                    let s = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        tokio::net::TcpStream::connect(server),
+                    )
+                    .await
+                    .context("rendezvous TCP bağlantı zaman aşımı")??;
+                    let (r, w) = s.into_split();
+                    (Box::new(r), Box::new(w), "DÜZ")
+                } else {
+                    anyhow::bail!("TLS doğrulanamadı ({e:#}); IP + self-signed için sunucu ayarında FP gir ya da test için RF_PLAIN_OK=1");
+                }
+            }
+        }
     };
     let _ = mode;
     let mut rd = rd;

@@ -80,7 +80,10 @@ impl rustls::client::danger::ServerCertVerifier for FpVerifier {
     }
 }
 
-/// Sunucuya TLS ile bağlan. fp: beklenen sertifika fingerprint (hex).
+/// Sunucuya TLS ile bağlan.
+/// fp verildiyse sertifika parmak izi pinlenir (self-signed için).
+/// fp yoksa sistem kök sertifikalarıyla normal doğrulama yapılır
+/// (domain + Let's Encrypt varsa parmak iziyle uğraşmaya gerek yok).
 pub async fn tls_connect(
     addr: &str,
     server_name: &str,
@@ -93,10 +96,19 @@ pub async fn tls_connect(
     .await
     .with_context(|| format!("TCP bağlantı zaman aşımı: {addr}"))?
     .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(FpVerifier { expected: fp }))
-        .with_no_client_auth();
+    let config = match fp {
+        Some(fp) => rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(FpVerifier { expected: Some(fp) }))
+            .with_no_client_auth(),
+        None => {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        }
+    };
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|_| anyhow::anyhow!("geçersiz sunucu adı"))?;

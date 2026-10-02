@@ -378,13 +378,25 @@ async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
         let s = remote_friend_common::tls::tls_connect(&t.addr, &t.sni, Some(fp.clone())).await?;
         let (r, w) = tokio::io::split(s);
         Ok((Box::new(r), Box::new(w)))
-    } else if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
-        tracing::warn!("!!! rendezvous DÜZ bağlanıyor (test modu)");
-        let s = tokio::net::TcpStream::connect(&t.addr).await?;
-        let (r, w) = s.into_split();
-        Ok((Box::new(r), Box::new(w)))
     } else {
-        anyhow::bail!("TLS fingerprint yok (RF_RV_FP) ve RF_PLAIN_OK=1 değil — güvensiz internet yok");
+        // Parmak izi yoksa sistem kök sertifikalarıyla dene (domain + LE kuruluysa sorunsuz).
+        match remote_friend_common::tls::tls_connect(&t.addr, &t.sni, None).await {
+            Ok(s) => {
+                tracing::info!("rendezvous TLS (sistem sertifikası) ile bağlanıldı");
+                let (r, w) = tokio::io::split(s);
+                Ok((Box::new(r), Box::new(w)))
+            }
+            Err(e) => {
+                if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
+                    tracing::warn!("!!! rendezvous DÜZ bağlanıyor (test modu)");
+                    let s = tokio::net::TcpStream::connect(&t.addr).await?;
+                    let (r, w) = s.into_split();
+                    Ok((Box::new(r), Box::new(w)))
+                } else {
+                    anyhow::bail!("TLS doğrulanamadı ({e:#}); IP + self-signed için RF_RV_FP ver ya da test için RF_PLAIN_OK=1");
+                }
+            }
+        }
     }
 }
 
