@@ -132,15 +132,15 @@ fn prompt_line(question: &str, timeout: Duration) -> Option<String> {
     let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let rx = lines().lock().unwrap_or_else(|e| e.into_inner());
     while rx.try_recv().is_ok() {}
-    println!("\x07{question}");
+    status::say(&format!("\x07{question}"));
     match rx.recv_timeout(timeout) {
         Ok(line) => Some(line),
         Err(RecvTimeoutError::Timeout) => {
-            println!("*** timed out: treated as NO");
+            status::say("*** timed out: treated as NO");
             None
         }
         Err(RecvTimeoutError::Disconnected) => {
-            println!("*** no terminal input: cannot ask (use the desktop app, trusted devices or REMOTE_FRIEND_AUTO_ACCEPT=1)");
+            status::say("*** no terminal input: cannot ask (use the desktop app, trusted devices or REMOTE_FRIEND_AUTO_ACCEPT=1)");
             None
         }
     }

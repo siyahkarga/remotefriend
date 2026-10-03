@@ -95,10 +95,19 @@ fn local_offset_secs() -> i64 {
     })
 }
 
+/// Print a line without panicking when stdout is closed (e.g. a desktop launch whose
+/// output pipe went away); `println!` would panic on EPIPE and kill the calling task.
+pub(crate) fn say(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{text}");
+    let _ = out.flush();
+}
+
 /// Important event for the user: printed on the terminal and shown in the app.
 pub fn notice(text: impl Into<String>) {
     let text = text.into();
-    println!("{text}");
+    say(&text);
     update(|s| {
         s.notices.push(Notice { time: clock(), text });
         if s.notices.len() > 50 {

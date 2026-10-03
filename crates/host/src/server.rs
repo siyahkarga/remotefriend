@@ -183,46 +183,46 @@ fn print_banner(
     auto_accept: bool,
     native_bind: &str,
 ) {
-    println!();
-    println!("  ┌────────────────────────────────────────────────────────┐");
-    println!("    RemoteFriend  ·  {pc_name}");
-    println!("  ├────────────────────────────────────────────────────────┤");
-    println!("    Computer ID : {}", remote_friend_common::format_id(host_id));
+    status::say("");
+    status::say(&format!("  ┌────────────────────────────────────────────────────────┐"));
+    status::say(&format!("    RemoteFriend  ·  {pc_name}"));
+    status::say(&format!("  ├────────────────────────────────────────────────────────┤"));
+    status::say(&format!("    Computer ID : {}", remote_friend_common::format_id(host_id)));
     if from_env {
-        println!("    Password    : (from REMOTE_FRIEND_PASS)");
+        status::say(&format!("    Password    : (from REMOTE_FRIEND_PASS)"));
     } else {
-        println!("    Password    : {password}");
+        status::say(&format!("    Password    : {password}"));
     }
     match rv {
-        Some(t) => println!("    From anywhere: {}", relay_web_url(&t.addr)),
-        None => println!("    From anywhere: off (no relay server configured)"),
+        Some(t) => status::say(&format!("    From anywhere: {}", relay_web_url(&t.addr))),
+        None => status::say("    From anywhere: off (no relay server configured)"),
     }
-    println!("    Local network: http://{lan_ip}:{http_port}");
-    println!("  └────────────────────────────────────────────────────────┘");
+    status::say(&format!("    Local network: http://{lan_ip}:{http_port}"));
+    status::say(&format!("  └────────────────────────────────────────────────────────┘"));
     if auto_accept {
-        println!("  Approval is OFF (REMOTE_FRIEND_AUTO_ACCEPT=1): anyone with the password can connect.");
+        status::say(&format!("  Approval is OFF (REMOTE_FRIEND_AUTO_ACCEPT=1): anyone with the password can connect."));
     } else {
-        println!("  New devices need approval here: A = allow once, P = allow permanently (device is remembered).");
+        status::say(&format!("  New devices need approval here: A = allow once, P = allow permanently (device is remembered)."));
         let trusted = approval::trusted_count();
         if trusted > 0 {
-            println!("  Permanently allowed devices: {trusted}  (forget all: remote-friend-host --forget-devices)");
+            status::say(&format!("  Permanently allowed devices: {trusted}  (forget all: remote-friend-host --forget-devices)"));
         }
     }
     if !from_env {
-        println!("  The password is persistent; renew it with: remote-friend-host --new-password");
+        status::say(&format!("  The password is persistent; renew it with: remote-friend-host --new-password"));
     }
     if native_bind != "127.0.0.1" && native_bind != "::1" {
-        println!("  Note: the local network path is not encrypted; the internet path uses TLS/HTTPS.");
+        status::say(&format!("  Note: the local network path is not encrypted; the internet path uses TLS/HTTPS."));
     }
     let prof = video::profile(video::preset());
-    println!(
+    status::say(&format!(
         "  Video: {} ({} fps, up to {} px, {} kbit/s)",
         video::preset().name(),
         prof.fps,
         prof.max_w,
         prof.bitrate / 1000
-    );
-    println!();
+    ));
+    status::say("");
 }
 
 /// Settings changed (server address etc.): drop the relay connection and reconnect.
