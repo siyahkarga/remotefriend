@@ -1,33 +1,35 @@
-# v0.5.6 Hotfix Değişiklikleri
+> Historical document (applies to an older version).
 
-## Performans
+# v0.5.6 Hotfix Changes
 
-- Hedef 15 FPS → yapılandırılabilir 30 FPS.
-- `işlem süresi + 66 ms` pacing hatası giderildi.
-- Tek global H.264 ve tek global JPEG yayın hattı.
-- Küçük broadcast kuyrukları ve lag durumunda eski kare atlama.
-- İstemcide ilk kare deadlock'u giderildi.
-- İstemcide tam RGBA kare clone'u ve gereksiz texture upload kaldırıldı.
-- Tarayıcı H.264/JPEG decode backpressure eklendi.
-- Monitör enumeration cache, kalıcı input worker ve dosya streaming eklendi.
+## Performance
 
-## Güvenlik
+- Target 15 FPS → configurable 30 FPS.
+- Fixed the `processing time + 66 ms` pacing bug.
+- A single global H.264 and a single global JPEG broadcast pipeline.
+- Small broadcast queues; stale frames are skipped when lagging.
+- Fixed the first-frame deadlock in the client.
+- Removed the full RGBA frame clone and unnecessary texture uploads in the client.
+- Added browser H.264/JPEG decode backpressure.
+- Added a monitor enumeration cache, a persistent input worker and file streaming.
 
-- Protokol `2`, transport nesli `4`.
-- İnternet web parolası hostta doğrulanıyor.
-- TLS handshake imza doğrulaması düzeltildi.
-- CSPRNG host ID, 256 bit kalıcı host secret ve 128 bit dial-back token.
-- Rastgele varsayılan oturum şifresi.
-- Origin kontrolü, CSP ve diğer HTTP güvenlik başlıkları.
-- Bounded kanallar, oturum limitleri, timeoutlar ve boyut sınırları.
-- Güvenli gelen dosya dizini/adı/chunk sırası/atomik tamamlanma.
-- Parola localStorage'dan kaldırıldı.
-- VPS relay'in E2E olmadığı dokümante edildi.
+## Security
 
-## Uyumsuz değişiklik
+- Protocol `2`, transport generation `4`.
+- The internet web password is verified on the host.
+- Fixed TLS handshake signature verification.
+- CSPRNG host ID, 256-bit persistent host secret and 128-bit dial-back token.
+- Random default session password.
+- Origin check, CSP and other HTTP security headers.
+- Bounded channels, session limits, timeouts and size limits.
+- Safe incoming file directory/name/chunk ordering/atomic completion.
+- Password removed from localStorage.
+- Documented that the VPS relay is not E2E encrypted.
 
-Eski binary'lerle protokol uyumlu değildir. Host, client ve rendezvous birlikte güncellenmelidir.
+## Breaking change
 
-## Doğrulama durumu
+Not protocol-compatible with older binaries. Host, client and rendezvous must be updated together.
 
-Bu kaynak pakette statik tutarlılık, TOML/JSON ve tarayıcı JavaScript sözdizimi kontrolleri yapılmıştır. Paketi hazırlayan ortamda Rust toolchain bulunmadığı için nihai `cargo build` çalıştırılamamıştır; gerçek kullanım öncesi CI veya yerel makinede release build/test zorunludur.
+## Verification status
+
+Static consistency, TOML/JSON and browser JavaScript syntax checks were run on this source package. The final `cargo build` could not be run because the environment that prepared the package had no Rust toolchain; a release build/test in CI or on a local machine is mandatory before real use.

@@ -1,52 +1,54 @@
-# RemoteFriend v0.5.5 — Performans ve Güvenlik İncelemesi
+> Historical document (applies to an older version).
 
-**İnceleme tarihi:** 2 Ekim 2026
-**İncelenen paket:** `remotefriend-v0.5.5-kaynak.zip`
-**Hazırlanan düzeltme:** `remotefriend-v0.5.6-hotfix-kaynak`
-**Orijinal ZIP SHA-256:** `5e45870fbc92bf523f1e02f2116cf76e7b9541d6014fc7174c916365587fd4bd`
+# RemoteFriend v0.5.5 — Performance and Security Review
 
-## 1. Sonuç
+**Review date:** October 2, 2026
+**Package reviewed:** `remotefriend-v0.5.5-kaynak.zip`
+**Fix prepared:** `remotefriend-v0.5.6-hotfix-kaynak`
+**Original ZIP SHA-256:** `5e45870fbc92bf523f1e02f2116cf76e7b9541d6014fc7174c916365587fd4bd`
 
-3–5 FPS sorunu tek bir nedenden değil, birbirini büyüten birkaç tasarım hatasından geliyor:
+## 1. Summary
 
-1. Orijinal host en fazla yaklaşık **15 FPS** için ayarlanmış (`FPS_MS = 66`). Üstelik 66 ms bekleme, capture ve encode işlemlerinden **sonra** yapılıyor. Dolayısıyla gerçek kare süresi `capture + encode + ağ yazımı + 66 ms` oluyor. İşlem kısmı 130–250 ms sürerse sonuç doğal olarak yaklaşık 3–5 FPS oluyor.
-2. LAN tarayıcı sayfası çoğunlukla `http://IP:33201` üzerinden açılıyor. WebCodecs `VideoDecoder` güvenli bağlam gerektirdiği için LAN IP’sindeki düz HTTP sayfasında çoğu tarayıcı H.264 yolunu kullanamıyor; uygulama ağır JPEG moduna düşüyor.
-3. Her izleyici kendi ekran yakalama ve kendi H.264/JPEG encode döngüsünü başlatıyor. İkinci istemci CPU yükünü yaklaşık ikiye katlayabiliyor.
-4. Native istemci, yeni kare gelmese bile aynı tam görüntüyü tekrar klonlayıp GPU texture’ına yüklüyor.
-5. İlk kare geldiğinde aynı `Mutex` kilidi bırakılmadan ikinci kez alınmaya çalışılıyor. Bu, ilk görüntüde kilitlenmeye yol açabilecek gerçek bir deadlock hatası.
-6. Yazılımsal OpenH264, RGBA → RGB → YUV dönüşümleri ve tam kare kopyaları CPU’da çalışıyor. Yüksek çözünürlükte bu mimari zaten sınıra çabuk geliyor.
+The 3–5 FPS problem does not have a single cause; it comes from several design flaws that amplify each other:
 
-Hazırlanan v0.5.6 hotfix bu sorunların düşük riskle düzeltilebilen kısmını ele alıyor: hedef 30 FPS, sabit zamanlı pacing, tek ortak capture/encode hattı, gecikme biriktirmeyen küçük broadcast kuyruğu, yalnızca yeni karede texture güncelleme, deadlock düzeltmesi, JPEG için ortak yayın hattı ve tarayıcı decode backpressure.
+1. The original host is tuned for at most about **15 FPS** (`FPS_MS = 66`). On top of that, the 66 ms wait happens **after** capture and encode. So the real frame time is `capture + encode + network write + 66 ms`. If the processing part takes 130–250 ms, the result is naturally about 3–5 FPS.
+2. The LAN browser page is usually opened via `http://IP:33201`. Because WebCodecs `VideoDecoder` requires a secure context, most browsers cannot use the H.264 path on a plain HTTP page at a LAN IP; the app falls back to the heavy JPEG mode.
+3. Every viewer starts its own screen capture and its own H.264/JPEG encode loop. A second client can roughly double the CPU load.
+4. The native client re-clones the same full image and uploads it to the GPU texture even when no new frame has arrived.
+5. When the first frame arrives, the same `Mutex` lock is acquired a second time without being released. This is a real deadlock bug that can freeze on the first image.
+6. Software OpenH264, RGBA → RGB → YUV conversions and full-frame copies all run on the CPU. At high resolutions this architecture hits its limits quickly.
 
-**Beklenti:** Bu değişiklikler 3–5 FPS durumunu belirgin biçimde iyileştirmelidir. Bununla birlikte 1080p/30’da nihai sonuç host CPU’suna, ekran yakalama backend’ine, ağ bant genişliğine ve yazılımsal OpenH264 hızına bağlıdır. Paket bu inceleme ortamında Rust derleyicisi bulunmadığı için derlenemedi; bu nedenle “kesin 30 FPS” garantisi verilmemektedir.
+The prepared v0.5.6 hotfix addresses the parts of these problems that can be fixed with low risk: 30 FPS target, fixed-rate pacing, a single shared capture/encode pipeline, a small broadcast queue that does not accumulate latency, texture updates only on new frames, the deadlock fix, a shared broadcast pipeline for JPEG, and browser decode backpressure.
 
----
-
-## 2. İnceleme yöntemi ve sınırlar
-
-Yapılanlar:
-
-- Tüm Rust, HTML/JavaScript, TOML, YAML, batch ve systemd dosyaları statik olarak incelendi.
-- Video capture → renk dönüşümü → encode → kuyruk → ağ → decode → texture yükleme zinciri takip edildi.
-- LAN, tarayıcı, native istemci ve VPS rendezvous/relay yolları ayrı ayrı incelendi.
-- Kimlik doğrulama, TLS verifier, WebSocket Origin, dosya aktarımı, mesaj sınırları ve oturum yönetimi kontrol edildi.
-- Kod üzerinde performans ve güvenlik yamaları uygulandı.
-- 25 maddelik otomatik statik doğrulama çalıştırıldı; 25/25 geçti.
-
-Sınırlar:
-
-- Ortamda `cargo`, `rustc` ve Rust bağımlılık önbelleği yoktu.
-- İnternet erişimi kapalı olduğu için geçici Rust araç zinciri indirilemedi.
-- Bu nedenle `cargo check`, `cargo test`, gerçek iki bilgisayarlı görüntü testi ve gecikme/FPS benchmark’ı çalıştırılamadı.
-- Bağımlılık zafiyet taraması (`cargo audit`) çalıştırılamadı.
+**Expectation:** These changes should noticeably improve the 3–5 FPS situation. However, the final result at 1080p/30 depends on the host CPU, the screen capture backend, network bandwidth and software OpenH264 speed. The package could not be compiled because no Rust compiler was available in this review environment; therefore no "guaranteed 30 FPS" is promised.
 
 ---
 
-## 3. Performans bulguları
+## 2. Review method and limits
 
-### P1 — Hatalı kare zamanlaması
+Done:
 
-**Orijinal kod:** `crates/host/src/main.rs:17`, `:220–269`
+- All Rust, HTML/JavaScript, TOML, YAML, batch and systemd files were statically reviewed.
+- The video capture → color conversion → encode → queue → network → decode → texture upload chain was traced.
+- The LAN, browser, native client and VPS rendezvous/relay paths were reviewed separately.
+- Authentication, the TLS verifier, WebSocket Origin, file transfer, message limits and session management were checked.
+- Performance and security patches were applied to the code.
+- A 25-item automated static verification was run; 25/25 passed.
+
+Limits:
+
+- The environment had no `cargo`, `rustc` or Rust dependency cache.
+- Internet access was disabled, so a temporary Rust toolchain could not be downloaded.
+- Therefore `cargo check`, `cargo test`, a real two-computer video test and a latency/FPS benchmark could not be run.
+- A dependency vulnerability scan (`cargo audit`) could not be run.
+
+---
+
+## 3. Performance findings
+
+### P1 — Incorrect frame timing
+
+**Original code:** `crates/host/src/main.rs:17`, `:220–269`
 
 ```rust
 pub(crate) const FPS_MS: u64 = 66; // ~15fps
@@ -56,168 +58,166 @@ capture + encode + send
 sleep(66ms)
 ```
 
-Bu yapı 15 FPS sınırı koymakla kalmıyor; capture/encode süresini kare bütçesine ekliyor. Örneğin:
+This not only caps the rate at 15 FPS; it adds the capture/encode time to the frame budget. For example:
 
-- Capture + encode + gönderim 140 ms
-- Ek uyku 66 ms
-- Toplam 206 ms/kare
-- Sonuç yaklaşık 4.85 FPS
+- Capture + encode + send: 140 ms
+- Extra sleep: 66 ms
+- Total: 206 ms/frame
+- Result: about 4.85 FPS
 
-**Hotfix:** `RF_FPS=30` varsayılanı ve deadline tabanlı sabit pacing. İşlem süresi hedef kare aralığından kısa ise sadece kalan süre bekleniyor; uzun ise fazladan 33/66 ms eklenmiyor.
+**Hotfix:** `RF_FPS=30` default and deadline-based fixed pacing. If processing is shorter than the target frame interval, only the remaining time is waited; if it is longer, no extra 33/66 ms is added.
 
-### P2 — LAN tarayıcıda WebCodecs yerine JPEG’e düşme
+### P2 — LAN browser falling back to JPEG instead of WebCodecs
 
-**Orijinal kod:** `crates/common/src/webapp.html:201–219`
+**Original code:** `crates/common/src/webapp.html:201–219`
 
-Orijinal kontrol yalnızca `typeof VideoDecoder === 'undefined'` idi. Ancak LAN IP’si üzerinden düz HTTP sayfası güvenli bağlam değildir. Modern tarayıcılar `VideoDecoder` erişimini güvenli bağlamla sınırlar. Sonuçta uygulama JPEG yolunu seçer veya H.264 decoder açamaz.
+The original check was only `typeof VideoDecoder === 'undefined'`. But a plain HTTP page served from a LAN IP is not a secure context. Modern browsers restrict `VideoDecoder` to secure contexts. As a result the app picks the JPEG path or cannot open the H.264 decoder.
 
-JPEG yolu her kareyi CPU’da tek resim olarak sıkıştırıp tarayıcıda tekrar resim olarak açar. Masaüstü görüntüsü gibi sürekli değişen yüksek çözünürlüklü içerikte 3–5 FPS görülmesi mümkündür.
+The JPEG path compresses each frame on the CPU as a single image and decodes it again as an image in the browser. With constantly changing high-resolution content such as a desktop, 3–5 FPS is entirely possible.
 
-**Hotfix:** `window.isSecureContext` açıkça kontrol ediliyor. Güvensiz bağlamda davranış anlaşılır biçimde JPEG olarak işaretleniyor. JPEG yolu 10 FPS/kalite 68 varsayılanına çekildi ve yalnızca en yeni kare tutuluyor.
+**Hotfix:** `window.isSecureContext` is now checked explicitly. In an insecure context the behavior is clearly marked as JPEG. The JPEG path defaults to 10 FPS / quality 68 and keeps only the newest frame.
 
-**Doğru kullanım:** En yüksek performans için native istemci; tarayıcı gerekiyorsa HTTPS/WSS reverse proxy.
+**Recommended usage:** the native client for best performance; if a browser is required, an HTTPS/WSS reverse proxy.
 
-### P3 — Her istemci için tekrar capture ve encode
+### P3 — Repeated capture and encode per client
 
-**Orijinal kod:**
+**Original code:**
 
 - Native: `crates/host/src/main.rs:220–269`
-- Yerel web H.264: `crates/host/src/web.rs:92–130`
+- Local web H.264: `crates/host/src/web.rs:92–130`
 - Relay H.264: `crates/host/src/web.rs:215–249`
 - Relay JPEG: `crates/host/src/web.rs:270–298`
 
-Her bağlantı yeni bir capture ve encoder döngüsü açıyordu. Bu, CPU yükünü istemci sayısıyla çarpıyordu.
+Every connection started a new capture and encoder loop, multiplying CPU load by the number of clients.
 
-**Hotfix:** Bir ortak H.264 üreticisi ve bir ortak JPEG üreticisi var. İstemciler aynı encoded kareyi paylaşır. Broadcast kuyruğu H.264 için 3, JPEG için 2 kare ile sınırlıdır; yavaş istemci sistemi geriye çekmez.
+**Hotfix:** There is one shared H.264 producer and one shared JPEG producer. Clients share the same encoded frame. The broadcast queue is limited to 3 frames for H.264 and 2 for JPEG; a slow client does not hold the system back.
 
-### P4 — Eski karelerin birikmesi ve gecikmenin büyümesi
+### P4 — Stale frames piling up and growing latency
 
-Orijinal native çıkış kanalları sınırsızdı; tarayıcı decoder kuyruğu için de backpressure yoktu. Ağ veya decode kısa süre yavaşladığında kullanıcı “düşük FPS” görmenin yanında saniyeler geriden gelen görüntü de görebilirdi.
+The original native output channels were unbounded, and there was no backpressure on the browser decoder queue either. When the network or decoding slowed down briefly, the user could see not only "low FPS" but also a picture lagging seconds behind.
 
 **Hotfix:**
 
-- Native giriş kuyruğu bounded.
-- Video broadcast kuyruğu küçük ve “latest frame” mantıklı.
-- Lag alan istemci eski kareleri atlar.
-- WebCodecs `decodeQueueSize > 2` olduğunda decoder sıfırlanır ve sonraki IDR beklenir.
-- JPEG decode meşgulse yalnızca en son bekleyen JPEG saklanır.
+- The native input queue is bounded.
+- The video broadcast queue is small and uses "latest frame" semantics.
+- A lagging client skips stale frames.
+- When WebCodecs `decodeQueueSize > 2`, the decoder is reset and waits for the next IDR.
+- If JPEG decoding is busy, only the most recent pending JPEG is kept.
 
-### P5 — Native istemcide gereksiz tam kare klonu/GPU upload
+### P5 — Unnecessary full-frame clone/GPU upload in the native client
 
-**Orijinal kod:** `crates/client/src/main.rs:587–639`
+**Original code:** `crates/client/src/main.rs:587–639`
 
-Her UI yenilemesinde `ColorImage` klonlanıyor ve texture tekrar `set()` ediliyordu. UI de 66 ms’de bir yenileniyordu. Bu, özellikle 1080p RGBA karelerde büyük bellek bant genişliği tüketir.
+On every UI repaint the `ColorImage` was cloned and the texture was `set()` again. The UI also repainted every 66 ms. This consumes a lot of memory bandwidth, especially with 1080p RGBA frames.
 
-**Hotfix:** UI gelen kareyi `take()` ile yalnızca bir kez tüketir; texture yalnızca yeni kare olduğunda güncellenir. `TextureHandle` klonu yalnızca hafif bir referans klonudur.
+**Hotfix:** The UI consumes an incoming frame only once via `take()`; the texture is updated only when there is a new frame. Cloning a `TextureHandle` is just a cheap reference clone.
 
-### P6 — İlk karede olası deadlock
+### P6 — Possible deadlock on the first frame
 
-**Orijinal kod:** `crates/client/src/main.rs:248–265`
+**Original code:** `crates/client/src/main.rs:248–265`
 
 ```rust
 let mut s = shared.lock().unwrap();
 ...
-shared.lock().unwrap().status = "bağlı".into();
+shared.lock().unwrap().status = "connected".into();
 ```
 
-Aynı thread, ilk kilidi bırakmadan aynı `std::sync::Mutex`’i tekrar kilitlemeye çalışıyor. Bu reentrant olmayan mutex ile deadlock oluşturur.
+The same thread tries to lock the same `std::sync::Mutex` again without releasing the first lock. With a non-reentrant mutex this deadlocks.
 
-**Hotfix:** Durum mevcut kilit üzerinden güncelleniyor ve ardından kilit açıkça bırakılıyor.
+**Hotfix:** The status is updated through the existing lock, which is then explicitly released.
 
-### P7 — Yazılımsal encode ve çoklu renk dönüşümü
+### P7 — Software encode and multiple color conversions
 
-**Orijinal kod:** `crates/host/src/main.rs:534–565`
+**Original code:** `crates/host/src/main.rs:534–565`
 
-Her kare:
+Every frame goes through:
 
-1. ekran yakalama ile RGBA,
-2. yeni bir RGB buffer’a kopya,
-3. RGB → YUV420 dönüşümü,
-4. yazılımsal H.264 encode
+1. RGBA from screen capture,
+2. a copy into a new RGB buffer,
+3. RGB → YUV420 conversion,
+4. software H.264 encode.
 
-yapıyor.
-
-**Hotfix:** OpenH264 auto-thread, 30 FPS, 6 Mbit/s, screen-content realtime ve frame-skip ayarları eklendi. Fakat gerçek sıçrama için sonraki sürümde platform donanım encoder’ı gerekir.
+**Hotfix:** OpenH264 auto-thread, 30 FPS, 6 Mbit/s, screen-content realtime and frame-skip settings were added. A real leap, however, requires a platform hardware encoder in a later version.
 
 ---
 
-## 4. Güvenlik bulguları
+## 4. Security findings
 
-| Seviye | Bulgu | Etki | Hotfix durumu |
+| Severity | Finding | Impact | Hotfix status |
 |---|---|---|---|
-| **Kritik** | İnternet tarayıcı parolası relay tarafından okunup atılıyordu | Host onayından sonra tarayıcı oturumu parola doğrulaması olmadan açılıyordu; auto-accept ile çok tehlikeli | Parola `ApprovalRequest.auth` ile hosta taşınıyor ve sabit-süreye yakın karşılaştırma ile doğrulanıyor |
-| **Kritik** | Özel rustls verifier, TLS 1.2/1.3 handshake imzasını koşulsuz “geçerli” sayıyordu | Pinned sertifikayı kopyalayan fakat özel anahtara sahip olmayan saldırganın sunucuyu taklit etmesine kapı açabilirdi | Gerçek `verify_tls12_signature` / `verify_tls13_signature` çağrıları eklendi |
-| **Kritik** | Rendezvous host kaydı yalnızca tahmin edilebilir 9 haneli ID’ye bağlıydı | Aynı ID ile kayıt olup yönlendirmeyi ele geçirme riski | Cihazda saklanan rastgele 256-bit host secret eklendi; register/connect-back secret ile bağlandı |
-| **Yüksek** | Relay gerçek uçtan uca şifreli değil | VPS operatörü/ele geçirilmiş VPS ekranı, klavye/fare girdisini, parolayı ve dosyaları görebilir | **Mimari kalan risk**; yalnızca güvenilen VPS kullanılmalı |
-| **Yüksek** | LAN native TCP ve LAN HTTP/WebSocket düz metin | Aynı ağdaki saldırgan trafiği okuyabilir/değiştirebilir | Dokümante edildi; güvenilir LAN/VPN dışında port açılmamalı |
-| **Yüksek** | WebSocket `Origin` doğrulaması yoktu | Kötü niyetli web sayfası kullanıcının tarayıcısından yerel/relay WebSocket’e bağlanmayı deneyebilirdi | Same-origin allowlist kontrolü eklendi; isteğe bağlı `RF_ALLOWED_ORIGIN` |
-| **Yüksek** | Varsayılan parola `1234` ve açıkça ekrana/dokümana yazılıydı | Tahmin edilmesi çok kolay | Varsayılan rastgele parola; yapılandırılmış parola log’a yazılmıyor; zayıf parola uyarısı |
-| **Yüksek** | Mesajlar, kuyruklar ve oturum sayıları geniş ölçüde sınırsızdı | Bellek/CPU DoS, uzun gecikme kuyrukları | Boyut limitleri, bounded channel, semaphore ve timeout eklendi |
-| **Yüksek** | Dosya alımı `/tmp/rf_<id>_<ad>` gibi tahmin edilebilir isimle, boyut/offset sınırı olmadan yazıyordu | Symlink/yerel çakışma, disk doldurma, sparse file, yarım dosyanın tamamlanmış görünmesi | Özel dizin, rastgele isim, `.part`, 512 MiB sınırı, 256 KiB chunk, sıralı offset, atomik rename |
-| **Orta** | Tarayıcı parolası `localStorage` içinde kalıcı tutuluyordu | Aynı origin’de çalışan script/XSS parolayı okuyabilir | Parola artık kalıcı depoya yazılmıyor |
-| **Orta** | Relay tokenları monoton sayaçtı | Tahmin edilebilir oturum tokenları ve bağlantı karıştırma riski | Rastgele `u128` token ve session kimliği |
-| **Orta** | Bir relay yönü kapanınca diğer yön asılı kalabiliyordu | Kaynak tüketimi ve hayalet oturumlar | İki yön `select!` ile birlikte iptal ediliyor |
-| **Orta** | Güvenlik başlıkları yoktu | Clickjacking/XSS etkisini azaltan savunma katmanları eksikti | CSP, no-store, nosniff, no-referrer ve frame-ancestors eklendi |
+| **Critical** | The internet browser password was read and discarded by the relay | After host approval the browser session opened without password verification; very dangerous with auto-accept | The password is carried to the host via `ApprovalRequest.auth` and verified with a near-constant-time comparison |
+| **Critical** | The custom rustls verifier unconditionally treated the TLS 1.2/1.3 handshake signature as "valid" | Could let an attacker who copied the pinned certificate but lacks the private key impersonate the server | Real `verify_tls12_signature` / `verify_tls13_signature` calls added |
+| **Critical** | Rendezvous host registration was bound only to a guessable 9-digit ID | Risk of registering with the same ID and hijacking routing | Random 256-bit host secret stored on the device; register/connect-back bound to the secret |
+| **High** | The relay is not truly end-to-end encrypted | The VPS operator / a compromised VPS can see the screen, keyboard/mouse input, password and files | **Remaining architectural risk**; use only a trusted VPS |
+| **High** | LAN native TCP and LAN HTTP/WebSocket are plaintext | An attacker on the same network can read/modify traffic | Documented; do not open ports outside a trusted LAN/VPN |
+| **High** | No WebSocket `Origin` validation | A malicious web page could try to connect from the user's browser to the local/relay WebSocket | Same-origin allowlist check added; optional `RF_ALLOWED_ORIGIN` |
+| **High** | Default password `1234`, written openly on screen/in docs | Very easy to guess | Random default password; configured password not logged; weak-password warning |
+| **High** | Messages, queues and session counts were largely unbounded | Memory/CPU DoS, long latency queues | Size limits, bounded channels, semaphores and timeouts added |
+| **High** | File receive wrote to a predictable name like `/tmp/rf_<id>_<name>` with no size/offset limits | Symlink/local collision, disk filling, sparse files, partial file appearing complete | Private directory, random name, `.part`, 512 MiB limit, 256 KiB chunks, sequential offsets, atomic rename |
+| **Medium** | The browser password was persisted in `localStorage` | Scripts/XSS running on the same origin can read the password | The password is no longer written to persistent storage |
+| **Medium** | Relay tokens were a monotonic counter | Predictable session tokens and risk of mixing up connections | Random `u128` tokens and session IDs |
+| **Medium** | When one relay direction closed, the other could hang | Resource exhaustion and ghost sessions | Both directions are cancelled together via `select!` |
+| **Medium** | No security headers | Missing defense layers that reduce clickjacking/XSS impact | CSP, no-store, nosniff, no-referrer and frame-ancestors added |
 
-### Kritik ayrıntı: tarayıcı parolası gerçekten kullanılmıyordu
+### Critical detail: the browser password was not actually used
 
-**Orijinal rendezvous:** `crates/rendezvous/src/main.rs:365–395`
+**Original rendezvous:** `crates/rendezvous/src/main.rs:365–395`
 
-Hello JSON içinde `password` gönderilmesine rağmen parser yalnızca `id` ve `jpeg` alanlarını alıyordu. Ardından hosta gönderilen `ApprovalRequest` içinde parola yoktu.
+Although `password` was sent in the Hello JSON, the parser only read the `id` and `jpeg` fields. The `ApprovalRequest` then sent to the host contained no password.
 
-**Orijinal host relay web session:** `crates/host/src/main.rs:393–430`, `crates/host/src/web.rs:215–317`
+**Original host relay web session:** `crates/host/src/main.rs:393–430`, `crates/host/src/web.rs:215–317`
 
-Host operatörü “E” dediğinde doğrudan H.264/JPEG oturumu başlıyor; native `Handshake.password` kontrolü web yolunda hiç çalışmıyordu.
+As soon as the host operator answered "E" (yes), the H.264/JPEG session started directly; the native `Handshake.password` check never ran on the web path.
 
-### Kritik ayrıntı: TLS imza doğrulaması bypass
+### Critical detail: TLS signature verification bypass
 
-**Orijinal:** `crates/common/src/tls.rs:49–64`
+**Original:** `crates/common/src/tls.rs:49–64`
 
-Hem TLS 1.2 hem TLS 1.3 callback’i doğrudan `HandshakeSignatureValid::assertion()` döndürüyordu. rustls sözleşmesine göre bu değer yalnızca imza gerçekten doğrulandıysa dönmelidir.
+Both the TLS 1.2 and TLS 1.3 callbacks returned `HandshakeSignatureValid::assertion()` directly. Per the rustls contract, this value must only be returned if the signature was actually verified.
 
-**Hotfix:** Sertifika fingerprint pinning korunurken sertifikanın public key’iyle gerçek handshake imzası da doğrulanıyor.
+**Hotfix:** Certificate fingerprint pinning is kept, and the real handshake signature is now also verified with the certificate's public key.
 
 ---
 
-## 5. Hotfix’te yapılan başlıca değişiklikler
+## 5. Main changes in the hotfix
 
-### Performans
+### Performance
 
-- `RF_FPS`: 5–30, varsayılan 30.
-- `RF_MAX_WIDTH`: varsayılan 1920.
-- `RF_BITRATE_BPS`: varsayılan 6.000.000.
-- İşlem süresini hesaba katan deadline tabanlı frame pacing.
-- Tüm native/web izleyiciler için ortak H.264 capture/encode hattı.
-- Tüm JPEG izleyiciler için ortak JPEG capture/encode hattı.
-- Küçük broadcast kuyrukları; yavaş istemci eski kareleri atlar.
-- Yeni izleyici geldiğinde IDR/SPS/PPS alabilmesi için encoder reset mekanizması.
-- 5 saniyelik capture/encode/FPS ölçüm log’u.
-- PipeWire tarafında en yeni buffer’ı alma; gereksiz clone azaltma.
-- Native UI’de yalnızca yeni karede texture upload.
+- `RF_FPS`: 5–30, default 30.
+- `RF_MAX_WIDTH`: default 1920.
+- `RF_BITRATE_BPS`: default 6,000,000.
+- Deadline-based frame pacing that accounts for processing time.
+- Shared H.264 capture/encode pipeline for all native/web viewers.
+- Shared JPEG capture/encode pipeline for all JPEG viewers.
+- Small broadcast queues; a slow client skips stale frames.
+- Encoder reset mechanism so a new viewer receives IDR/SPS/PPS.
+- Capture/encode/FPS stats log every 5 seconds.
+- PipeWire: take the newest buffer; fewer unnecessary clones.
+- Native UI: texture upload only on new frames.
 - WebCodecs/JPEG decode backpressure.
-- Mouse hareketinde bounded `try_send`; input kuyruğunun video/uygulamayı boğması engellendi.
+- Bounded `try_send` for mouse movement; the input queue can no longer choke video/the app.
 
-### Güvenlik
+### Security
 
-- Protokol `v2`, transport generation `4`; eski-yeni sessiz karışım engellendi.
-- Rastgele 256-bit host secret ve rastgele u128 relay tokenları.
-- Tarayıcı parolasının host tarafından gerçek doğrulanması.
-- Gerçek TLS 1.2/1.3 handshake signature doğrulaması.
-- WebSocket Origin kontrolü.
-- Rastgele varsayılan oturum parolası.
-- Mesaj, blob, kmsg, dosya ve oturum limitleri.
-- Dosyada `.part` + `sync_all` + atomik rename.
-- Config/secret dosyalarında Unix’te 0600, dizinde 0700.
-- Connection/handshake timeout ve oturum semaphore’ları.
-- Güvenlik başlıkları ve password’ün `localStorage`’dan kaldırılması.
+- Protocol `v2`, transport generation `4`; silent old/new mixing prevented.
+- Random 256-bit host secret and random u128 relay tokens.
+- Real host-side verification of the browser password.
+- Real TLS 1.2/1.3 handshake signature verification.
+- WebSocket Origin check.
+- Random default session password.
+- Message, blob, kmsg, file and session limits.
+- Files: `.part` + `sync_all` + atomic rename.
+- Config/secret files 0600 on Unix, directories 0700.
+- Connection/handshake timeouts and session semaphores.
+- Security headers, and the password removed from `localStorage`.
 
 ---
 
-## 6. Kullanım ayarları
+## 6. Usage settings
 
-### En iyi başlangıç ayarı — native istemci
+### Best starting settings — native client
 
-Windows host terminalinde:
+In a terminal on the Windows host:
 
 ```bat
 set RF_FPS=30
@@ -226,7 +226,7 @@ set RF_BITRATE_BPS=6000000
 HOST_BASLAT.bat
 ```
 
-CPU kullanımı yüksek veya kareler yetişmiyorsa:
+If CPU usage is high or frames cannot keep up:
 
 ```bat
 set RF_FPS=20
@@ -235,7 +235,7 @@ set RF_BITRATE_BPS=4500000
 HOST_BASLAT.bat
 ```
 
-Daha zayıf host / düşük upload:
+Weaker host / low upload bandwidth:
 
 ```bat
 set RF_FPS=20
@@ -244,121 +244,121 @@ set RF_BITRATE_BPS=3000000
 HOST_BASLAT.bat
 ```
 
-### Tarayıcı istemci
+### Browser client
 
-- `http://LAN-IP:33201` kullanımında büyük olasılıkla JPEG görülür.
-- Arayüzde codec göstergesi **JPEG** ise 30 FPS beklenmemeli.
-- H.264/WebCodecs için HTTPS/WSS kullanın.
-- Tarayıcı yerine native istemci kalite ve gecikme açısından daha doğru tercih.
+- With `http://LAN-IP:33201` you will most likely get JPEG.
+- If the codec indicator in the UI shows **JPEG**, do not expect 30 FPS.
+- Use HTTPS/WSS for H.264/WebCodecs.
+- The native client is the better choice over the browser for quality and latency.
 
-### Log’u yorumlama
+### Reading the log
 
-Host yaklaşık her 5 saniyede şuna benzer ölçüm basar:
+Roughly every 5 seconds the host prints stats like:
 
 ```text
-video ölçüm: 27.8 fps, capture 8.2 ms, encode 18.5 ms, ...
+video stats: 27.8 fps, capture 8.2 ms, encode 18.5 ms, ...
 ```
 
-- `capture + encode < 33 ms`: 30 FPS teorik olarak mümkün.
-- `encode > 33 ms`: çözünürlüğü düşürün veya donanım encoder’a geçin.
-- Host 30 FPS üretip istemci düşük gösteriyorsa sorun ağ/decode/UI tarafındadır.
-- Codec JPEG ise önce HTTPS/native istemci sorununu çözün.
+- `capture + encode < 33 ms`: 30 FPS is theoretically possible.
+- `encode > 33 ms`: lower the resolution or switch to a hardware encoder.
+- If the host produces 30 FPS but the client shows less, the problem is on the network/decode/UI side.
+- If the codec is JPEG, first fix the HTTPS/native client issue.
 
 ---
 
-## 7. Kalan riskler ve henüz yapılmayanlar
+## 7. Remaining risks and open items
 
-1. **Relay uçtan uca şifreli değil.** Hotfix TLS verifier’ı düzeltir ama VPS’nin plaintext’i görmesini engellemez.
-2. **LAN trafiği şifreli değil.** 33200/33201 portlarını internete yönlendirmeyin.
-3. **Donanım encoder yok.** RTX 4090’daki NVENC kullanılmıyor; OpenH264 CPU’da çalışıyor.
-4. H.264 ve JPEG izleyici aynı anda bağlıysa iki ayrı capture üreticisi rekabet edebilir.
-5. Native decode ve YUV → RGBA dönüşümü network task’ında yapılıyor; ayrı decode worker daha iyi olur.
-6. Her native izleyiciye encoded `Vec` için en az bir kopya hâlâ yapılabilir.
-7. Kalıcı IP-temelli rate limiter/account lockout yok; yalnızca gecikme, timeout ve eşzamanlılık sınırları var.
-8. `REMOTE_FRIEND_AUTO_ACCEPT=1` saldırı yüzeyini ciddi büyütür; kullanılması önerilmez.
-9. Relay registry host secret’ı sunucu diskinde tutar. Dosya izinleri sıkıdır fakat VPS yine güvenilir olmalıdır.
-10. Inline HTML nedeniyle CSP’de `unsafe-inline` bulunuyor. Script/style ayrı dosyaya taşınırsa CSP sıkılaştırılabilir.
-11. GitHub Actions sürümleri commit SHA yerine değişebilir etiketlere bağlı; supply-chain sertleştirmesi tamamlanmadı.
-12. Derleyici ve gerçek uçtan uca test yapılmadı.
+1. **The relay is not end-to-end encrypted.** The hotfix fixes the TLS verifier but does not stop the VPS from seeing plaintext.
+2. **LAN traffic is not encrypted.** Do not forward ports 33200/33201 to the internet.
+3. **No hardware encoder.** The RTX 4090's NVENC is not used; OpenH264 runs on the CPU.
+4. If H.264 and JPEG viewers are connected at the same time, two separate capture producers may compete.
+5. Native decode and YUV → RGBA conversion run in the network task; a separate decode worker would be better.
+6. At least one copy of the encoded `Vec` may still be made per native viewer.
+7. No persistent IP-based rate limiter/account lockout; only delays, timeouts and concurrency limits.
+8. `REMOTE_FRIEND_AUTO_ACCEPT=1` greatly enlarges the attack surface; not recommended.
+9. The relay registry keeps host secrets on the server's disk. File permissions are strict, but the VPS must still be trusted.
+10. Because of inline HTML, the CSP contains `unsafe-inline`. Moving scripts/styles to separate files would allow a stricter CSP.
+11. GitHub Actions versions are pinned to mutable tags instead of commit SHAs; supply-chain hardening is incomplete.
+12. No compiler run or real end-to-end test was done.
 
 ---
 
-## 8. Daha iyi mimari için sonraki sürüm
+## 8. Next version for a better architecture
 
-### Aşama 1 — Donanım encode
+### Phase 1 — Hardware encode
 
-RTX 4090 bulunan hostta NVENC H.264/HEVC/AV1 ile encode CPU’dan ayrılmalı. NVIDIA Video Codec SDK Windows ve Linux’ta donanım hızlandırmalı encode/decode sağlar. Düşük gecikmeli masaüstü aktarımı için H.264 low-latency preset, B-frame kapalı, kısa GOP/periodic IDR ve mümkünse capture yüzeyinden encoder’a zero-copy yol kullanılmalı.
+On a host with an RTX 4090, encoding should be offloaded from the CPU via NVENC H.264/HEVC/AV1. The NVIDIA Video Codec SDK provides hardware-accelerated encode/decode on Windows and Linux. For low-latency desktop streaming use an H.264 low-latency preset, B-frames off, short GOP/periodic IDR and, where possible, a zero-copy path from the capture surface to the encoder.
 
-Beklenen kazanç:
+Expected gains:
 
-- CPU yükünde büyük düşüş,
-- 1080p60/1440p60 için daha yüksek ihtimal,
-- aynı bit hızında daha tutarlı kalite,
-- encode süresinde daha düşük jitter.
+- a large drop in CPU load,
+- a better chance at 1080p60/1440p60,
+- more consistent quality at the same bitrate,
+- lower jitter in encode time.
 
-### Aşama 2 — WebRTC taşıma
+### Phase 2 — WebRTC transport
 
-Tarayıcı hedefleniyorsa özel WebSocket video protokolü yerine WebRTC daha doğru uzun vadeli çözüm:
+If browsers are a target, WebRTC is the better long-term solution than a custom WebSocket video protocol:
 
-- DTLS-SRTP ile medya şifreleme,
+- media encryption via DTLS-SRTP,
 - congestion control,
-- packet loss/jitter yönetimi,
-- NAT traversal için ICE/STUN/TURN,
-- tarayıcıların donanım decode yollarıyla daha doğal entegrasyon.
+- packet loss/jitter handling,
+- ICE/STUN/TURN for NAT traversal,
+- more natural integration with browsers' hardware decode paths.
 
-Bu yine otomatik olarak “VPS asla göremez” anlamına gelmez; TURN ve signaling tasarımı ile kimlik doğrulama doğru kurulmalıdır. Fakat mevcut TLS-terminate-and-forward relay’den daha sağlam bir temel sağlar.
+This still does not automatically mean "the VPS can never see anything"; TURN, signaling and authentication must be designed correctly. But it provides a more solid foundation than the current TLS-terminate-and-forward relay.
 
-### Aşama 3 — Gerçek uçtan uca oturum anahtarı
+### Phase 3 — True end-to-end session key
 
-- Cihaz kimlik anahtarı,
-- ephemeral X25519 anahtar değişimi,
-- host ekran/input/file payload’ları için AEAD,
-- relay’in yalnızca şifreli paket yönlendirmesi,
-- kullanıcıya iki uçta doğrulanabilir kısa güvenlik kodu.
+- Device identity key,
+- ephemeral X25519 key exchange,
+- AEAD for host screen/input/file payloads,
+- the relay forwarding only encrypted packets,
+- a short security code the user can verify on both ends.
 
-### Aşama 4 — Capture/encode zero-copy
+### Phase 4 — Zero-copy capture/encode
 
-Windows’ta Desktop Duplication / Windows Graphics Capture → D3D11 texture → NVENC; Linux’ta PipeWire DMA-BUF → VAAPI/NVENC gibi bir yol. En büyük kalan performans kazanımı burada.
+A path such as Desktop Duplication / Windows Graphics Capture → D3D11 texture → NVENC on Windows, and PipeWire DMA-BUF → VAAPI/NVENC on Linux. This is where the largest remaining performance gain lies.
 
 ---
 
-## 9. Doğrulama sonucu
+## 9. Verification result
 
-Otomatik statik kontrol: **25 geçti, 0 uyarı, 0 hata**.
+Automated static check: **25 passed, 0 warnings, 0 errors**.
 
-Kontrol edilenler arasında:
+Checks included:
 
-- Tüm Cargo TOML dosyalarının parse edilmesi.
-- `Cargo.lock` yerel paket/rand/rustls tutarlılığı.
+- Parsing all Cargo TOML files.
+- `Cargo.lock` consistency for local packages/rand/rustls.
 - GitHub Actions YAML parse.
-- HTML parse ve yinelenen `id` kontrolü.
-- Browser JavaScript için `node --check`.
-- JavaScript DOM ID referanslarının HTML ile eşleşmesi.
-- Tüm Rust dosyalarında yorum/dize duyarlı delimiter dengesi.
-- Eski güvensiz kalıpların bulunmaması:
-  - koşulsuz TLS signature assertion,
+- HTML parse and duplicate `id` check.
+- `node --check` for browser JavaScript.
+- JavaScript DOM ID references matching the HTML.
+- Comment/string-aware delimiter balance in all Rust files.
+- Absence of old insecure patterns:
+  - unconditional TLS signature assertion,
   - `unbounded_channel`,
-  - sabit `1234`,
-  - password `localStorage`,
-  - eski 66 ms frame sleep,
-  - tahmin edilebilir `/tmp` alıcı yolu.
-- Yeni korumaların bulunması:
+  - hard-coded `1234`,
+  - password in `localStorage`,
+  - old 66 ms frame sleep,
+  - predictable `/tmp` receive path.
+- Presence of the new protections:
   - protocol v2,
   - host secret,
-  - gerçek TLS signature verify,
+  - real TLS signature verify,
   - Origin check,
   - bounded channel,
   - H.264/JPEG broadcast,
-  - atomik file rename.
+  - atomic file rename.
 
-**Derleyici doğrulaması:** Yapılamadı. Paket, gerçek makinede önce `cargo check --workspace --locked`, ardından `cargo test --workspace --locked` ile doğrulanmalıdır.
+**Compiler verification:** Not done. The package must be verified on a real machine, first with `cargo check --workspace --locked`, then with `cargo test --workspace --locked`.
 
 ---
 
-## 10. Referans alınan teknik belgeler
+## 10. Technical references
 
-- MDN Web Docs — `VideoDecoder`: yalnızca secure context’te kullanılabilir.
-- rustls `ServerCertVerifier` dokümantasyonu: `HandshakeSignatureValid` yalnızca imza gerçekten geçerliyse döndürülmelidir.
-- OWASP WebSocket Security Cheat Sheet: her WebSocket handshake’inde `Origin` allowlist doğrulaması önerilir.
-- NVIDIA Video Codec SDK: NVENC/NVDEC donanım hızlandırmalı video encode/decode API’leri.
-- W3C WebRTC ve IETF RFC 8827: DTLS tabanlı WebRTC güvenlik ve medya taşıma mimarisi.
+- MDN Web Docs — `VideoDecoder`: available only in secure contexts.
+- rustls `ServerCertVerifier` documentation: `HandshakeSignatureValid` must be returned only if the signature is actually valid.
+- OWASP WebSocket Security Cheat Sheet: recommends `Origin` allowlist validation on every WebSocket handshake.
+- NVIDIA Video Codec SDK: NVENC/NVDEC hardware-accelerated video encode/decode APIs.
+- W3C WebRTC and IETF RFC 8827: DTLS-based WebRTC security and media transport architecture.
