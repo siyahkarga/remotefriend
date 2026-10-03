@@ -50,7 +50,7 @@ VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle re
 ## Güvenli dağıtım
 
 - `33200` ve `33201` portlarını WAN'a yönlendirme.
-- VPS web arayüzünü `127.0.0.1:8080` üzerinde tutup Nginx/HTTPS arkasında yayınla.
+- VPS web arayüzünü `127.0.0.1:33203` üzerinde tutup Nginx/HTTPS arkasında yayınla.
 - `33202` için TLS sertifikasının SHA-256 fingerprint'ini host ve native client üzerinde pinle.
 - VPS'de ayrı `remotefriend` sistem kullanıcısı, `UMask=0077` ve systemd hardening kullan.
 - Host kayıt dosyasını (`/var/lib/remotefriend/hosts.json`) yedekle ve gizli tut.

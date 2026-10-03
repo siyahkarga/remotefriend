@@ -11,7 +11,8 @@ WorkingDirectory=/opt/remotefriend
 UMask=0077
 
 Environment=RF_RV_PORT=33202
-Environment=RF_WEB_PORT=8080
+# Yalnızca yerel; nginx HTTPS arkasından. Kurulum betiği port doluysa başka port seçer.
+Environment=RF_WEB_PORT=33203
 Environment=RF_WEB_BIND=127.0.0.1
 Environment=RF_HOST_REGISTRY=/var/lib/remotefriend/hosts.json
 Environment=RF_MAX_PENDING=256

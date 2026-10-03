@@ -88,9 +88,20 @@ chmod 0640 "$INSTALL_DIR/key.pem"
 chmod 0644 "$INSTALL_DIR/cert.pem"
 
 echo "=== 5/7 servis ==="
+# İç web portu (yalnızca 127.0.0.1, nginx arkası). Başka bir uygulama kullanıyorsa
+# (ör. aynı VPS'teki başka bir site 8080'de) sıradaki boş port seçilir.
+port_busy() { ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+WEB_PORT="${WEB_PORT:-33203}"
+while port_busy "$WEB_PORT"; do
+  echo "port $WEB_PORT başka bir uygulamada; sonraki deneniyor"
+  WEB_PORT=$((WEB_PORT + 1))
+  [ "$WEB_PORT" -gt 33299 ] && { echo "boş yerel port bulunamadı" >&2; exit 1; }
+done
+echo "iç web portu: 127.0.0.1:$WEB_PORT"
 TMP_UNIT="$(mktemp)"
 curl -fsSL "$REPO_RAW/deploy/remotefriend.service" -o "$TMP_UNIT"
 grep -q "ExecStart=/opt/remotefriend/remote-friend-rendezvous" "$TMP_UNIT" || { echo "servis dosyası bozuk indi" >&2; exit 1; }
+sed -i "s/^Environment=RF_WEB_PORT=.*/Environment=RF_WEB_PORT=$WEB_PORT/" "$TMP_UNIT"
 install -m 0644 "$TMP_UNIT" "$SERVICE_FILE"
 rm -f "$TMP_UNIT"
 systemctl daemon-reload
@@ -101,10 +112,10 @@ sleep 2
 echo "=== 6/7 nginx + HTTPS ($DOMAIN) ==="
 install -d -m 0755 "$ACME_ROOT"
 proxy_block() {
+  echo "  location /.well-known/acme-challenge/ { root $ACME_ROOT; }"
+  echo "  location / {"
+  echo "    proxy_pass http://127.0.0.1:$WEB_PORT;"
   cat <<'EOF'
-  location /.well-known/acme-challenge/ { root /var/www/remotefriend-acme; }
-  location / {
-    proxy_pass http://127.0.0.1:8080;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -176,7 +187,21 @@ else
   journalctl -u remotefriend -n 40 --no-pager
   exit 1
 fi
-curl -s -o /dev/null -w "web (127.0.0.1:8080): %{http_code}\n" http://127.0.0.1:8080/ || echo "web: ERİŞİLEMİYOR"
+# Sayfanın gerçekten RemoteFriend olduğunu doğrula (port çakışması / yanlış site kontrolü).
+if curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT/info" | grep -q '"role":"relay"'; then
+  echo "web (127.0.0.1:$WEB_PORT): RemoteFriend OK"
+else
+  echo "HATA: 127.0.0.1:$WEB_PORT RemoteFriend yanıtı vermiyor."
+  journalctl -u remotefriend -n 30 --no-pager
+  exit 1
+fi
+if [ "${WEB_URL#https://}" != "$WEB_URL" ]; then
+  if curl -s --max-time 10 "$WEB_URL/info" | grep -q '"role":"relay"'; then
+    echo "dışarıdan ($WEB_URL): RemoteFriend OK"
+  else
+    echo "UYARI: $WEB_URL dışarıdan RemoteFriend göstermiyor (443 başka bir sunucuda olabilir)."
+  fi
+fi
 FP="$(openssl x509 -in "$INSTALL_DIR/cert.pem" -outform der | sha256sum | awk '{print $1}')"
 cat <<EOF
 

@@ -7,7 +7,7 @@
 //!
 //! Env:
 //!   RF_RV_PORT (33202) - native relay dinleyici
-//!   RF_WEB_PORT (8080, 127.0.0.1) - tarayıcı arayüzü (nginx arkası önerilir)
+//!   RF_WEB_PORT (33203, 127.0.0.1) - tarayıcı arayüzü (nginx arkası önerilir)
 //!   RF_TLS_CERT / RF_TLS_KEY - native TLS sertifikası. systemd `LoadCredential=`
 //!     ile verilirse ($CREDENTIALS_DIRECTORY/cert.pem, key.pem) dosya izinleri
 //!     sorun olmaz: systemd dosyayı root olarak okuyup servise verir.
@@ -542,7 +542,7 @@ async fn main() -> Result<()> {
     remote_friend_common::tls::init_crypto();
     tracing_subscriber::fmt::init();
     let port: u16 = std::env::var("RF_RV_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(RENDEZVOUS_PORT);
-    let web_port: u16 = std::env::var("RF_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8080);
+    let web_port: u16 = std::env::var("RF_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(33203);
 
     let tls = match tls_paths() {
         (Some(c), Some(k)) => {
@@ -611,12 +611,19 @@ async fn main() -> Result<()> {
         });
     }
 
-    // web (tarayıcı) sunucusu
+    // web (tarayıcı) sunucusu: port önce bağlanır; doluysa sessizce devam etmek yerine dur.
     {
+        let web_bind = std::env::var("RF_WEB_BIND").unwrap_or("127.0.0.1".into());
+        let web_listener = tokio::net::TcpListener::bind(format!("{web_bind}:{web_port}"))
+            .await
+            .with_context(|| {
+                format!("web portu {web_bind}:{web_port} açılamadı (başka bir uygulama kullanıyor olabilir; RF_WEB_PORT ile değiştir)")
+            })?;
         let st = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = web_serve(web_port, st).await {
-                tracing::warn!("web kapandı: {e:#}");
+            if let Err(e) = web_serve(web_listener, st).await {
+                tracing::error!("web sunucusu durdu: {e:#}");
+                std::process::exit(1);
             }
         });
     }
@@ -649,7 +656,7 @@ async fn main() -> Result<()> {
 
 // ---- web (tarayıcı clientlar): aynı sayfa, ID ile yönlendirme ----
 
-async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
+async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Result<()> {
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
     use axum::extract::State as AxState;
     use axum::http::{HeaderMap, StatusCode};
@@ -821,9 +828,7 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
         .route("/info", get(info))
         .route("/ws", get(ws_handler))
         .with_state(state);
-    let web_bind = std::env::var("RF_WEB_BIND").unwrap_or("127.0.0.1".into());
-    let listener = tokio::net::TcpListener::bind(format!("{web_bind}:{port}")).await?;
-    tracing::info!("web arayüzü: {web_bind}:{port}");
+    tracing::info!("web arayüzü: {}", listener.local_addr()?);
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
