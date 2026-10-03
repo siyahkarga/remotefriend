@@ -312,14 +312,21 @@ impl App {
     }
 }
 
-fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+/// A rounded panel. Content is limited to the panel width so it never spills into
+/// the neighbouring panel; `fill_height` makes side-by-side panels equally tall.
+fn card<R>(ui: &mut egui::Ui, title: &str, fill_height: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let margin = 18.0;
+    let width = (ui.available_width() - 2.0 * margin).max(120.0);
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(14.0)
-        .inner_margin(18.0)
+        .inner_margin(margin)
         .show(ui, |ui| {
-            ui.set_min_height(ui.available_height());
+            ui.set_width(width);
+            if fill_height {
+                ui.set_min_height(ui.available_height());
+            }
             ui.label(RichText::new(title).size(17.0).strong());
             ui.add_space(6.0);
             add(ui)
@@ -327,11 +334,26 @@ fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R)
         .inner
 }
 
+/// Coloured status dot (painted: the bullet glyph is missing from the default font).
 fn dot(ui: &mut egui::Ui, color: Color32, text: impl Into<String>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("●").color(color));
-        ui.label(text.into());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 5.0, color);
+        ui.add(egui::Label::new(text.into()).wrap());
     });
+}
+
+/// Highlighted hint box (e.g. the one-time desktop permission).
+fn hint_box(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.15))
+        .stroke(egui::Stroke::new(1.0_f32, color))
+        .corner_radius(10.0)
+        .inner_margin(12.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
 }
 
 impl App {
@@ -384,10 +406,20 @@ impl App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
-            ui.columns(2, |cols| {
-                card(&mut cols[0], "This computer", |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
-                card(&mut cols[1], "Control another computer", |ui| self.connect_ui(ui));
-            });
+            if ui.available_width() >= 900.0 {
+                // Wide window: side by side.
+                ui.columns(2, |cols| {
+                    card(&mut cols[0], "This computer", true, |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
+                    card(&mut cols[1], "Control another computer", true, |ui| self.connect_ui(ui));
+                });
+            } else {
+                // Narrow window: stacked, scrollable.
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    card(ui, "This computer", false, |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
+                    ui.add_space(10.0);
+                    card(ui, "Control another computer", false, |ui| self.connect_ui(ui));
+                });
+            }
         });
 
         if self.settings_open {
@@ -411,15 +443,16 @@ impl App {
         }
         ui.label(RichText::new("Others can control this computer with:").weak());
         ui.add_space(4.0);
-        egui::Grid::new("ids").num_columns(3).spacing([12.0, 10.0]).show(ui, |ui| {
-            ui.label("Your ID");
+        ui.label(RichText::new("Your ID").weak());
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(remote_friend_common::format_id(&snap.id)).size(28.0).strong().monospace());
             if ui.button("Copy").clicked() {
                 self.copy(ui.ctx(), &snap.id, "ID");
             }
-            ui.end_row();
-
-            ui.label("Password");
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("Password").weak());
+        ui.horizontal_wrapped(|ui| {
             let shown = if snap.password_from_env {
                 "(set by REMOTE_FRIEND_PASS)".to_string()
             } else if self.show_password {
@@ -428,17 +461,14 @@ impl App {
                 "•••••-•••••".to_string()
             };
             ui.label(RichText::new(shown).size(22.0).monospace());
-            ui.horizontal(|ui| {
-                if !snap.password_from_env {
-                    if ui.button(if self.show_password { "Hide" } else { "Show" }).clicked() {
-                        self.show_password = !self.show_password;
-                    }
-                    if ui.button("Copy").clicked() {
-                        self.copy(ui.ctx(), &snap.password, "Password");
-                    }
+            if !snap.password_from_env {
+                if ui.button(if self.show_password { "Hide" } else { "Show" }).clicked() {
+                    self.show_password = !self.show_password;
                 }
-            });
-            ui.end_row();
+                if ui.button("Copy").clicked() {
+                    self.copy(ui.ctx(), &snap.password, "Password");
+                }
+            }
         });
 
         ui.add_space(10.0);
@@ -453,7 +483,19 @@ impl App {
         match snap.screen {
             ScreenState::Ready => {}
             ScreenState::WaitingPermission => {
-                dot(ui, WARN, "Waiting for screen-sharing permission: turn ON “Allow Remote Interaction” and click Share");
+                hint_box(ui, WARN, |ui| {
+                    ui.label(RichText::new("One-time desktop permission").strong());
+                    ui.add(
+                        egui::Label::new(
+                            "Your desktop opens its own “Remote Desktop / Share screen” window. This is a security \
+                             check every app must pass on Wayland, and it is asked only once:",
+                        )
+                        .wrap(),
+                    );
+                    ui.label("1. Turn ON “Allow Remote Interaction”");
+                    ui.label("2. Choose the screen to share");
+                    ui.label("3. Click “Share” (keep “Remember this selection” ticked)");
+                });
             }
             ScreenState::Denied => {
                 ui.horizontal(|ui| {
