@@ -3,3 +3,4 @@
 settings.local.bat
 local.env
 *.zip
+.rf-version

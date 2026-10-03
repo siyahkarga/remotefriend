@@ -20,6 +20,8 @@ jobs:
             artifact: remotefriend-windows
           - os: ubuntu-latest
             artifact: remotefriend-linux
+          - os: macos-latest
+            artifact: remotefriend-macos
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,8 +37,16 @@ jobs:
           sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libegl1-mesa-dev libgtk-3-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
 
       - run: cargo check --locked --workspace --all-targets
-      - run: cargo test --locked -p remote-friend-common
-      - run: cargo build --locked --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      - name: Release build
+        if: runner.os != 'macOS'
+        run: cargo build --locked --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
+      - name: macOS universal build (Apple Silicon + Intel)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target aarch64-apple-darwin
+          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target x86_64-apple-darwin
 
       - name: Windows paketi
         if: runner.os == 'Windows'
@@ -53,6 +63,15 @@ jobs:
         run: |
           mkdir dist
           cp target/release/remote-friend-host target/release/remote-friend-client target/release/remote-friend-rendezvous dist/
+
+      - name: macOS paketi
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dist
+          for b in remote-friend-host remote-friend-client; do
+            lipo -create target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b -output dist/$b-macos
+          done
+          cp start_remotefriend_macos.command dist/
 
       - uses: actions/upload-artifact@v4
         with:

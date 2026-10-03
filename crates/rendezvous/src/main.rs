@@ -8,7 +8,9 @@
 //! Env:
 //!   RF_RV_PORT (33202) - native relay dinleyici
 //!   RF_WEB_PORT (8080, 127.0.0.1) - tarayıcı arayüzü (nginx arkası önerilir)
-//!   RF_TLS_CERT / RF_TLS_KEY - varsa native TLS, yoksa düz + UYARI
+//!   RF_TLS_CERT / RF_TLS_KEY - native TLS sertifikası. systemd `LoadCredential=`
+//!     ile verilirse ($CREDENTIALS_DIRECTORY/cert.pem, key.pem) dosya izinleri
+//!     sorun olmaz: systemd dosyayı root olarak okuyup servise verir.
 //!   RF_PLAIN_OK=1 olmadan düz modda çalışmayı reddeder (güvenlik).
 
 use anyhow::{Context, Result};
@@ -37,7 +39,6 @@ enum PendingKind {
     Web {
         sink: Option<WsSink>,
         stream: Option<WsStream>,
-        jpeg: bool,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     },
 }
@@ -57,6 +58,29 @@ struct State {
     registry_path: PathBuf,
     web_slots: Arc<tokio::sync::Semaphore>,
     pending_slots: Arc<tokio::sync::Semaphore>,
+    /// IP başına bağlantı isteği sınırı (parola deneme spam'ine karşı ilk hat;
+    /// asıl kilit host'ta).
+    hello_rate: std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+}
+
+const HELLO_PER_MINUTE: u32 = 12;
+
+impl State {
+    fn hello_allowed(&self, ip: std::net::IpAddr) -> bool {
+        let now = std::time::Instant::now();
+        let mut map = self.hello_rate.lock().unwrap();
+        let entry = map.entry(ip).or_insert((0, now));
+        if now.duration_since(entry.1).as_secs() >= 60 {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        entry.0 <= HELLO_PER_MINUTE
+    }
+
+    fn sweep_rate(&self) {
+        let now = std::time::Instant::now();
+        self.hello_rate.lock().unwrap().retain(|_, (_, t)| now.duration_since(*t).as_secs() < 60);
+    }
 }
 
 // axum WS tipleri (splice için kutulanır)
@@ -239,10 +263,12 @@ async fn splice_ws(
 
 async fn handle_native(
     tcp: tokio::net::TcpStream,
-    peer: String,
+    peer_addr: std::net::SocketAddr,
     state: Arc<State>,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<()> {
+    let peer = peer_addr.to_string();
+    let _ = tcp.set_nodelay(true);
     // TLS varsa sar, yoksa düz (kurulumda uyarıldı)
     let (mut rd, mut wr): (BoxRd, BoxWr) = match tls {
         Some(acc) => {
@@ -339,7 +365,7 @@ async fn handle_native(
                             }
                             RvMsg::ApprovalAnswer { client, allow } => {
                                 if !allow {
-                                    reject_pending(&state, &client, "kimlik doğrulama başarısız veya host reddetti").await;
+                                    reject_pending(&state, &client, "şifre hatalı, bağlantı reddedildi ya da çok fazla hatalı deneme yapıldı (1 dk bekle)").await;
                                 }
                             }
                             _ => {}
@@ -358,6 +384,10 @@ async fn handle_native(
         }
         RvMsg::Hello { id, auth } => {
             // client: host ara + onay bekle
+            if !state.hello_allowed(peer_addr.ip()) {
+                write_rv(&mut wr, &RvMsg::Rejected("çok fazla deneme; 1 dakika sonra tekrar dene".into())).await?;
+                return Ok(());
+            }
             if !valid_id(&id) {
                 write_rv(&mut wr, &RvMsg::Rejected("9 haneli ID gerekli".into())).await?;
                 return Ok(());
@@ -434,14 +464,8 @@ async fn handle_native(
                     splice_framed(c_rd, c_wr, rd, wr).await;
                     Ok(())
                 }
-                Some(Pending { kind: PendingKind::Web { sink: Some(mut sink), stream: Some(stream), jpeg, permit: Some(_permit) }, .. }) => {
-                    use axum::extract::ws::Message;
-                    use futures_util::SinkExt;
-                    if jpeg {
-                        sink.send(Message::Text(r#"{"t":"welcome","jpeg":true,"fps":10}"#.into())).await?;
-                    } else {
-                        sink.send(Message::Text(r#"{"t":"welcome","codec":"h264","fps":30}"#.into())).await?;
-                    }
+                Some(Pending { kind: PendingKind::Web { sink: Some(sink), stream: Some(stream), permit: Some(_permit) }, .. }) => {
+                    // Hoş geldin mesajını host gönderir (codec/isim/kalite onda).
                     splice_ws(sink, stream, rd, wr).await;
                     Ok(())
                 }
@@ -487,6 +511,32 @@ async fn reject_pending(state: &Arc<State>, client_tag: &str, msg: &str) {
     }
 }
 
+/// Sertifika yolları: önce systemd kimlik bilgisi dizini, sonra RF_TLS_CERT/RF_TLS_KEY.
+fn tls_paths() -> (Option<String>, Option<String>) {
+    if let Ok(dir) = std::env::var("CREDENTIALS_DIRECTORY") {
+        let c = Path::new(&dir).join("cert.pem");
+        let k = Path::new(&dir).join("key.pem");
+        if c.exists() && k.exists() {
+            return (Some(c.display().to_string()), Some(k.display().to_string()));
+        }
+    }
+    (std::env::var("RF_TLS_CERT").ok(), std::env::var("RF_TLS_KEY").ok())
+}
+
+/// "Permission denied" gibi dosya hatalarında ne yapılacağını açıkça yaz.
+fn explain_file_error(e: &anyhow::Error, paths: &[&str]) {
+    let denied = e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    if denied {
+        let user = std::env::var("USER").unwrap_or_else(|_| "remotefriend".into());
+        eprintln!("HATA: dosya okunamadı/yazılamadı (izin yok): {}", paths.join(", "));
+        eprintln!("Çözüm: güncel servis dosyası sertifikayı LoadCredential ile verir (izinden bağımsız).");
+        eprintln!("  Kurulum betiğini yeniden çalıştır ya da elle: sudo chown root:{user} <dosya> && sudo chmod 640 <dosya>");
+        eprintln!("  Kayıt dizini için: sudo chown -R {user}:{user} /var/lib/remotefriend && sudo chmod 700 /var/lib/remotefriend");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     remote_friend_common::tls::init_crypto();
@@ -494,10 +544,16 @@ async fn main() -> Result<()> {
     let port: u16 = std::env::var("RF_RV_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(RENDEZVOUS_PORT);
     let web_port: u16 = std::env::var("RF_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8080);
 
-    let tls = match (std::env::var("RF_TLS_CERT").ok(), std::env::var("RF_TLS_KEY").ok()) {
+    let tls = match tls_paths() {
         (Some(c), Some(k)) => {
             tracing::info!("TLS açık: {c}");
-            Some(remote_friend_common::tls::tls_acceptor(&c, &k)?)
+            match remote_friend_common::tls::tls_acceptor(&c, &k) {
+                Ok(acc) => Some(acc),
+                Err(e) => {
+                    explain_file_error(&e, &[&c, &k]);
+                    return Err(e);
+                }
+            }
         }
         _ => {
             if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
@@ -510,7 +566,14 @@ async fn main() -> Result<()> {
     };
 
     let registry_path = registry_path();
-    let registry = load_registry(&registry_path)?;
+    let registry = match load_registry(&registry_path) {
+        Ok(r) => r,
+        Err(e) => {
+            let p = registry_path.display().to_string();
+            explain_file_error(&e, &[&p]);
+            return Err(e);
+        }
+    };
     tracing::info!("host registry: {} ({} kayıt)", registry_path.display(), registry.len());
     let web_limit = std::env::var("RF_MAX_WEB_SESSIONS")
         .ok().and_then(|s| s.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(64);
@@ -523,6 +586,7 @@ async fn main() -> Result<()> {
         registry_path,
         web_slots: Arc::new(tokio::sync::Semaphore::new(web_limit)),
         pending_slots: Arc::new(tokio::sync::Semaphore::new(pending_limit)),
+        hello_rate: std::sync::Mutex::new(HashMap::new()),
     });
 
     // zaman aşımı süpürücü (60 sn onaysız bekleyenler)
@@ -541,6 +605,7 @@ async fn main() -> Result<()> {
                 for t in expired {
                     reject_pending(&st, &client_tag(t), "onay zaman aşımı").await;
                 }
+                st.sweep_rate();
                 // Ölü host bağlantısı read_rv ile kapanır; session_id eski oturumun yenisini silmesini engeller.
             }
         });
@@ -575,7 +640,7 @@ async fn main() -> Result<()> {
         let tls = tls.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = handle_native(tcp, peer.to_string(), st, tls).await {
+            if let Err(e) = handle_native(tcp, peer, st, tls).await {
                 tracing::warn!("bağlantı hatası {peer}: {e:#}");
             }
         });
@@ -592,55 +657,103 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
     use axum::routing::get;
     use futures_util::{SinkExt, StreamExt};
 
-    async fn page() -> Response {
+    fn security_headers(response: &mut Response) {
         use axum::http::{HeaderName, HeaderValue};
-        let mut response = Html(remote_friend_common::webapp::WEBAPP).into_response();
         let h = response.headers_mut();
         h.insert(HeaderName::from_static("cache-control"), HeaderValue::from_static("no-store"));
         h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
         h.insert(HeaderName::from_static("referrer-policy"), HeaderValue::from_static("no-referrer"));
+        h.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));
+        h.insert(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+        );
         h.insert(
             HeaderName::from_static("content-security-policy"),
-            HeaderValue::from_static("default-src 'self'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+            HeaderValue::from_static("default-src 'none'; img-src 'self' blob: data:; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
         );
+    }
+
+    async fn page() -> Response {
+        let mut response = Html(remote_friend_common::webapp::WEBAPP).into_response();
+        security_headers(&mut response);
         response
+    }
+
+    async fn info() -> Response {
+        let body = serde_json::json!({"role": "relay", "v": remote_friend_common::PROTOCOL_VERSION});
+        let mut response = axum::Json(body).into_response();
+        security_headers(&mut response);
+        response
+    }
+
+    /// nginx arkasında gerçek istemci IP'si (yalnızca yerel proxy'den gelen başlığa güvenilir).
+    fn client_ip(peer: std::net::SocketAddr, headers: &HeaderMap) -> std::net::IpAddr {
+        if peer.ip().is_loopback() {
+            if let Some(ip) = headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return ip;
+            }
+        }
+        peer.ip()
     }
 
     async fn ws_handler(
         ws: WebSocketUpgrade,
         AxState(state): AxState<Arc<State>>,
+        axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
         headers: HeaderMap,
     ) -> Response {
         if !origin_allowed(&headers) {
             tracing::warn!("WebSocket Origin reddedildi");
             return StatusCode::FORBIDDEN.into_response();
         }
+        if !state.hello_allowed(client_ip(peer, &headers)) {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
         let permit = match state.web_slots.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
-        ws.on_upgrade(move |socket| handle_web(socket, state, permit)).into_response()
+        let ip = client_ip(peer, &headers);
+        ws.max_message_size(600 * 1024)
+            .on_upgrade(move |socket| handle_web(socket, state, permit, ip))
+            .into_response()
     }
 
     async fn handle_web(
         socket: WebSocket,
         state: Arc<State>,
         permit: tokio::sync::OwnedSemaphorePermit,
+        ip: std::net::IpAddr,
     ) {
         let (mut sink, mut stream) = socket.split();
-        // hello (15 sn): {t:"hello", id:"123456789", password:"...", jpeg:true?}
+        // hello (15 sn): {t:"hello", id:"123456789", password:"...", jpeg:true?, resume?}
         let hello = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
         let (id, password, jpeg) = match hello {
             Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => {
                 serde_json::from_str::<serde_json::Value>(&t)
                     .ok()
-                    .map(|v| (
-                        v.get("id").and_then(|x| x.as_str())
-                            .map(|s| s.replace(' ', "")).unwrap_or_default(),
-                        v.get("password").and_then(|x| x.as_str())
-                            .unwrap_or("").chars().take(256).collect::<String>(),
-                        v.get("jpeg").and_then(|x| x.as_bool()).unwrap_or(false),
-                    ))
+                    .map(|v| {
+                        let pw: String = v.get("password").and_then(|x| x.as_str())
+                            .unwrap_or("").chars().take(200).collect();
+                        // Yeniden bağlanma belirteci host'a parolayla birlikte iletilir.
+                        let resume = v.get("resume").and_then(|x| x.as_str()).unwrap_or("");
+                        let auth = if resume.len() == 32 && resume.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            format!("rf-resume:{resume}:{pw}")
+                        } else {
+                            pw
+                        };
+                        (
+                            v.get("id").and_then(|x| x.as_str())
+                                .map(|s| s.replace(' ', "")).unwrap_or_default(),
+                            auth,
+                            v.get("jpeg").and_then(|x| x.as_bool()).unwrap_or(false),
+                        )
+                    })
                     .unwrap_or_default()
             }
             _ => (String::new(), String::new(), false),
@@ -673,7 +786,6 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
                     kind: PendingKind::Web {
                         sink: Some(sink),
                         stream: Some(stream),
-                        jpeg,
                         permit: Some(permit),
                     },
                     created: std::time::Instant::now(),
@@ -685,7 +797,7 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
         let kind = if jpeg { "web-jpeg" } else { "web" };
         if cmd_tx.try_send(RvMsg::ApprovalRequest {
             client: tag.clone(),
-            addr: "tarayıcı".into(),
+            addr: format!("tarayıcı {ip}"),
             kind: kind.into(),
             token,
             auth: Some(password),
@@ -699,11 +811,12 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
 
     let app = axum::Router::new()
         .route("/", get(page))
+        .route("/info", get(info))
         .route("/ws", get(ws_handler))
         .with_state(state);
     let web_bind = std::env::var("RF_WEB_BIND").unwrap_or("127.0.0.1".into());
     let listener = tokio::net::TcpListener::bind(format!("{web_bind}:{port}")).await?;
     tracing::info!("web arayüzü: {web_bind}:{port}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }

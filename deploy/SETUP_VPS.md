@@ -1,112 +1,86 @@
 # VPS kurulumu (Ubuntu/Debian)
 
-> Güvenlik sınırı: RemoteFriend relay bu sürümde uçtan uca şifreli değildir. VPS operatörü ve VPS'yi ele geçiren kişi görüntü, input, parola ve dosya içeriğini teknik olarak görebilir. Yalnızca güvendiğin sunucuyu kullan.
+> Güvenlik sınırı: röle uçtan uca şifreli değildir. VPS'i yöneten ya da ele geçiren kişi görüntü,
+> girdi, parola ve dosya içeriğini teknik olarak görebilir. Yalnızca kendi/güvendiğin sunucuyu kullan.
 
-## 1. Ayrı kullanıcı ve dizinler
+## Tek komut (kurulum ve güncelleme)
 
 ```bash
-sudo useradd --system --home /var/lib/remotefriend --shell /usr/sbin/nologin remotefriend 2>/dev/null || true
-sudo install -d -o root -g remotefriend -m 0750 /opt/remotefriend
-sudo install -d -o remotefriend -g remotefriend -m 0700 /var/lib/remotefriend
+curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/setup-vps.sh | sudo bash
 ```
 
-`remote-friend-rendezvous` binary'sini `/opt/remotefriend/` içine koy:
+Betik şunları yapar (tekrar çalıştırmak güvenlidir):
+
+1. `nginx`, `certbot`, `ufw` kurar; `remotefriend` sistem kullanıcısını oluşturur.
+2. Son sürüm `remote-friend-rendezvous` dosyasını indirir (önce servisi durdurur, atomik değiştirir).
+3. Röle TLS sertifikasını (`/opt/remotefriend/cert.pem`, port 33202) **korur**; yoksa üretir.
+4. Dosya izinlerini her seferinde onarır.
+5. systemd servisini kurar. Servis sertifikayı `LoadCredential=` ile alır: systemd dosyayı root
+   olarak okuyup servise verir, dosya izinleri yüzünden servis düşmez.
+6. nginx'i kurar ve **Let's Encrypt HTTPS** alır. Alan adın yoksa `<ip-tireli>.sslip.io` kullanılır
+   (ör. `169-58-37-61.sslip.io`, ayar gerekmez). Sertifika otomatik yenilenir.
+7. Güvenlik duvarında 80, 443 ve 33202'yi açar; sonunda web adresini ve parmak izini yazar.
+
+Seçenekler:
 
 ```bash
-sudo install -o root -g remotefriend -m 0750 remote-friend-rendezvous /opt/remotefriend/remote-friend-rendezvous
+# kendi alan adın (A kaydı bu VPS'i göstermeli)
+curl -sL .../setup-vps.sh | sudo DOMAIN=uzak.ornek.com EMAIL=sen@ornek.com bash
+# IP otomatik bulunamazsa
+curl -sL .../setup-vps.sh | sudo SERVER_IP=1.2.3.4 bash
+# belirli sürüm
+curl -sL .../setup-vps.sh | sudo VERSION=v0.6.0 bash
 ```
 
-## 2. Native relay TLS sertifikası
+Bulut sağlayıcının güvenlik grubunda da **80, 443 ve 33202/TCP** açık olmalı (80, sertifika alımı için).
 
-Örnek self-signed sertifika:
+## Host ayarı
 
-```bash
-sudo openssl req -x509 -newkey rsa:3072 \
-  -keyout /opt/remotefriend/key.pem \
-  -out /opt/remotefriend/cert.pem \
-  -days 825 -nodes -subj "/CN=remotefriend-relay"
-sudo chown root:remotefriend /opt/remotefriend/key.pem /opt/remotefriend/cert.pem
-sudo chmod 0640 /opt/remotefriend/key.pem
-sudo chmod 0644 /opt/remotefriend/cert.pem
-```
+Host başlatıcısı sunucuyu bir kez sorar: `VPS_IP:33202`. İlk bağlanışta host terminali parmak
+izini sorar; kurulumun sonunda yazan parmak iziyle aynıysa **E** de. Telefonda kurulumun yazdığı
+`https://…` adresini aç.
 
-Host ve native clientta pinlenecek tam SHA-256 fingerprint:
+## Sorun giderme
 
-```bash
-openssl x509 -in /opt/remotefriend/cert.pem -outform der | sha256sum | awk '{print $1}'
-```
+### `Permission denied (os error 13)` ile servis sürekli yeniden başlıyor
 
-Sertifika değiştiğinde fingerprint'i güvenli bir kanaldan yeniden dağıt.
+Neden: servis kullanıcısı (`remotefriend`) TLS anahtarını ya da kayıt dosyasını okuyamıyor
+(ör. sertifika elle yeniden üretildi / kopyalandı ve sahibi `root`, izni `600` kaldı).
 
-## 3. systemd
+En kolayı kurulum betiğini yeniden çalıştırmak. Elle düzeltmek için **her komutu ayrı satırda** çalıştır:
 
 ```bash
-sudo cp deploy/remotefriend.service /etc/systemd/system/
+sudo curl -fsSL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/remotefriend.service -o /etc/systemd/system/remotefriend.service
+sudo chown root:remotefriend /opt/remotefriend /opt/remotefriend/cert.pem /opt/remotefriend/key.pem
+sudo chmod 750 /opt/remotefriend
+sudo chmod 640 /opt/remotefriend/key.pem
+sudo chown -R remotefriend:remotefriend /var/lib/remotefriend
+sudo chmod 700 /var/lib/remotefriend
 sudo systemctl daemon-reload
-sudo systemctl enable --now remotefriend
-sudo journalctl -u remotefriend -f
+sudo systemctl restart remotefriend
+sudo journalctl -u remotefriend -n 30 --no-pager
 ```
 
-Servis web arayüzünü yalnızca `127.0.0.1:8080` üzerinde açar. Host registry `/var/lib/remotefriend/hosts.json` içinde `0600` izinle tutulur.
+Hangi dosyanın okunamadığını görmek için günlüğün **tamamına** bak (`-n 30`); hata satırının
+üstünde `sertifika açılamadı: …`, `anahtar açılamadı: …` ya da `host kayıt dosyası okunamadı: …` yazar.
 
-## 4. Nginx + geçerli HTTPS
+### HTTPS alınamadı
 
-Tarayıcıda WebCodecs H.264 kullanabilmek ve parola/input trafiğini ağ üzerinde korumak için geçerli HTTPS gerekir.
+`/tmp/rf-certbot.log` dosyasına bak. En sık neden: 80 numaralı port bulut güvenlik grubunda kapalı
+ya da başka bir web sunucusu 80'i kullanıyor. Düzeltip betiği yeniden çalıştır.
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name remote.example.com;
+### "bu ID başka bir host anahtarına kayıtlı"
 
-    ssl_certificate /etc/letsencrypt/live/remote.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/remote.example.com/privkey.pem;
-
-    add_header Strict-Transport-Security "max-age=31536000" always;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-}
-```
-
-Let's Encrypt örneği:
+Host'un `~/.config/remotefriend/host_secret` dosyası değişti/silindi. Eski kaydı kaldır:
 
 ```bash
-sudo apt-get install -y nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d remote.example.com
+sudo systemctl stop remotefriend
+sudo nano /var/lib/remotefriend/hosts.json   # ilgili 9 haneli ID satırını sil
+sudo systemctl start remotefriend
 ```
-
-## 5. Firewall
-
-```bash
-sudo ufw allow 443/tcp comment 'RemoteFriend HTTPS web'
-sudo ufw allow 33202/tcp comment 'RemoteFriend TLS relay'
-sudo ufw deny 8080/tcp
-```
-
-Cloud firewall/security group üzerinde de yalnızca `443` ve `33202` aç.
-
-## 6. Host ve client ayarları
-
-Host:
-
-```text
-RF_RV_SERVER=remote.example.com:33202
-RF_RV_FP=<2. adımda alınan tam fingerprint>
-```
-
-Native clientta sunucu alanına aynı adresi gir ve `RF_RV_FP` ile aynı fingerprint'i kullan. Tarayıcıda `https://remote.example.com` aç.
 
 ## Bakım
 
-- `/var/lib/remotefriend/hosts.json` dosyasını şifreli yedekle; içinde host kimlik sırları bulunur.
-- Bir host `host_secret` dosyasını kaybederse registry'deki ilgili ID kaydı yönetici tarafından kaldırılmadan aynı ID yeniden sahiplenilemez.
-- Logları, disk kullanımını, TLS sertifika süresini ve başarısız bağlantı denemelerini izle.
+- `/var/lib/remotefriend/hosts.json` dosyasını gizli tut ve yedekle (host kimlik sırları içerir).
+- Röle sertifikası değişirse host'lar parmak izini yeniden sorar; yeni parmak izini güvenli kanaldan doğrula.
 - `RF_PLAIN_OK=1` değerini üretim sunucusunda kullanma.

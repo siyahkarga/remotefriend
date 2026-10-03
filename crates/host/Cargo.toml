@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = "1"
 xcap = "0.4"
 openh264 = "0.9"
+# Calisirken bit hizini degistirmek icin ham secenek API.
+openh264-sys2 = "0.9"
 hostname = { workspace = true }
 image = { version = "0.25", features = ["jpeg"] }
 enigo = "0.6"
@@ -25,8 +27,8 @@ base64 = { workspace = true }
 windows = { version = "0.61", features = ["Win32_UI_HiDpi"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Wayland sessiz yakalama (Portal ScreenCast + PipeWire). Xorg'da xcap yeterli.
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "pipewire"] }
+# Wayland: Portal RemoteDesktop (gercek fare/klavye) + ScreenCast + PipeWire. Xorg'da xcap + enigo.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop", "pipewire"] }
 pipewire = "0.9"
 memmap2 = "0.9"
 libc = "0.2"

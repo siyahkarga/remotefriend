@@ -207,7 +207,7 @@ pub fn tls_acceptor(
     let key_file =
         std::fs::File::open(key_path).with_context(|| format!("anahtar açılamadı: {key_path}"))?;
     let mut reader = BufReader::new(key_file);
-    let mut keys = pkcs8_private_keys(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let keys = pkcs8_private_keys(&mut reader).collect::<Result<Vec<_>, _>>()?;
     if keys.is_empty() {
         let key_file = std::fs::File::open(key_path)?;
         let mut reader = BufReader::new(key_file);

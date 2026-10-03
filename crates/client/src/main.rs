@@ -6,7 +6,6 @@ use remote_friend_common::{Handshake, InputEvent, MouseButton, Packet, FileChunk
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::io::Read as _;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 mod history;
@@ -68,6 +67,8 @@ fn main() -> Result<()> {
         disconnect_tx: None,
         last_mouse: None,
         mods: [false; 4],
+        buttons_down: [false; 3],
+        chars_down: Default::default(),
         scroll_acc: (0.0, 0.0),
         lan,
         recents: history::load_recents(),
@@ -260,12 +261,17 @@ where
 
     // gönderici (async recv: thread'i kilitlemez)
     // Not: ham u32 yazımı (framing) run_session'a özel; write_packet'e dokunmaz.
-    let wr = Arc::new(tokio::sync::Mutex::new(wr));
-    let wr2 = wr.clone();
-    tokio::spawn(async move {
-        while let Some(p) = rx_out.recv().await {
-            let mut g = wr2.lock().await;
-            if remote_friend_common::io::write_packet(&mut *g, &p).await.is_err() {
+    // Kare onayları (host gecikmeyi sınırlar) kullanıcı girdisiyle aynı yazıcıdan gider.
+    let (ack_tx, mut ack_rx) = channel::<u64>(64);
+    let writer = tokio::spawn(async move {
+        let mut wr = wr;
+        loop {
+            let p = tokio::select! {
+                biased;
+                p = rx_out.recv() => match p { Some(p) => p, None => break },
+                s = ack_rx.recv() => match s { Some(seq) => Packet::Ack { seq }, None => break },
+            };
+            if remote_friend_common::io::write_packet(&mut wr, &p).await.is_err() {
                 break;
             }
         }
@@ -295,6 +301,8 @@ where
         if let Packet::Video(f) = pkt {
             n += 1;
             total += 1;
+            // Onay alındığında gönderilir (çözme hatasında bile host penceresi kilitlenmesin).
+            let _ = ack_tx.try_send(f.seq);
             let img = match f.codec {
                 remote_friend_common::VideoCodec::H264 => match h264.decode_frame(&f.data) {
                     Ok(img) => img,
@@ -333,6 +341,7 @@ where
             }
     };
     }
+    writer.abort();
     Ok(())
 }
 
@@ -392,6 +401,9 @@ struct App {
     disconnect_tx: Option<tokio::sync::watch::Sender<bool>>,
     last_mouse: Option<(u32, u32)>,
     mods: [bool; 4], // shift, ctrl, alt, meta (basılı mı)
+    buttons_down: [bool; 3],
+    /// Değiştiriciyle basılan harfler (bırakma her durumda gönderilir).
+    chars_down: std::collections::HashSet<char>,
     scroll_acc: (f32, f32),
     // discovery + recents (arka plan thread'lerinden beslenir)
     lan: Arc<Mutex<Vec<LanEntry>>>,
@@ -498,6 +510,8 @@ impl App {
         self.disconnect_tx = Some(dc_tx);
         self.last_mouse = None;
         self.mods = [false; 4];
+        self.buttons_down = [false; 3];
+        self.chars_down.clear();
         self.scroll_acc = (0.0, 0.0);
         self.screen = Screen::Viewer;
     }
@@ -768,28 +782,30 @@ impl App {
                         }
                     }
                 }
-                if resp.clicked() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        if let Some((x, y)) = to_host(p) {
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Left }));
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Left }));
-                        }
-                    }
-                }
-                if resp.secondary_clicked() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        if let Some((x, y)) = to_host(p) {
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: MouseButton::Right }));
-                            let _ = tx.try_send(Packet::Input(InputEvent::MouseUp { button: MouseButton::Right }));
-                        }
-                    }
-                }
-
                 let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
                 for ev in events {
                     match &ev {
+                        // Gerçek bas/bırak: sürükle-bırak, seçim ve çift tık çalışır.
+                        egui::Event::PointerButton { pos, button, pressed, .. } => {
+                            let btn = match button {
+                                egui::PointerButton::Primary => MouseButton::Left,
+                                egui::PointerButton::Secondary => MouseButton::Right,
+                                egui::PointerButton::Middle => MouseButton::Middle,
+                                _ => continue,
+                            };
+                            if *pressed {
+                                let Some((x, y)) = to_host(*pos) else { continue };
+                                let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
+                                let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: btn }));
+                                self.buttons_down[btn_index(btn)] = true;
+                            } else if self.buttons_down[btn_index(btn)] {
+                                if let Some((x, y)) = to_host(*pos) {
+                                    let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
+                                }
+                                let _ = tx.try_send(Packet::Input(InputEvent::MouseUp { button: btn }));
+                                self.buttons_down[btn_index(btn)] = false;
+                            }
+                        }
                         egui::Event::Text(t) => {
                             for c in t.chars() {
                                 if c.is_control() { continue; }
@@ -797,10 +813,24 @@ impl App {
                                 self.send_key(RemoteKey::Char(c), false);
                             }
                         }
-                        egui::Event::Key { key, pressed, repeat, .. } => {
+                        egui::Event::Key { key, pressed, repeat, modifiers, .. } => {
                             if *repeat { continue; }
                             if let Some(rk) = egui_key_to_remote(*key) {
                                 self.send_key(rk, *pressed);
+                            } else {
+                                // Ctrl/Alt basılıyken egui metin olayı üretmez: Ctrl+C vb. buradan.
+                                // Bırakma, değiştirici o an basılı olmasa da gönderilir (takılı tuş olmasın).
+                                let name = key.symbol_or_name();
+                                let mut chars = name.chars();
+                                if let (Some(c), None) = (chars.next(), chars.next()) {
+                                    let c = c.to_ascii_lowercase();
+                                    if *pressed && (modifiers.ctrl || modifiers.alt || modifiers.mac_cmd) {
+                                        self.chars_down.insert(c);
+                                        self.send_key(RemoteKey::Char(c), true);
+                                    } else if !*pressed && self.chars_down.remove(&c) {
+                                        self.send_key(RemoteKey::Char(c), false);
+                                    }
+                                }
                             }
                         }
                         egui::Event::MouseWheel { unit, delta, .. } => {
@@ -942,6 +972,14 @@ impl App {
             }
             tracing::info!("dosya gönderildi: {name} ({total} byte)");
         });
+    }
+}
+
+fn btn_index(b: MouseButton) -> usize {
+    match b {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
     }
 }
 

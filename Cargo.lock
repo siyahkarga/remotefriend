@@ -4093,6 +4093,7 @@ dependencies = [
  "local-ip-address",
  "memmap2",
  "openh264",
+ "openh264-sys2",
  "pipewire",
  "remote-friend-common",
  "serde",

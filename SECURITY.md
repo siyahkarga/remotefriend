@@ -11,7 +11,7 @@ RemoteFriend, parola bilen ve host tarafından onaylanan bir istemciye ekran, in
 | LAN native `33200` | Yok | Yalnızca güvenilir LAN veya VPN |
 | LAN web `33201` | Varsayılan kurulumda HTTP/WS | Yalnızca güvenilir LAN; HTTPS ters proxy tercih edilir |
 | Native internet `33202` | İstemci/host → VPS TLS + fingerprint pinning | Güvenilir VPS gerekir; E2E değildir |
-| VPS web | Nginx HTTPS önerilir; host dial-back TLS VPS'de sonlanır | Güvenilir VPS gerekir; E2E değildir |
+| VPS web | Kurulum betiği Let's Encrypt HTTPS kurar; host dial-back TLS VPS'de sonlanır | Güvenilir VPS gerekir; E2E değildir |
 
 VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle relay sunucusu parolayı, ekranı, input'u ve dosyaları görebilir. Sunucu ele geçirilirse gizlilik kaybolur. Gerçek uçtan uca gizlilik bu sürümün kapsamı dışındadır.
 
@@ -27,6 +27,21 @@ VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle re
 - Tarayıcı parolası `localStorage` içinde tutulmuyor.
 - Host kayıt sırrı ve ayarlar Unix'te `0600`, config dizini `0700` izinle yazılıyor.
 
+## v0.6.0 ile eklenenler
+
+- Hatalı parola kilidi (host'ta, tüm yollar için): 60 sn içinde 5 hata → 1 dk, tekrarında 2/4/8/16 dk.
+  Kilit süresince parola hiç değerlendirilmez.
+- Röle sunucusunda IP başına dakikada 12 bağlantı isteği sınırı (nginx arkasında `X-Real-IP` yalnızca
+  yerel proxy'den kabul edilir).
+- VPS kurulumunda otomatik HTTPS (Let's Encrypt; alan adı yoksa sslip.io): tarayıcı yolunda parola ve
+  görüntü artık internette düz metin gitmez.
+- TLS anahtarı systemd `LoadCredential=` ile verilir; anahtar dosyası servis kullanıcısına açılmak zorunda değil.
+- Wayland'da girdi masaüstünün RemoteDesktop portalıyla verilir (kullanıcı onayı, iptal edilebilir).
+- Oturum biterken basılı kalan tuş/fare düğmeleri host'ta otomatik bırakılır.
+- Sıkı CSP (`default-src 'none'`), `X-Frame-Options: DENY`, `Permissions-Policy`.
+- Onay soruları tek bir stdin okuyucusundan geçer (zaman aşımına uğrayan soru sonraki cevabı çalamaz).
+- Üretilen şifreler okunaklı (`abcde-23456`, ~50 bit); kilit ile çevrimiçi tahmin pratikte imkânsız.
+
 ## Güvenli dağıtım
 
 - `33200` ve `33201` portlarını WAN'a yönlendirme.
@@ -40,7 +55,8 @@ VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle re
 
 - Relay uçtan uca şifreli değil.
 - LAN native ve varsayılan LAN web trafiği şifreli değil.
-- Parola tabanlı erişimde hesap kilitleme/kalıcı IP rate-limit yok; güçlü rastgele şifre ve bağlantı limitleri brute-force riskini azaltır ama tamamen kaldırmaz.
+- Kilit host genelindedir: ID'yi bilen biri bilerek hatalı deneme yaparak meşru kullanıcıyı kısa süreliğine
+  kilitleyebilir (hizmet engelleme). Bu, tahmin saldırısına karşı bilinçli bir takastır.
 - Ekran yakalama, input enjeksiyonu ve dosya aktarımı işletim sistemi kullanıcısının yetkileriyle çalışır.
 - Windows'ta hassas dosya izinleri Unix `0600` semantiğiyle birebir uygulanmaz; kullanıcı profilinin NTFS ACL'leri korunmalıdır.
 

@@ -9,7 +9,25 @@ pub mod tls;
 pub mod webapp;
 // Not: `discovery` bu dosyada inline tanımlı (aşağıda).
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Tarayıcı video karesi başlığı sürümü (webapp.html ile aynı olmalı).
+pub const WEB_FRAME_VERSION: u8 = 3;
+/// Tarayıcı kare başlığı uzunluğu: [ver][flags][0][0][w u32][h u32][seq u32]
+pub const WEB_FRAME_HEADER: usize = 16;
+pub const WEB_FLAG_KEY: u8 = 1;
+pub const WEB_FLAG_JPEG: u8 = 2;
+
+/// Tarayıcıya giden kareye 16 baytlık başlık ekler.
+pub fn web_frame(w: u32, h: u32, seq: u64, key: bool, jpeg: bool, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(WEB_FRAME_HEADER + payload.len());
+    let flags = if key { WEB_FLAG_KEY } else { 0 } | if jpeg { WEB_FLAG_JPEG } else { 0 };
+    out.extend_from_slice(&[WEB_FRAME_VERSION, flags, 0, 0]);
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&(seq as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
 pub const DEFAULT_PORT: u16 = 33200;
 
 /// Bağlantı kurarken ilk mesaj
@@ -50,10 +68,12 @@ pub enum InputEvent {
     Scroll { dx: i32, dy: i32 },
     /// Tam klavye: basma/bırakma ayrı (modifier/F-tuş/oklar dahil)
     Key { key: RemoteKey, down: bool },
+    /// Metin yaz (telefon klavyesi / yapıştır). Host her karakteri bas-bırak yapar.
+    Text(String),
 }
 
-/// Host'tan bağımsız tuş tanımı (client egui'den, host enigo'ya çevirir)
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+/// Host'tan bağımsız tuş tanımı (client egui'den, host enigo/portal'a çevirir)
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteKey {
     Char(char),
     Enter,
@@ -120,6 +140,9 @@ pub enum Packet {
     Video(VideoFrame),
     Input(InputEvent),
     File(FileChunk),
+    /// İstemci bu sıra numaralı kareyi çözdü (host gecikme/akış kontrolü yapar).
+    /// Eski istemciler göndermez; host o durumda pencere uygulamaz.
+    Ack { seq: u64 },
 }
 
 pub fn encode(packet: &Packet) -> anyhow::Result<Vec<u8>> {
@@ -194,10 +217,39 @@ pub fn new_secret_hex() -> String {
     hex::encode(bytes)
 }
 
-/// Ortam değişkeni verilmediyse bu çalıştırma için güçlü bir parola üret.
+/// Karışmayan karakterler (0/o, 1/l/i yok): telefonda okuması ve yazması kolay.
+const PASSWORD_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+/// Ortam değişkeni verilmediyse bu çalıştırma için parola üret: "abcde-23456".
+/// 10 karakter x 31 sembol ~= 49.5 bit; host ayrıca deneme sayısını sınırlar.
 pub fn new_session_password() -> String {
-    let bytes = rand::random::<[u8; 12]>();
-    hex::encode(bytes)
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let mut out = String::with_capacity(11);
+    for i in 0..10 {
+        if i == 5 {
+            out.push('-');
+        }
+        let idx = rng.random_range(0..PASSWORD_ALPHABET.len());
+        out.push(PASSWORD_ALPHABET[idx] as char);
+    }
+    out
+}
+
+/// Üretilmiş parola karşılaştırması için: boşluk/tire yok, küçük harf.
+pub fn normalize_password(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Sabit zamanlı bayt karşılaştırması (eşit uzunlukta erken dönmez).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 pub fn format_id(id: &str) -> String {
@@ -344,8 +396,20 @@ mod tests {
         assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()));
 
         let password = new_session_password();
-        assert_eq!(password.len(), 24);
-        assert!(password.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(password.len(), 11);
+        assert_eq!(password.as_bytes()[5], b'-');
+        assert_eq!(normalize_password(&password).len(), 10);
+        assert_eq!(normalize_password(" AbCdE-23456 "), "abcde23456");
+    }
+
+    #[test]
+    fn web_frame_header_layout() {
+        let f = web_frame(1920, 1080, 7, true, false, &[9, 9]);
+        assert_eq!(f.len(), WEB_FRAME_HEADER + 2);
+        assert_eq!(f[0], WEB_FRAME_VERSION);
+        assert_eq!(f[1], WEB_FLAG_KEY);
+        assert_eq!(u32::from_le_bytes(f[4..8].try_into().unwrap()), 1920);
+        assert_eq!(u32::from_le_bytes(f[12..16].try_into().unwrap()), 7);
     }
 
     #[test]

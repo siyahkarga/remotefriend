@@ -1,5 +1,10 @@
-//! Tarayıcı client için HTTP + WebSocket sunucusu.
-//! http://HOST:33201 açılır, kurulum gerekmez. Video H264 (WebCodecs), input JSON.
+//! Tarayıcı oturumları.
+//!
+//! - LAN: host'un kendi HTTP/WebSocket sunucusu (http://HOST:33201).
+//! - İnternet: VPS rölesi üzerinden dial-back hattı (kmsg çerçeveleri).
+//!
+//! İki taşıma da aynı oturum çekirdeğini (`run_session`) kullanır: hoş geldin,
+//! video akışı + akış kontrolü (kare onayı), girdi, kalite, dosya.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -7,26 +12,34 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
-    http::{header::{HOST, ORIGIN}, HeaderMap, StatusCode},
+    http::{header::{HOST, ORIGIN}, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use remote_friend_common::{FileChunk, InputEvent, MouseButton, RemoteKey};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use remote_friend_common::{FileChunk, InputEvent, MouseButton};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, mpsc};
+
+use crate::video::{self, EncodedFrame};
 
 const PAGE: &str = remote_friend_common::webapp::WEBAPP;
+/// Tarayıcıdan gelen tek metin mesajı sınırı (dosya parçası base64 dahil).
+const MAX_TEXT: usize = 400 * 1024;
+/// Bu süre istemciden hiç mesaj gelmezse oturum kapanır (arka plana alınan telefon sekmesi
+/// dahil; dönünce sayfa onaysız yeniden bağlanır).
+const SESSION_IDLE: Duration = Duration::from_secs(45);
 
 #[derive(Clone)]
 struct WsState {
-    password: String,
     slots: Arc<tokio::sync::Semaphore>,
+    name: String,
 }
 
-pub async fn serve(http_addr: String, password: String) -> Result<()> {
+pub async fn serve(http_addr: String, name: String) -> Result<()> {
     let max_sessions = std::env::var("RF_MAX_WEB_SESSIONS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -34,33 +47,49 @@ pub async fn serve(http_addr: String, password: String) -> Result<()> {
         .unwrap_or(4);
     let app = Router::new()
         .route("/", get(page))
+        .route("/info", get(info))
         .route("/ws", get(ws_handler))
-        .with_state(WsState {
-            password,
-            slots: Arc::new(tokio::sync::Semaphore::new(max_sessions)),
-        });
+        .with_state(WsState { slots: Arc::new(tokio::sync::Semaphore::new(max_sessions)), name });
     let listener = tokio::net::TcpListener::bind(&http_addr)
         .await
         .with_context(|| format!("web bind hatası: {http_addr}"))?;
     tracing::info!("web sunucusu: {http_addr}");
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .context("web serve")?;
     Ok(())
 }
 
-
-async fn page() -> Response {
-    use axum::http::{HeaderName, HeaderValue};
-    let mut response = Html(PAGE).into_response();
+fn security_headers(response: &mut Response) {
     let h = response.headers_mut();
     h.insert(HeaderName::from_static("cache-control"), HeaderValue::from_static("no-store"));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
     h.insert(HeaderName::from_static("referrer-policy"), HeaderValue::from_static("no-referrer"));
+    h.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));
+    h.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
     h.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+        HeaderValue::from_static("default-src 'none'; img-src 'self' blob: data:; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
     );
+}
+
+async fn page() -> Response {
+    let mut response = Html(PAGE).into_response();
+    security_headers(&mut response);
+    response
+}
+
+async fn info(State(state): State<WsState>) -> Response {
+    let body = serde_json::json!({
+        "role": "host",
+        "name": state.name,
+        "v": remote_friend_common::PROTOCOL_VERSION,
+    });
+    let mut response = axum::Json(body).into_response();
+    security_headers(&mut response);
     response
 }
 
@@ -83,6 +112,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<WsState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
     if !origin_allowed(&headers) {
@@ -93,442 +123,429 @@ async fn ws_handler(
         Ok(p) => p,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    ws.on_upgrade(move |socket| handle_ws(socket, state, permit)).into_response()
+    ws.max_message_size(MAX_TEXT + 1024)
+        .on_upgrade(move |socket| handle_ws(socket, permit, peer.ip().to_string()))
+        .into_response()
 }
 
-async fn ws_send_text(
-    tx: &Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
-    s: &str,
-) -> Result<()> {
-    tx.lock().await.send(Message::Text(s.to_string())).await?;
-    Ok(())
+fn reject_json(msg: &str) -> String {
+    serde_json::json!({"t": "reject", "msg": msg}).to_string()
 }
 
-async fn handle_ws(socket: WebSocket, state: WsState, _permit: tokio::sync::OwnedSemaphorePermit) {
-    let peer = "tarayıcı";
-    let (sink, mut stream) = socket.split();
-    let tx = Arc::new(Mutex::new(sink));
+async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit, peer_ip: String) {
+    let (mut sink, mut stream) = socket.split();
 
-    // 1. hello (15 sn). WebCodecs'siz tarayıcı (ya da Firefox) JPEG ister.
-    let hello = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
-    let (password_ok, want_jpeg) = match hello {
+    // 1. hello (15 sn): {t:"hello", password, jpeg?, resume?}
+    let hello = tokio::time::timeout(Duration::from_secs(15), stream.next()).await;
+    let (password, want_jpeg, resume) = match hello {
         Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => match serde_json::from_str::<serde_json::Value>(&t) {
             Ok(v) => (
-                super::constant_time_eq(v.get("password").and_then(|p| p.as_str()).unwrap_or(""), &state.password),
+                v.get("password").and_then(|p| p.as_str()).unwrap_or("").chars().take(256).collect::<String>(),
                 v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false),
+                v.get("resume").and_then(|r| r.as_str()).unwrap_or("").chars().take(64).collect::<String>(),
             ),
-            Err(_) => (false, false),
+            Err(_) => (String::new(), false, String::new()),
         },
-        _ => (false, false),
+        _ => (String::new(), false, String::new()),
     };
-    if !password_ok {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let _ = ws_send_text(&tx, r#"{"t":"reject","msg":"şifre hatalı"}"#).await;
-        return;
-    }
-
-    // 2. operatör onayı (şart!)
-    let _ = ws_send_text(&tx, r#"{"t":"wait"}"#).await;
-    let approved = tokio::task::spawn_blocking(|| super::ask_approval(peer))
-        .await
-        .unwrap_or(false);
-    if !approved {
-        let _ = ws_send_text(&tx, r#"{"t":"reject","msg":"host bağlantıyı reddetti"}"#).await;
-        return;
-    }
-    if want_jpeg {
-        let welcome = format!(r#"{{"t":"welcome","jpeg":true,"fps":{}}}"#, jpeg_fps());
-        let _ = ws_send_text(&tx, &welcome).await;
-    } else {
-        let welcome = format!(r#"{{"t":"welcome","codec":"h264","fps":{}}}"#, super::target_fps());
-        let _ = ws_send_text(&tx, &welcome).await;
-    }
-    tracing::info!("tarayıcı client kabul edildi (jpeg={want_jpeg})");
-
-    // 3. video gönderici (H264 WebCodecs ya da düz JPEG)
-    let tx2 = tx.clone();
-    let video_task = tokio::spawn(async move {
-        if want_jpeg {
-            jpeg_loop(tx2).await;
+    match crate::auth::check_password(&password, &peer_ip) {
+        crate::auth::Auth::Ok => {}
+        crate::auth::Auth::Bad => {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = sink.send(Message::Text(reject_json("şifre hatalı"))).await;
             return;
         }
-        let mut rx = super::video_sender().subscribe();
+        crate::auth::Auth::Locked(secs) => {
+            let _ = sink
+                .send(Message::Text(reject_json(&format!("çok fazla hatalı deneme; {secs} sn sonra tekrar dene"))))
+                .await;
+            return;
+        }
+    }
+
+    // 2. operatör onayı (kısa kopmadan dönen oturum için belirteç yeterli)
+    let approved = if crate::approval::consume_resume(&resume) {
+        println!("*** tarayıcı ({peer_ip}): oturum yeniden bağlandı");
+        true
+    } else {
+        let _ = sink.send(Message::Text(r#"{"t":"wait"}"#.into())).await;
+        let who = format!("tarayıcı (yerel ağ, {peer_ip})");
+        tokio::task::spawn_blocking(move || crate::approval::ask(&who)).await.unwrap_or(false)
+    };
+    if !approved {
+        let _ = sink.send(Message::Text(reject_json("host bağlantıyı reddetti"))).await;
+        return;
+    }
+    tracing::info!("tarayıcı (LAN) kabul edildi (jpeg={want_jpeg})");
+
+    // 3. taşıma görevleri
+    let (inbox_tx, inbox) = mpsc::channel::<String>(256);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
+    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
+    let writer = tokio::spawn(async move {
         loop {
-            let frame = match rx.recv().await {
-                Ok(frame) => frame,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let msg = tokio::select! {
+                biased;
+                m = ctrl_rx.recv() => match m { Some(t) => Message::Text(t), None => break },
+                m = video_rx.recv() => match m { Some(b) => Message::Binary(b), None => break },
             };
-            // başlık: w(u32 LE) + h(u32 LE) + Annex-B
-            let mut msg = Vec::with_capacity(frame.data.len() + 8);
-            msg.extend_from_slice(&frame.width.to_le_bytes());
-            msg.extend_from_slice(&frame.height.to_le_bytes());
-            msg.extend_from_slice(frame.data.as_ref());
-            let mut g = tx2.lock().await;
-            if g.send(Message::Binary(msg)).await.is_err() {
+            if sink.send(msg).await.is_err() {
                 break;
             }
         }
+        let _ = sink.close().await;
     });
+    let reader = tokio::spawn(async move {
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(Message::Text(t)) => {
+                    if t.len() > MAX_TEXT || inbox_tx.send(t).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) | Err(_) => break,
+            }
+        }
+    });
+    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "tarayıcı (LAN)").await;
+    reader.abort();
+    let _ = writer.await;
+}
 
-    // 4. input alıcı
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                if t.len() > 400 * 1024 {
-                    tracing::warn!("web input mesajı çok büyük; bağlantı kapatılıyor");
+/// VPS dial-back hattı üzerinden tarayıcı oturumu. kmsg tür 0 = video, 1 = JSON.
+pub(crate) async fn session_kmsg<R, W>(mut rd: R, mut wr: W, jpeg: bool)
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
+    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
+{
+    use remote_friend_common::io::{read_kmsg, write_kmsg};
+    let (inbox_tx, inbox) = mpsc::channel::<String>(256);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
+    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
+    let writer = tokio::spawn(async move {
+        loop {
+            let res = tokio::select! {
+                biased;
+                m = ctrl_rx.recv() => match m { Some(t) => write_kmsg(&mut wr, 1, t.as_bytes()).await, None => break },
+                m = video_rx.recv() => match m { Some(b) => write_kmsg(&mut wr, 0, &b).await, None => break },
+            };
+            if res.is_err() {
+                break;
+            }
+            let _ = wr.flush().await;
+        }
+        let _ = wr.shutdown().await;
+    });
+    let reader = tokio::spawn(async move {
+        loop {
+            match read_kmsg(&mut rd).await {
+                Ok((1, payload)) if payload.len() <= MAX_TEXT => {
+                    let Ok(t) = String::from_utf8(payload) else { break };
+                    if inbox_tx.send(t).await.is_err() {
+                        break;
+                    }
+                }
+                Ok((1, _)) => {
+                    tracing::warn!("röle: tarayıcı mesajı çok büyük; oturum kapatılıyor");
                     break;
                 }
-                if let Err(e) = handle_json_input(&t) {
-                    tracing::warn!("web input hatası: {e:#}");
-                }
+                Ok(_) => {}
+                Err(_) => break,
             }
-            Ok(Message::Close(_)) => break,
-            Err(_) => break,
-            _ => {}
+        }
+    });
+    run_session(inbox, ctrl_tx, video_tx, jpeg, "tarayıcı (internet)").await;
+    reader.abort();
+    let _ = writer.await;
+}
+
+/// Akış kontrolü: istemcinin onaylamadığı kare sayısı/yaşı sınırlanır. Böylece
+/// yavaş ağda kareler soket tamponlarında birikip saniyelerce gecikme oluşmaz;
+/// fazlası atlanır, ardından temiz bir anahtar kare istenir.
+pub(crate) struct Flow {
+    inflight: VecDeque<(u64, Instant)>,
+    ack_seen: bool,
+    need_key: bool,
+    jpeg: bool,
+    last_key_req: Option<Instant>,
+    /// En son gönderilen kare (girdi koordinatı dönüşümü için).
+    pub last: Option<Arc<EncodedFrame>>,
+}
+
+const MAX_INFLIGHT_FRAMES: usize = 8;
+const MAX_INFLIGHT_AGE: Duration = Duration::from_millis(700);
+/// Bu kadar eski onaysız kare kayıp sayılır (istemci atmış olabilir); pencere kilitlenmez.
+const INFLIGHT_EXPIRE: Duration = Duration::from_millis(2000);
+
+impl Flow {
+    pub(crate) fn new(jpeg: bool) -> Self {
+        let mut f = Self { inflight: VecDeque::new(), ack_seen: false, need_key: true, jpeg, last_key_req: None, last: None };
+        f.request_key();
+        f
+    }
+
+    fn request_key(&mut self) {
+        if self.last_key_req.is_none_or(|t| t.elapsed() > Duration::from_millis(1000)) {
+            self.last_key_req = Some(Instant::now());
+            if self.jpeg {
+                video::request_jpeg_refresh();
+            } else {
+                video::request_keyframe();
+            }
         }
     }
-    video_task.abort();
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    tracing::info!("tarayıcı client ayrıldı ({ts})");
-}
 
-/// JPEG karesi kodla: w(u32 LE) + h(u32 LE) + JPEG baytları.
-/// Kalite RF_JPEG_Q ile verilir (30-95).
-fn encode_jpeg_frame(w: u32, h: u32, rgba: &[u8], quality: u8) -> Option<Vec<u8>> {
-    use image::codecs::jpeg::JpegEncoder;
-    use image::RgbImage;
-    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
-    let img = RgbImage::from_raw(w, h, rgb)?;
-    let mut jpeg = Vec::new();
-    let mut enc = JpegEncoder::new_with_quality(&mut jpeg, quality);
-    enc.encode_image(&img).ok()?;
-    let mut msg = Vec::with_capacity(jpeg.len() + 8);
-    msg.extend_from_slice(&w.to_le_bytes());
-    msg.extend_from_slice(&h.to_le_bytes());
-    msg.extend_from_slice(&jpeg);
-    Some(msg)
-}
-
-/// JPEG hattının canlı ayarları (sayfadaki Kalite/Hız kutularından değişir).
-/// Tüm JPEG izleyiciler aynı hattı paylaşır; son seçilen değer geçerlidir.
-static JPEG_Q: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-static JPEG_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-fn jpeg_fps() -> u32 {
-    let cur = JPEG_FPS.load(std::sync::atomic::Ordering::Relaxed);
-    if cur != 0 {
-        return cur;
+    pub(crate) fn on_lagged(&mut self) {
+        self.need_key = true;
+        if !self.jpeg {
+            video::report_congestion();
+        }
+        self.request_key();
     }
-    std::env::var("RF_JPEG_FPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|fps: &u32| (2..=15).contains(fps))
-        .unwrap_or(10)
-}
 
-fn jpeg_quality() -> u8 {
-    // Kalite: RF_JPEG_Q (30-95, varsayılan 68). Yüksek = net yazı, daha fazla CPU/ağ.
-    let cur = JPEG_Q.load(std::sync::atomic::Ordering::Relaxed);
-    if cur != 0 {
-        return cur;
+    pub(crate) fn on_ack(&mut self, seq: u64) {
+        self.ack_seen = true;
+        while self.inflight.front().is_some_and(|(s, _)| *s <= seq) {
+            self.inflight.pop_front();
+        }
     }
-    std::env::var("RF_JPEG_Q")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&q| (30..=95).contains(&q))
-        .unwrap_or(68)
+
+    /// İstemci çözücüsünü sıfırladı: onaylanmamış kareleri attı, yeni anahtar kare istiyor.
+    pub(crate) fn want_key(&mut self) {
+        self.inflight.clear();
+        self.need_key = true;
+        self.request_key();
+    }
+
+    fn window_full(&mut self) -> bool {
+        while self.inflight.front().is_some_and(|(_, t)| t.elapsed() > INFLIGHT_EXPIRE) {
+            self.inflight.pop_front();
+        }
+        self.ack_seen
+            && (self.inflight.len() >= MAX_INFLIGHT_FRAMES
+                || self.inflight.front().is_some_and(|(_, t)| t.elapsed() > MAX_INFLIGHT_AGE))
+    }
+
+    /// Bu kare gönderilmeli mi?
+    pub(crate) fn admit(&mut self, f: &EncodedFrame) -> bool {
+        if f.jpeg {
+            if self.window_full() {
+                self.need_key = true;
+                return false;
+            }
+            return true;
+        }
+        if self.need_key && !f.key {
+            self.request_key();
+            return false;
+        }
+        if self.window_full() {
+            self.need_key = true;
+            video::report_congestion();
+            self.request_key();
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn sent(&mut self, f: &Arc<EncodedFrame>) {
+        if f.key {
+            self.need_key = false;
+        }
+        self.inflight.push_back((f.seq, Instant::now()));
+        if self.inflight.len() > 120 {
+            self.inflight.pop_front();
+        }
+        self.last = Some(f.clone());
+    }
+
+    /// JPEG oturumunda atlanan kare varsa ekran durağanlaşınca da güncel kare gelsin.
+    pub(crate) fn jpeg_catch_up(&mut self) {
+        if self.jpeg && self.need_key && !self.window_full() {
+            self.need_key = false;
+            self.last_key_req = None;
+            self.request_key();
+        }
+    }
+
+    /// İstemci karesindeki noktayı yakalama uzayına çevir.
+    pub(crate) fn map_point(&self, x: u32, y: u32) -> Option<(u32, u32)> {
+        self.last.as_ref().map(|f| f.to_capture(x, y))
+    }
 }
 
-/// Sayfadan gelen canlı ayar: {"t":"quality","q":55} / {"t":"fps","fps":8}.
-pub(crate) fn set_jpeg_quality(q: u8) {
-    let q = q.clamp(30, 95);
-    JPEG_Q.store(q, std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("JPEG kalite: {q}");
+fn subscribe(jpeg: bool) -> broadcast::Receiver<Arc<EncodedFrame>> {
+    if jpeg { video::jpeg().subscribe() } else { video::h264().subscribe() }
 }
 
-pub(crate) fn set_jpeg_fps(fps: u32) {
-    let fps = fps.clamp(2, 15);
-    JPEG_FPS.store(fps, std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("JPEG fps: {fps}");
-}
-
-static JPEG_TX: OnceLock<tokio::sync::broadcast::Sender<Arc<Vec<u8>>>> = OnceLock::new();
-
-/// JPEG fallback için de tek capture/encode hattı kullanılır. Her izleyici aynı
-/// sıkıştırılmış kareye abone olur; yavaş izleyici eski kareleri biriktirmez.
-fn jpeg_sender() -> &'static tokio::sync::broadcast::Sender<Arc<Vec<u8>>> {
-    JPEG_TX.get_or_init(|| {
-        let (tx, _) = tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(2);
-        let worker = tx.clone();
-        std::thread::Builder::new()
-            .name("rf-capture-jpeg".into())
-            .spawn(move || {
-                let mut next = Instant::now();
-                let mut errors = 0u32;
-                loop {
-                    if worker.receiver_count() == 0 {
-                        std::thread::sleep(Duration::from_millis(100));
-                        next = Instant::now();
+async fn run_session(
+    mut inbox: mpsc::Receiver<String>,
+    ctrl: mpsc::Sender<String>,
+    video_out: mpsc::Sender<Vec<u8>>,
+    jpeg: bool,
+    peer: &str,
+) {
+    #[cfg(target_os = "linux")]
+    crate::wayland::ensure_started();
+    let welcome = serde_json::json!({
+        "t": "welcome",
+        "v": remote_friend_common::PROTOCOL_VERSION,
+        "codec": if jpeg { "jpeg" } else { "h264" },
+        "jpeg": jpeg,
+        "name": crate::host_name(),
+        "preset": video::preset().name(),
+        "fps": video::profile(video::preset()).fps,
+        // Bağlantı koparsa kısa süre içinde host onayı sormadan yeniden bağlanmak için.
+        "resume": crate::approval::grant_resume(),
+    });
+    if ctrl.send(welcome.to_string()).await.is_err() {
+        return;
+    }
+    let mut frames = subscribe(jpeg);
+    let mut flow = Flow::new(jpeg);
+    let mut files = FileTransfers::default();
+    // İstemci 2 sn'de bir ping atar; uzun sessizlik = kopmuş bağlantı (yarım açık soket).
+    let mut last_rx = Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if last_rx.elapsed() > SESSION_IDLE {
+                    tracing::info!("{peer}: {} sn yanıt yok, oturum kapatılıyor", SESSION_IDLE.as_secs());
+                    break;
+                }
+                flow.jpeg_catch_up();
+            }
+            frame = frames.recv() => match frame {
+                Ok(f) => {
+                    if !flow.admit(&f) {
                         continue;
                     }
-                    let quality = jpeg_quality();
-                    let period = Duration::from_micros(1_000_000 / jpeg_fps() as u64);
-                    match super::capture_rgba() {
-                        Ok((w, h, rgba)) => match encode_jpeg_frame(w, h, &rgba, quality) {
-                            Some(msg) => {
-                                errors = 0;
-                                let _ = worker.send(Arc::new(msg));
-                            }
-                            None => errors = errors.saturating_add(1),
-                        },
-                        Err(e) => {
-                            errors = errors.saturating_add(1);
-                            if errors <= 3 || errors % 60 == 0 {
-                                tracing::warn!("global JPEG capture/encode hatası ({errors}): {e:#}");
-                            }
-                        }
-                    }
-                    next += period;
-                    let now = Instant::now();
-                    if next > now {
-                        std::thread::sleep(next - now);
-                    } else {
-                        next = now;
+                    let bytes = remote_friend_common::web_frame(f.w, f.h, f.seq, f.key, f.jpeg, &f.data);
+                    match video_out.try_send(bytes) {
+                        Ok(()) => flow.sent(&f),
+                        Err(mpsc::error::TrySendError::Full(_)) => flow.on_lagged(),
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
-            })
-            .expect("JPEG capture/encode thread başlatılamadı");
-        tx
-    })
-}
-
-/// WebCodecs'siz tarayıcılar için düz JPEG akışı (her kare bağımsız resim).
-/// Başlık H264 ile aynı: w(u32 LE) + h(u32 LE) + JPEG baytları.
-async fn jpeg_loop(tx: Arc<Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>) {
-    let mut rx = jpeg_sender().subscribe();
-    loop {
-        let msg = match rx.recv().await {
-            Ok(msg) => msg,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
-        let mut g = tx.lock().await;
-        if g.send(Message::Binary(msg.as_ref().clone())).await.is_err() {
-            break;
-        }
-    }
-}
-/// Dial-back hattı üzerinden web oturumu (VPS internet yolu).
-/// Mesajlar kmsg çerçeveli: tür 0 = binary video, 1 = text JSON.
-pub(crate) async fn session_kmsg<R, W>(rd: R, wr: W)
-where
-    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
-    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
-{
-    use remote_friend_common::io::{read_kmsg, write_kmsg};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let wr = Arc::new(Mutex::new(wr));
-    let wr2 = wr.clone();
-    let video_task = tokio::spawn(async move {
-        let mut rx = super::video_sender().subscribe();
-        loop {
-            let frame = match rx.recv().await {
-                Ok(frame) => frame,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            let mut msg = Vec::with_capacity(frame.data.len() + 8);
-            msg.extend_from_slice(&frame.width.to_le_bytes());
-            msg.extend_from_slice(&frame.height.to_le_bytes());
-            msg.extend_from_slice(frame.data.as_ref());
-            let mut g = wr2.lock().await;
-            if write_kmsg(&mut *g, 0, &msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut rd = rd;
-    loop {
-        match read_kmsg(&mut rd).await {
-            Ok((1, payload)) if payload.len() <= 400 * 1024 => {
-                if let Ok(t) = String::from_utf8(payload) {
-                    if let Err(e) = handle_json_input(&t) {
-                        tracing::warn!("web input hatası: {e:#}");
-                    }
+                Err(broadcast::error::RecvError::Lagged(_)) => flow.on_lagged(),
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            msg = inbox.recv() => {
+                let Some(text) = msg else { break };
+                last_rx = Instant::now();
+                if let Err(e) = handle_message(&text, &mut flow, &ctrl, &mut files) {
+                    tracing::debug!("{peer}: mesaj hatası: {e:#}");
                 }
             }
-            Ok((1, _)) => {
-                tracing::warn!("kmsg web input mesajı çok büyük; oturum kapatılıyor");
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => break,
         }
     }
-    video_task.abort();
-    tracing::info!("kmsg web oturumu kapandı");
+    crate::input::release_all();
+    tracing::info!("{peer}: oturum kapandı");
 }
 
-/// VPS internet yolunda WebCodecs'siz tarayıcı: kmsg üzerinden JPEG.
-/// (Rendezvous welcome'da {"jpeg":true} gönderir, sayfa createImageBitmap ile çizer.)
-pub(crate) async fn session_kmsg_jpeg<R, W>(rd: R, wr: W)
-where
-    R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
-    W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
-{
-    use remote_friend_common::io::{read_kmsg, write_kmsg};
-    let wr = Arc::new(Mutex::new(wr));
-    let wr2 = wr.clone();
-    let video_task = tokio::spawn(async move {
-        let mut rx = jpeg_sender().subscribe();
-        loop {
-            let msg = match rx.recv().await {
-                Ok(msg) => msg,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            let mut g = wr2.lock().await;
-            if write_kmsg(&mut *g, 0, msg.as_ref()).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut rd = rd;
-    loop {
-        match read_kmsg(&mut rd).await {
-            Ok((1, payload)) if payload.len() <= 400 * 1024 => {
-                if let Ok(t) = String::from_utf8(payload) {
-                    if let Err(e) = handle_json_input(&t) {
-                        tracing::warn!("web input hatası: {e:#}");
-                    }
-                }
-            }
-            Ok((1, _)) => {
-                tracing::warn!("kmsg web input mesajı çok büyük; oturum kapatılıyor");
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    video_task.abort();
-    tracing::info!("kmsg jpeg oturumu kapandı");
+/// Tamamlanan/başarısız dosyaları istemciye bildirmek için isim takibi.
+#[derive(Default)]
+struct FileTransfers {
+    names: std::collections::HashMap<u64, String>,
 }
 
-fn handle_json_input(t: &str) -> Result<()> {
-    let v: serde_json::Value = serde_json::from_str(t)?;
-    match v.get("t").and_then(|x| x.as_str()) {
-        Some("mouse") => {
-            let x = v.get("x").and_then(|n| n.as_u64()).unwrap_or(0).min(u32::MAX as u64) as u32;
-            let y = v.get("y").and_then(|n| n.as_u64()).unwrap_or(0).min(u32::MAX as u64) as u32;
-            super::apply_input(InputEvent::MouseMove { x, y })?;
-        }
-        Some("down") => {
-            super::apply_input(InputEvent::MouseDown { button: map_btn_str(v.get("b").and_then(|x| x.as_str()).unwrap_or("left")) })?;
-        }
-        Some("up") => {
-            super::apply_input(InputEvent::MouseUp { button: map_btn_str(v.get("b").and_then(|x| x.as_str()).unwrap_or("left")) })?;
-        }
-        Some("scroll") => {
-            let dx = v.get("dx").and_then(|n| n.as_i64()).unwrap_or(0)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            let dy = v.get("dy").and_then(|n| n.as_i64()).unwrap_or(0)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            super::apply_input(InputEvent::Scroll { dx, dy })?;
-        }
-        Some("key") => {
-            let code = v.get("code").and_then(|x| x.as_str()).unwrap_or("");
-            let down = v.get("down").and_then(|x| x.as_bool()).unwrap_or(true);
-            if let Some(k) = map_key_str(code) {
-                super::apply_input(InputEvent::Key { key: k, down })?;
-            }
-        }
-        // Sayfadaki Kalite/Hız kutuları (JPEG izleyiciler için canlı ayar).
-        Some("quality") => {
-            if let Some(q) = v.get("q").and_then(|n| n.as_u64()) {
-                set_jpeg_quality(q as u8);
-            }
-        }
-        Some("fps") => {
-            if let Some(f) = v.get("fps").and_then(|n| n.as_u64()) {
-                set_jpeg_fps(f as u32);
-            }
-        }
-        Some("file") => {
-            use base64::Engine;
-            let data_b64 = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
-            if data_b64.len() > 400 * 1024 {
-                anyhow::bail!("dosya parçası çok büyük");
-            }
-            let data = base64::engine::general_purpose::STANDARD.decode(data_b64)?;
-            let chunk = FileChunk {
-                transfer_id: v.get("transfer_id").and_then(|n| n.as_u64()).unwrap_or(0),
-                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("dosya")
-                    .chars().take(128).collect(),
-                offset: v.get("offset").and_then(|n| n.as_u64()).unwrap_or(0),
-                total: v.get("total").and_then(|n| n.as_u64()).unwrap_or(0),
-                data,
-                last: v.get("last").and_then(|x| x.as_bool()).unwrap_or(false),
-            };
-            super::save_chunk(chunk)?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn map_btn_str(b: &str) -> MouseButton {
-    match b {
+fn btn(v: &serde_json::Value) -> MouseButton {
+    match v.get("b").and_then(|x| x.as_str()).unwrap_or("left") {
         "right" => MouseButton::Right,
         "middle" => MouseButton::Middle,
         _ => MouseButton::Left,
     }
 }
 
-/// JS e.key -> RemoteKey. Tek karakter harf, gerisi isim.
-fn map_key_str(code: &str) -> Option<RemoteKey> {
-    if code.chars().count() == 1 {
-        return code.chars().next().map(RemoteKey::Char);
+fn num_u32(v: &serde_json::Value, k: &str) -> u32 {
+    v.get(k).and_then(|n| n.as_f64()).unwrap_or(0.0).clamp(0.0, 1e6) as u32
+}
+
+fn num_i32(v: &serde_json::Value, k: &str) -> i32 {
+    v.get(k).and_then(|n| n.as_f64()).unwrap_or(0.0).clamp(-1000.0, 1000.0) as i32
+}
+
+fn handle_message(t: &str, flow: &mut Flow, ctrl: &mpsc::Sender<String>, files: &mut FileTransfers) -> Result<()> {
+    let v: serde_json::Value = serde_json::from_str(t)?;
+    let input = |ev: InputEvent| crate::input::apply(ev);
+    match v.get("t").and_then(|x| x.as_str()) {
+        Some("mouse") => {
+            if let Some((x, y)) = flow.map_point(num_u32(&v, "x"), num_u32(&v, "y")) {
+                input(InputEvent::MouseMove { x, y })?;
+            }
+        }
+        Some("down") => input(InputEvent::MouseDown { button: btn(&v) })?,
+        Some("up") => input(InputEvent::MouseUp { button: btn(&v) })?,
+        Some("scroll") => {
+            let (dx, dy) = (num_i32(&v, "dx"), num_i32(&v, "dy"));
+            if dx != 0 || dy != 0 {
+                input(InputEvent::Scroll { dx, dy })?;
+            }
+        }
+        Some("key") => {
+            let code = v.get("code").and_then(|x| x.as_str()).unwrap_or("");
+            let down = v.get("down").and_then(|x| x.as_bool()).unwrap_or(true);
+            if let Some(key) = crate::input::key_from_web(code) {
+                input(InputEvent::Key { key, down })?;
+            }
+        }
+        Some("text") => {
+            let s: String = v.get("s").and_then(|x| x.as_str()).unwrap_or("").chars().take(4096).collect();
+            if !s.is_empty() {
+                input(InputEvent::Text(s))?;
+            }
+        }
+        Some("ack") => {
+            if let Some(s) = v.get("s").and_then(|n| n.as_u64()) {
+                // Başlıkta seq'in düşük 32 biti gider; tam değeri son gönderilenden kur.
+                let full = flow.last.as_ref().map_or(s, |f| (f.seq & !0xffff_ffff) | s);
+                flow.on_ack(full);
+            }
+        }
+        Some("kf") => flow.want_key(),
+        Some("quality") => {
+            if let Some(p) = v.get("p").and_then(|x| x.as_str()).and_then(video::Preset::from_name) {
+                video::set_preset(p);
+                let _ = ctrl.try_send(serde_json::json!({"t": "quality", "p": p.name()}).to_string());
+            }
+        }
+        Some("ping") => {
+            let ts = v.get("ts").cloned().unwrap_or(serde_json::Value::Null);
+            let _ = ctrl.try_send(serde_json::json!({"t": "pong", "ts": ts}).to_string());
+        }
+        Some("file") => {
+            use base64::Engine;
+            let data_b64 = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
+            if data_b64.len() > MAX_TEXT {
+                anyhow::bail!("dosya parçası çok büyük");
+            }
+            let id = v.get("transfer_id").and_then(|n| n.as_u64()).unwrap_or(0);
+            let name: String = v.get("name").and_then(|x| x.as_str()).unwrap_or("dosya").chars().take(128).collect();
+            let chunk = FileChunk {
+                transfer_id: id,
+                name: name.clone(),
+                offset: v.get("offset").and_then(|n| n.as_u64()).unwrap_or(0),
+                total: v.get("total").and_then(|n| n.as_u64()).unwrap_or(0),
+                data: base64::engine::general_purpose::STANDARD.decode(data_b64)?,
+                last: v.get("last").and_then(|x| x.as_bool()).unwrap_or(false),
+            };
+            files.names.insert(id, name.clone());
+            match crate::files::save_chunk(chunk) {
+                Ok(Some(path)) => {
+                    files.names.remove(&id);
+                    let _ = ctrl.try_send(serde_json::json!({"t": "file_done", "id": id, "name": name, "path": path}).to_string());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    files.names.remove(&id);
+                    let _ = ctrl.try_send(serde_json::json!({"t": "file_err", "id": id, "msg": format!("{e:#}")}).to_string());
+                    return Err(e);
+                }
+            }
+        }
+        _ => {}
     }
-    Some(match code {
-        "Enter" => RemoteKey::Enter,
-        "Tab" => RemoteKey::Tab,
-        "Backspace" => RemoteKey::Backspace,
-        "Escape" => RemoteKey::Escape,
-        "Delete" => RemoteKey::Delete,
-        "Insert" => RemoteKey::Insert,
-        "Home" => RemoteKey::Home,
-        "End" => RemoteKey::End,
-        "PageUp" => RemoteKey::PageUp,
-        "PageDown" => RemoteKey::PageDown,
-        "ArrowUp" => RemoteKey::Up,
-        "ArrowDown" => RemoteKey::Down,
-        "ArrowLeft" => RemoteKey::Left,
-        "ArrowRight" => RemoteKey::Right,
-        "F1" => RemoteKey::F1,
-        "F2" => RemoteKey::F2,
-        "F3" => RemoteKey::F3,
-        "F4" => RemoteKey::F4,
-        "F5" => RemoteKey::F5,
-        "F6" => RemoteKey::F6,
-        "F7" => RemoteKey::F7,
-        "F8" => RemoteKey::F8,
-        "F9" => RemoteKey::F9,
-        "F10" => RemoteKey::F10,
-        "F11" => RemoteKey::F11,
-        "F12" => RemoteKey::F12,
-        "Shift" => RemoteKey::Shift,
-        "Control" => RemoteKey::Ctrl,
-        "Alt" => RemoteKey::Alt,
-        "Meta" => RemoteKey::Meta,
-        "CapsLock" => RemoteKey::CapsLock,
-        "NumLock" => RemoteKey::NumLock,
-        "PrintScreen" => RemoteKey::PrintScreen,
-        "Pause" => RemoteKey::Pause,
-        " " => RemoteKey::Char(' '),
-        _ => return None,
-    })
+    Ok(())
 }

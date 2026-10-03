@@ -20,6 +20,8 @@ jobs:
           - os: ubuntu-latest
             host_ext: ""
             artifact: remotefriend-linux
+          - os: macos-latest
+            artifact: remotefriend-macos
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +41,19 @@ jobs:
       - name: Tum hedefleri kontrol et
         run: cargo check --locked --workspace --all-targets
 
-      - name: Ortak protokol testleri
-        run: cargo test --locked -p remote-friend-common
+      - name: Testler (protokol + host video/girdi)
+        run: cargo test --locked -p remote-friend-common -p remote-friend-host
 
       - name: Release build
+        if: runner.os != 'macOS'
         run: cargo build --locked --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
+
+      - name: macOS universal build (Apple Silicon + Intel)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target aarch64-apple-darwin
+          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target x86_64-apple-darwin
 
       - name: Windows paketi hazirla
         if: runner.os == 'Windows'
@@ -61,6 +71,16 @@ jobs:
         run: |
           mkdir dist
           cp target/release/remote-friend-host target/release/remote-friend-client target/release/remote-friend-rendezvous dist/
+          cp README.md dist/
+
+      - name: macOS paketi hazirla
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dist
+          for b in remote-friend-host remote-friend-client; do
+            lipo -create target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b -output dist/$b-macos
+          done
+          cp start_remotefriend_macos.command dist/
           cp README.md dist/
 
       - uses: actions/upload-artifact@v4

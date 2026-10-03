@@ -1,95 +1,118 @@
-# RemoteFriend v0.5.6 Hotfix
+# RemoteFriend
 
-RemoteFriend; ekran görüntüsü, mouse/klavye kontrolü ve sınırlı dosya aktarımı sağlayan deneysel bir Rust uzak masaüstü projesidir. Bu hotfix, v0.5.5 kaynaklarındaki düşük FPS, gecikme birikmesi ve kritik kimlik doğrulama/TLS sorunlarını düzeltir.
+Telefondan veya başka bir bilgisayardan kendi bilgisayarına bağlanmak için uzak masaüstü.
+Görüntü H.264 ile akar; fare, klavye, dokunmatik ve dosya gönderme desteklenir.
 
-## En hızlı kullanım yolu
+| Paylaşılan bilgisayar (host) | Durum |
+|---|---|
+| Linux **Wayland** (GNOME, KDE) | Ekran + fare/klavye: masaüstü portalı (bir kez izin sorar) |
+| Linux **X11** | Ekran + fare/klavye |
+| **Windows** 10/11 | Ekran + fare/klavye (yüksek DPI ölçekli ekranlar dahil) |
+| **macOS** 12+ (Apple Silicon/Intel) | Ekran Kaydı + Erişilebilirlik izni gerekir |
 
-Akıcı görüntü için **native istemciyi** kullan:
+Bağlanan taraf: herhangi bir güncel tarayıcı (telefon dahil, kurulum yok) ya da `remote-friend-client`.
 
-1. Host bilgisayarda `remote-friend-host` çalıştır.
-2. Host ilk çalıştırmada güçlü, rastgele bir oturum şifresi üretip terminalde gösterir. Kalıcı bir şifre istenirse önceden `REMOTE_FRIEND_PASS` ayarla.
-3. İstemcide LAN adresini (`192.168.x.x:33200`) veya 9 haneli internet ID'sini ve şifreyi gir.
-4. Host terminalinde bağlantıyı `E` ile onayla.
+## Hızlı başlangıç
 
-Tarayıcı istemcisi de çalışır; ancak LAN IP'sindeki düz `http://...:33201` sayfası çoğu tarayıcıda güvenli bağlam sayılmaz. WebCodecs H.264 açılamazsa program JPEG moduna düşer ve video belirgin biçimde daha yavaş olur. Tarayıcı için HTTPS/WSS, aksi halde native istemci önerilir.
+### 1. Sunucu (VPS) — bir kez
 
-## Önerilen performans profilleri
+Ubuntu/Debian VPS'te:
 
-Windows CMD örneği:
-
-```bat
-set RF_FPS=30
-set RF_MAX_WIDTH=1600
-set RF_BITRATE_BPS=6000000
-remote-friend-host.exe
+```bash
+curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/setup-vps.sh | sudo bash
 ```
 
-- Dengeli: `RF_FPS=30`, `RF_MAX_WIDTH=1600`, `RF_BITRATE_BPS=6000000`
-- Düşük CPU/ağ: `RF_FPS=20`, `RF_MAX_WIDTH=1280`, `RF_BITRATE_BPS=4000000`
-- Daha net: `RF_FPS=30`, `RF_MAX_WIDTH=1920`, `RF_BITRATE_BPS=8000000`
-- JPEG fallback: `RF_JPEG_FPS=8`, `RF_JPEG_Q=62`, ayrıca `RF_MAX_WIDTH=1280`
+Betik her şeyi kurar ve sonunda **web adresini** (`https://1-2-3-4.sslip.io` gibi, alan adı
+gerekmez, otomatik HTTPS) ve **parmak izini** yazar. Güncellemek için aynı komutu tekrar çalıştır.
+Ayrıntı: [deploy/SETUP_VPS.md](deploy/SETUP_VPS.md).
 
-Yazılımsal OpenH264 kodlama kullanıldığı için 1080p/30 görüntü CPU'ya bağlıdır. Aynı anda hem yüksek çözünürlük hem 60 FPS için sonraki mimari adım donanımsal NVENC/QSV/VAAPI kodlama ve tercihen WebRTC taşımasıdır.
+### 2. Paylaşılacak bilgisayar (host)
 
-## Portlar
+| Sistem | Çalıştır |
+|---|---|
+| Linux | `./start_remotefriend_linux.sh` |
+| Windows | `start_remotefriend_win64.bat` (çift tık) |
+| macOS | `start_remotefriend_macos.command` (çift tık) |
 
-- TCP `33200`: LAN native istemci; şu an düz TCP'dir. Yalnızca güvenilir LAN/VPN içinde aç.
-- TCP `33201`: Host tarayıcı arayüzü; düz HTTP ise parola ve kontrol trafiği ağda şifreli değildir.
-- TCP `33202`: VPS rendezvous/relay; TLS fingerprint pinning kullanır.
-- UDP `33201`: LAN discovery beacon.
+İlk çalıştırmada sunucu adresi sorulur (`1.2.3.4:33202`; sadece yerel ağ için boş bırak).
+Başlatıcılar yeni sürüm çıkınca programı kendisi günceller. Ekranda şuna benzer bir kutu çıkar:
 
-`33200` ve `33201` portlarını doğrudan internete açma.
+```
+  RemoteFriend Host  ·  ev-bilgisayari
+  Bilgisayar kodu : 123 456 789
+  Şifre           : k7mpx-29qra
+  İnternetten     : https://1-2-3-4.sslip.io
+  Yerel ağdan     : http://192.168.1.20:33201
+```
 
-## Güvenlik modeli ve önemli sınır
+- **Wayland:** ilk açılışta masaüstü "uzak masaüstü / ekran paylaşımı" izni ister → *Paylaş* de.
+  İzin hatırlanır; bir daha sorulmaz.
+- **macOS:** Sistem Ayarları → Gizlilik ve Güvenlik → **Ekran Kaydı** ve **Erişilebilirlik**
+  listelerinde Terminal'i aç, sonra başlatıcıyı tekrar çalıştır.
 
-- Her bağlantı güçlü parola ve varsayılan olarak yerel operatör onayı ister.
-- Host ID'si artık VPS'de kalıcı 256 bit cihaz sırrıyla sahiplenilir.
-- TLS fingerprint doğrulamasına ek olarak sunucu handshake imzası da doğrulanır.
-- WebSocket aynı-origin kontrolü, oturum/kuyruk/mesaj/dosya limitleri ve güvenli dosya adlandırması uygulanır.
-- Parola tarayıcının `localStorage` alanına kaydedilmez.
+### 3. Bağlan
 
-**VPS relay uçtan uca şifreli değildir.** TLS VPS'de sonlanır; VPS yöneticisi görüntü, input, parola ve dosya içeriğini teknik olarak görebilir. İnternet yolunu yalnızca güvendiğin VPS üzerinde kullan. Gerçek E2E için istemci ile host arasında ayrıca Noise/PAKE benzeri bir katman veya WebRTC DTLS-SRTP gerekir.
+Telefonda/tarayıcıda web adresini aç → bilgisayar kodu + şifre → **Bağlan**.
+Host'ta terminalde **E** ile onayla (masaüstü bildirimi de gelir).
 
-Ayrıntılar: `SECURITY.md`, `PERFORMANCE.md`, `PATCH_NOTES_v0.5.6.md`.
+## Telefonda kullanım
 
-## Ortam değişkenleri
+| Mod | Hareket |
+|---|---|
+| **Touchpad** (varsayılan) | Kaydır: imleç · Dokun: tıkla · İki parmakla dokun: sağ tık · İki parmakla kaydır: kaydırma · Basılı tut + sürükle: sürükle-bırak |
+| **Dokunmatik ekran** | Dokunduğun yer tıklanır · Basılı tut: sağ tık · Sürükle: sürükle-bırak · İki parmak: kaydır / yakınken gezin |
 
-### Host
+Her iki modda iki parmakla **aç/kapa = yakınlaştır**. Üst çubuk:
+⌨ telefon klavyesi · ⌘ Ctrl/Alt/Win, Esc, oklar, F tuşları, Kopyala/Yapıştır, panodaki metni yaz ·
+⚙ dokunmatik modu ve **kalite** (Hızlı / Dengeli / Net) · ⤒ dosya gönder (host'ta *İndirilenler/RemoteFriend*) · ⛶ tam ekran.
 
-- `REMOTE_FRIEND_PASS`: oturum şifresi. Verilmezse her çalıştırmada rastgele üretilir.
-- `REMOTE_FRIEND_AUTO_ACCEPT=1`: operatör onayını kapatır; yalnızca kontrollü test ortamında kullan.
-- `RF_FPS`: H.264 hedef FPS, `5..30`, varsayılan `30`.
-- `RF_MAX_WIDTH`: gönderilen görüntünün azami genişliği, `640..3840`, varsayılan `1920`.
-- `RF_BITRATE_BPS`: H.264 hedef bit hızı, varsayılan `6000000`.
-- `RF_JPEG_FPS`: JPEG fallback FPS, `2..15`, varsayılan `10`.
-- `RF_JPEG_Q`: JPEG kalite, `30..95`, varsayılan `68`.
-- `RF_NATIVE_BIND`: varsayılan `0.0.0.0`.
-- `RF_WEB_BIND`: varsayılan `0.0.0.0`.
-- `RF_HTTP_PORT`: varsayılan `33201`.
-- `RF_MAX_NATIVE_SESSIONS`: varsayılan `8`.
-- `RF_MAX_WEB_SESSIONS`: varsayılan `4`.
-- `RF_MAX_FILE_BYTES`: varsayılan `512 MiB`.
-- `REMOTE_FRIEND_DIR`: gelen dosya dizini; varsayılan kullanıcı config dizinindeki `received` klasörü.
+## Görüntü kalitesi ve hız
 
-### İnternet/VPS
+- Tarayıcıda H.264 (WebCodecs) kullanılır; bunun için sayfa **HTTPS** olmalı (VPS betiği kurar).
+  HTTPS yoksa sayfa yavaş JPEG moduna düşer ve bunu girişte söyler.
+- Kalite canlı değiştirilebilir: **Hızlı** (1280 px, düşük bit hızı, mobil veri),
+  **Dengeli** (1920 px, 8 Mbit/s), **Net** (tam çözünürlük, 16 Mbit/s).
+- Ağ yavaşlarsa host bit hızını otomatik düşürür; gecikme birikmez (istemci her kareyi onaylar,
+  fazlası kaynakta atlanır). Ekran değişmiyorsa veri gönderilmez.
 
-- `RF_RV_SERVER`: `sunucu:33202`.
-- `RF_RV_FP`: gerekmez; ilk bağlanışta parmak izi sorulup hatırlanır (TOFU).
-  Yalnızca manuel sabitlemek istersen VPS sertifikasının tam SHA-256 fingerprint'i.
-- `RF_PLAIN_OK=1`: yalnızca kontrollü yerel test için düz rendezvous bağlantısı; internette kullanma.
-- `RF_ALLOWED_ORIGIN`: gerekirse virgülle ayrılmış ek izinli WebSocket origin'leri.
-- `RF_MAX_PENDING`: relay'de onay bekleyen toplam oturum sınırı, varsayılan `256`.
-- `RF_MAX_NATIVE_CONNECTIONS`: relay native bağlantı sınırı, varsayılan `128`.
-- Relay `RF_MAX_WEB_SESSIONS`: varsayılan `64`.
+Ortam değişkenleri ("Dengeli" profili ayarlar): `RF_QUALITY=fast|balanced|sharp`, `RF_FPS` (5–60, 30),
+`RF_MAX_WIDTH` (1920), `RF_BITRATE_BPS` (8000000), `RF_JPEG_Q` (70), `RF_JPEG_FPS` (10).
 
-## Uyumluluk
+## Güvenlik
 
-Protokol sürümü `2` ve transport nesli `4` oldu. Eski v0.5.5 binary'leriyle karıştırma; **host, client ve rendezvous'u birlikte değiştir**.
+- Her bağlantı **şifre + host'ta onay (E)** ister. Gözetimsiz kullanım için `REMOTE_FRIEND_AUTO_ACCEPT=1`
+  (yalnızca güçlü, kalıcı `REMOTE_FRIEND_PASS` ile).
+- Şifre her açılışta yeniden üretilir (`abcde-23456` biçiminde, ~50 bit; büyük/küçük harf ve tire önemsiz).
+  Kalıcı şifre için `REMOTE_FRIEND_PASS` ayarla (en az 10 karakter).
+- Hatalı şifre kilidi: 60 sn'de 5 hata → 1 dk kilit, tekrarında 2/4/8/16 dk. Sunucu ayrıca IP başına
+  dakikada 12 bağlantı isteği sınırı uygular.
+- İnternet yolu: tarayıcı ↔ VPS HTTPS, host ↔ VPS TLS + parmak izi sabitleme. **Röle uçtan uca şifreli
+  değildir**: VPS'i yöneten kişi trafiği görebilir — sadece kendi/güvendiğin VPS'i kullan.
+- Yerel ağ yolu (`:33200`, `:33201`) şifresizdir; bu portları internete açma.
+
+Ayrıntı: [SECURITY.md](SECURITY.md).
+
+## Sorun giderme
+
+| Belirti | Çözüm |
+|---|---|
+| VPS'te `Permission denied (os error 13)` | Kurulum betiğini yeniden çalıştır (servis artık sertifikayı systemd üzerinden alır). Bkz. [SETUP_VPS.md](deploy/SETUP_VPS.md#sorun-giderme) |
+| "ID bulunamadı (host çevrimiçi değil)" | Host çalışıyor mu, `RF_RV_SERVER` doğru mu? Host terminalinde ">>> İnternet sunucusuna bağlandı" yazmalı |
+| Wayland'da görüntü yok | Host terminalinde izin uyarısı var mı? Masaüstündeki izin penceresini onayla; reddettiysen host'u yeniden başlat |
+| Wayland'da fare/klavye çalışmıyor | Masaüstü RemoteDesktop portalını desteklemeli (GNOME 41+, KDE 5.27+). wlroots (Sway/Hyprland) yalnız XWayland pencerelerini kontrol eder |
+| macOS'ta siyah ekran / kontrol yok | Ekran Kaydı / Erişilebilirlik izinleri (yukarıda) |
+| Görüntü yavaş, "JPEG modu" | Sayfayı HTTPS adresinden aç; güncel Chrome/Safari/Edge kullan |
+| "sürüm uyumsuz" | Host, istemci ve VPS'i aynı sürüme güncelle (başlatıcılar ve VPS betiği bunu yapar) |
 
 ## Derleme
 
 ```bash
+# Linux: libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev libxkbcommon-dev libgtk-3-dev gerekir
 cargo build --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
+cargo test -p remote-friend-common -p remote-friend-host
 ```
 
-OpenH264 derlemesinde `nasm` bulunması performansa yardımcı olur. Yalnızca aynı/uyumlu CPU'larda çalıştırılacak yerel build için ayrıca `RUSTFLAGS="-C target-cpu=native"` kullanılabilir; genel dağıtım binary'sinde kullanma.
+Geliştirmede: `RF_TEST_PATTERN=1` (sentetik görüntü, ekran izni gerekmez), `RF_INPUT_DRY=1`
+(girdileri uygulamak yerine günlüğe yazar), `RF_NATIVE_PORT` / `RF_HTTP_PORT` (ikinci bir host için).
+
+Protokol sürümü **3**: host, istemci ve VPS birlikte güncellenmelidir.

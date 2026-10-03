@@ -13,16 +13,16 @@ netsh advfirewall firewall add rule name="RemoteFriend Web LAN" dir=in action=al
 
 `33200` ve `33201` portlarını modemde internete yönlendirme.
 
-`start_remotefriend_win64.bat` çalıştır. `REMOTE_FRIEND_PASS` önceden ayarlanmamışsa host terminalde rastgele bir şifre gösterecek. İstemcide bu şifreyi kullan ve host terminalinde bağlantıyı `E` ile onayla.
+`start_remotefriend_win64.bat` çalıştır (yeni sürüm çıkınca kendini günceller). `REMOTE_FRIEND_PASS` önceden ayarlanmamışsa host terminalde `abcde-23456` biçiminde bir şifre gösterir. İstemcide bu şifreyi kullan ve host terminalinde bağlantıyı `E` ile onayla.
 
-Akıcı görüntü için `remote-friend-client.exe` önerilir. LAN tarayıcı sayfası düz HTTP nedeniyle JPEG moduna düşebilir.
+Telefondan/tarayıcıdan en akıcı görüntü VPS'in HTTPS adresinden gelir (H.264). LAN tarayıcı sayfası (`http://IP:33201`) düz HTTP olduğu için JPEG moduna düşer; LAN'da akıcı görüntü için `remote-friend-client.exe` kullan.
 
-## Dengeli ayar
+## Kalite
+
+Bağlıyken tarayıcıda ⚙ → Hızlı / Dengeli / Net. Varsayılanı değiştirmek için:
 
 ```bat
-set RF_FPS=30
-set RF_MAX_WIDTH=1600
-set RF_BITRATE_BPS=6000000
+set RF_QUALITY=fast
 start_remotefriend_win64.bat
 ```
 

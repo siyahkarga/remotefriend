@@ -2,573 +2,982 @@
 <html lang="tr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1017">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>RemoteFriend</title>
 <style>
   :root {
-    --bg:#10131a; --bg2:#171b26; --card:#1d2333; --line:#2b3350; --txt:#eef1f8; --dim:#98a1b8;
-    --acc:#4f7cff; --acc2:#7b61ff; --ok:#2fbf71; --err:#e5484d; --warn:#f5a524;
-    --r:14px;
+    --bg:#f4f6fb; --card:#ffffff; --line:#dde2ee; --txt:#141824; --dim:#5d6578; --field:#f7f8fc;
+    --acc:#3b6cf6; --acc-ink:#ffffff; --ok:#1f9d5c; --err:#d93a40; --warn:#b7791f;
+    --bar:rgba(18,21,30,.86); --bar-line:rgba(255,255,255,.10); --bar-txt:#eef1f8; --bar-dim:#a3abbf;
+    --r:16px; --shadow:0 10px 40px rgba(20,30,60,.12);
   }
-  * { box-sizing:border-box; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif; }
-  body { margin:0; background:radial-gradient(1200px 500px at 50% -100px,#1c2540 0%,var(--bg) 60%); color:var(--txt); min-height:100vh; }
-  header { display:flex; align-items:center; gap:12px; padding:14px 24px; border-bottom:1px solid var(--line); backdrop-filter:blur(6px); }
-  .logo { width:32px; height:32px; border-radius:9px; background:linear-gradient(135deg,var(--acc),var(--acc2));
-    display:flex; align-items:center; justify-content:center; font-weight:800; font-size:17px; box-shadow:0 4px 18px #4f7cff55; }
-  header h1 { font-size:18px; margin:0; letter-spacing:.2px; }
-  header .sub { color:var(--dim); font-size:12.5px; }
-  #pill { margin-left:auto; font-size:13px; font-weight:600; padding:6px 14px; border-radius:20px; background:#242b40; color:var(--dim); transition:all .25s; }
-  #pill.on { background:#0f3d26; color:var(--ok); box-shadow:0 0 12px #2fbf7155; }
-  #pill.wait { background:#3d2f10; color:var(--warn); }
-  #pill.err { background:#3d1a1c; color:var(--err); }
-  main { max-width:860px; margin:0 auto; padding:28px 18px 50px; }
-  .card { background:linear-gradient(180deg,var(--card),var(--bg2)); border:1px solid var(--line); border-radius:var(--r);
-    padding:26px; margin-bottom:16px; box-shadow:0 12px 40px #00000055; }
-  .card h2 { margin:0 0 4px; font-size:20px; }
-  .card p.dim { color:var(--dim); font-size:13.5px; margin:0 0 16px; line-height:1.5; }
-  .tabs { display:flex; gap:8px; margin-bottom:16px; }
-  .tab { padding:8px 16px; border-radius:9px; background:transparent; border:1px solid var(--line); color:var(--dim);
-    font-size:13.5px; font-weight:600; cursor:pointer; }
-  .tab.sel { background:#2a3350; color:var(--txt); border-color:var(--acc); }
-  label.lbl { display:block; font-size:12.5px; color:var(--dim); margin:12px 0 6px; font-weight:600; }
-  input[type=text], input[type=password] { background:#0e1119; border:1px solid var(--line); color:var(--txt);
-    border-radius:10px; padding:12px 14px; font-size:15px; outline:none; width:100%; transition:border .15s; }
-  select { background:#0e1119; border:1px solid var(--line); color:var(--txt);
-    border-radius:8px; padding:7px 9px; font-size:13px; outline:none; }
-  input:focus { border-color:var(--acc); box-shadow:0 0 0 3px #4f7cff33; }
-  #idInput { font-size:22px; letter-spacing:3px; text-align:center; font-weight:700; font-variant-numeric:tabular-nums; }
-  .bigbtn { width:100%; margin-top:16px; padding:13px; font-size:16px; }
-  button { background:linear-gradient(135deg,var(--acc),var(--acc2)); color:#fff; border:0; border-radius:10px;
-    padding:11px 20px; font-size:14.5px; font-weight:700; cursor:pointer; transition:filter .15s, transform .05s; }
-  button:hover { filter:brightness(1.12); }
-  button:active { transform:scale(.98); }
-  button.ghost { background:#262d45; }
-  button.danger { background:linear-gradient(135deg,#d33,#a11); }
-  button:disabled { opacity:.5; cursor:default; }
-  .row { display:flex; gap:10px; align-items:center; }
-  #recentList { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; margin-top:8px; }
-  .recent { background:#0e1119; border:1px solid var(--line); border-radius:10px; padding:11px 13px;
-    font-size:13px; cursor:pointer; transition:border .15s; position:relative; }
-  .recent:hover { border-color:var(--acc); }
-  .recent .t { color:var(--dim); font-size:11.5px; margin-top:3px; }
-  .recent .x { position:absolute; top:6px; right:9px; color:var(--dim); cursor:pointer; font-size:14px; }
-  .recent .x:hover { color:var(--err); }
-  #view { display:none; }
-  #toolbar { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap;
-    background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 14px; }
-  #toolbar .meta { color:var(--dim); font-size:13px; margin-left:auto; font-variant-numeric:tabular-nums; }
-  #stage { position:relative; background:#000; border:1px solid var(--line); border-radius:12px; overflow:hidden;
-    box-shadow:0 12px 44px #00000066; }
-  #screen { display:block; width:100%; cursor:crosshair; touch-action:none; }
-  #err { display:none; background:#3d1a1c; border:1px solid var(--err); border-radius:12px; padding:14px 16px; margin-bottom:14px; }
-  #err b { display:block; margin-bottom:4px; }
-  #hint { color:var(--dim); font-size:12.5px; margin-top:12px; line-height:1.7; }
-  kbd { background:#0e1119; border:1px solid var(--line); border-bottom-width:2px; border-radius:6px; padding:1px 7px; font-size:12px; }
-  .spinner { display:inline-block; width:14px; height:14px; border:2px solid #ffffff44; border-top-color:#fff;
-    border-radius:50%; animation:sp 0.8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0d1017; --card:#161a24; --line:#262c3b; --txt:#eef1f8; --dim:#98a1b8; --field:#0f121a;
+      --acc:#5b84ff; --shadow:0 12px 44px rgba(0,0,0,.45);
+    }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; }
+  body { background:var(--bg); color:var(--txt); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  button, input, select, textarea { font:inherit; color:inherit; }
+  [hidden] { display:none !important; }
+
+  /* ---------- giriş ---------- */
+  #login { min-height:100%; display:flex; align-items:center; justify-content:center; padding:24px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:28px 24px; box-shadow:var(--shadow); }
+  .brand { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+  .logo { width:40px; height:40px; border-radius:12px; background:linear-gradient(135deg,#3b6cf6,#7b61ff); display:grid; place-items:center; color:#fff; flex:none; }
+  .brand h1 { font-size:20px; margin:0; letter-spacing:-.2px; }
+  .brand p { margin:0; color:var(--dim); font-size:13px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--dim); margin:14px 0 6px; }
+  .field { width:100%; background:var(--field); border:1px solid var(--line); border-radius:12px; padding:13px 14px; font-size:16px; outline:none; transition:border-color .15s, box-shadow .15s; }
+  .field:focus { border-color:var(--acc); box-shadow:0 0 0 3px color-mix(in srgb, var(--acc) 25%, transparent); }
+  #idInput { font-size:24px; letter-spacing:3px; text-align:center; font-weight:700; font-variant-numeric:tabular-nums; }
+  .pw-wrap { position:relative; }
+  .pw-wrap .field { padding-right:48px; }
+  .eye { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border:0; background:none; color:var(--dim); border-radius:10px; cursor:pointer; display:grid; place-items:center; }
+  .primary { width:100%; margin-top:20px; padding:14px; border:0; border-radius:12px; background:var(--acc); color:var(--acc-ink); font-weight:700; font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+  .primary:disabled { opacity:.6; cursor:default; }
+  .ghost-btn { width:100%; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:transparent; cursor:pointer; font-weight:600; }
+  .msg { margin-top:14px; padding:12px 14px; border-radius:12px; font-size:14px; }
+  .msg.err { background:color-mix(in srgb, var(--err) 12%, transparent); color:var(--err); border:1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+  .msg.info { background:color-mix(in srgb, var(--acc) 10%, transparent); border:1px solid color-mix(in srgb, var(--acc) 30%, transparent); }
+  .hint { color:var(--dim); font-size:13px; margin-top:16px; }
+  .recents { margin-top:22px; }
+  .recents h2 { font-size:13px; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  .recent { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; margin-top:8px; cursor:pointer; background:var(--field); }
+  .recent b { font-variant-numeric:tabular-nums; letter-spacing:1px; }
+  .recent span { color:var(--dim); font-size:12px; margin-left:auto; }
+  .recent button { border:0; background:none; color:var(--dim); cursor:pointer; padding:4px 6px; border-radius:8px; }
+  .spinner { width:16px; height:16px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:sp .8s linear infinite; }
   @keyframes sp { to { transform:rotate(360deg); } }
-  @media (max-width:600px){ main{padding:16px 10px 40px} .card{padding:18px} }
+
+  /* ---------- görüntüleyici ---------- */
+  #viewer { position:fixed; inset:0; background:#000; overflow:hidden; color:var(--bar-txt); }
+  #stage { position:absolute; inset:0; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #screen { position:absolute; left:0; top:0; transform-origin:0 0; background:#000; }
+  #stage.mouse #screen { cursor:default; }
+  #cursorDot { position:absolute; left:0; top:0; width:22px; height:22px; margin:-11px 0 0 -11px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 2px rgba(0,0,0,.55), 0 0 10px rgba(0,0,0,.5); pointer-events:none; transition:transform .06s; }
+  #cursorDot.down { transform:scale(.7); background:rgba(91,132,255,.6); }
+  #bar { position:absolute; left:50%; top:calc(8px + env(safe-area-inset-top)); transform:translateX(-50%); display:flex; align-items:center; gap:4px; padding:5px; background:var(--bar); border:1px solid var(--bar-line); border-radius:14px; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); box-shadow:0 6px 24px rgba(0,0,0,.4); max-width:calc(100% - 16px); z-index:5; transition:opacity .2s, transform .2s; }
+  #bar.min > :not(#barToggle) { display:none; }
+  .tb { width:40px; height:40px; border:0; border-radius:10px; background:transparent; color:var(--bar-txt); display:grid; place-items:center; cursor:pointer; flex:none; }
+  .tb:hover { background:rgba(255,255,255,.08); }
+  .tb.on { background:rgba(91,132,255,.30); color:#fff; }
+  .tb.danger { color:#ff7a7f; }
+  .tb svg { width:21px; height:21px; }
+  #stats { font-size:12px; color:var(--bar-dim); padding:0 8px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  @media (max-width:520px) { #stats { display:none; } }
+  .sheet { position:absolute; left:50%; top:calc(62px + env(safe-area-inset-top)); transform:translateX(-50%); width:min(440px, calc(100% - 16px)); background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:14px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); box-shadow:0 10px 32px rgba(0,0,0,.5); z-index:6; max-height:calc(100% - 90px); overflow:auto; }
+  .sheet h3 { margin:4px 2px 8px; font-size:12px; color:var(--bar-dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .seg { display:flex; gap:4px; background:rgba(255,255,255,.06); border-radius:12px; padding:4px; margin-bottom:14px; }
+  .seg button { flex:1; border:0; padding:9px 6px; border-radius:9px; background:transparent; color:var(--bar-txt); cursor:pointer; font-size:14px; }
+  .seg button.on { background:#5b84ff; color:#fff; font-weight:600; }
+  .sheet .note { font-size:12.5px; color:var(--bar-dim); margin:-6px 2px 12px; }
+  .keys { display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; margin-bottom:12px; }
+  .key { padding:10px 4px; border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:10px; cursor:pointer; font-size:13.5px; }
+  .key.on { background:#5b84ff; border-color:#5b84ff; }
+  .rowbtn { width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--bar-line); background:rgba(255,255,255,.05); color:var(--bar-txt); border-radius:12px; cursor:pointer; margin-bottom:8px; text-align:left; }
+  .sheet dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:13px; margin:0 2px; }
+  .sheet dt { color:var(--bar-dim); }
+  .sheet dd { margin:0; font-variant-numeric:tabular-nums; }
+  #kb { position:absolute; left:0; bottom:0; width:1px; height:1px; opacity:0; border:0; padding:0; resize:none; font-size:16px; }
+  #toast { position:absolute; left:50%; bottom:calc(20px + env(safe-area-inset-bottom)); transform:translateX(-50%); background:var(--bar); border:1px solid var(--bar-line); padding:10px 16px; border-radius:12px; font-size:14px; max-width:calc(100% - 32px); z-index:7; box-shadow:0 6px 24px rgba(0,0,0,.4); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.55); z-index:8; padding:16px; }
+  #overlay .box { background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:22px; max-width:380px; text-align:center; }
+  #overlay .box p { color:var(--bar-dim); margin:8px 0 16px; }
+  #overlay .box button { margin:4px; padding:11px 18px; border-radius:11px; border:0; cursor:pointer; font-weight:600; }
+  #overlay .go { background:#5b84ff; color:#fff; }
+  #overlay .no { background:rgba(255,255,255,.1); color:var(--bar-txt); }
+  #waitMsg { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--bar-dim); }
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">R</div>
-  <div><h1>RemoteFriend</h1><div class="sub">uzak masaüstü</div></div>
-  <div id="pill">● hazır</div>
-</header>
-<main>
-  <div id="err"><b>Bağlanılamadı</b><span id="errMsg"></span></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-kb" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></g></symbol>
+    <symbol id="i-cmd" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/></g></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></g></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></g></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></g></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 10l6 6 6-6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g></symbol>
+  </defs>
+</svg>
 
-  <div class="card" id="loginCard">
-    <h2>Bağlan</h2>
-    <p class="dim" id="loginHint">Host'un 9 haneli kodunu gir. Kod, host ekranında yazar.</p>
-    <div class="tabs">
-      <div class="tab sel" id="tabId">🔑 ID ile</div>
-      <div class="tab" id="tabAddr">🌐 Adres ile</div>
+<section id="login">
+  <form class="card" id="form" autocomplete="on" novalidate>
+    <div class="brand">
+      <div class="logo"><svg width="22" height="22"><use href="#i-monitor"/></svg></div>
+      <div><h1>RemoteFriend</h1><p id="sub">Uzak masaüstü</p></div>
     </div>
     <div id="idPane">
-      <label class="lbl" for="idInput">BİLGİSAYAR KODU</label>
-      <input type="text" id="idInput" placeholder="123 456 789" maxlength="11" inputmode="numeric" autocomplete="off">
+      <label for="idInput">Bilgisayar kodu</label>
+      <input class="field" type="text" id="idInput" name="username" placeholder="123 456 789" maxlength="11"
+             inputmode="numeric" autocomplete="username" autocapitalize="off" spellcheck="false">
     </div>
-    <div id="addrPane" style="display:none">
-      <label class="lbl" for="addr">SUNUCU ADRESİ</label>
-      <input type="text" id="addr" placeholder="192.168.1.20:33201">
+    <label for="pw">Şifre</label>
+    <div class="pw-wrap">
+      <input class="field" type="password" id="pw" name="password" placeholder="Host ekranında yazan şifre"
+             autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" class="eye" id="eyeBtn" aria-label="Şifreyi göster"><svg width="20" height="20"><use href="#i-eye"/></svg></button>
     </div>
-    <label class="lbl" for="pw">ŞİFRE</label>
-    <input type="password" id="pw" placeholder="••••••" autocomplete="current-password">
-    <button class="bigbtn" id="connectBtn">Bağlan</button>
-    <div id="hint">Bağlantı için <b>host onayı şart</b> — karşı taraf ekranda <kbd>E</kbd>'ye basmalı.
-      Klavye, mouse ve tekerlek bağlanınca doğrudan gider.</div>
-    <h3 style="margin:18px 0 4px;font-size:14px">Son bağlanılanlar</h3>
-    <div id="recentList"></div>
+    <button class="primary" id="connectBtn" type="submit">Bağlan</button>
+    <button class="ghost-btn" id="cancelBtn" type="button" hidden>Vazgeç</button>
+    <div id="msg" class="msg" hidden></div>
+    <p class="hint" id="hint">Kod ve şifre, uzaktaki bilgisayarda RemoteFriend açılınca görünür. Bağlantıyı orada <b>E</b> tuşuyla onaylamaları gerekir.</p>
+    <div class="recents" id="recents" hidden><h2>Son bağlantılar</h2><div id="recentList"></div></div>
+  </form>
+</section>
+
+<section id="viewer" hidden>
+  <div id="stage">
+    <canvas id="screen" width="16" height="9"></canvas>
+    <div id="cursorDot" hidden></div>
+    <div id="waitMsg"><div class="spinner"></div><div id="waitTxt">Görüntü bekleniyor…</div></div>
+  </div>
+  <div id="bar">
+    <button class="tb danger" id="discBtn" title="Bağlantıyı kes" aria-label="Bağlantıyı kes"><svg><use href="#i-x"/></svg></button>
+    <button class="tb" id="kbBtn" title="Klavye" aria-label="Klavye"><svg><use href="#i-kb"/></svg></button>
+    <button class="tb" id="keysBtn" title="Özel tuşlar" aria-label="Özel tuşlar"><svg><use href="#i-cmd"/></svg></button>
+    <button class="tb" id="setBtn" title="Ayarlar" aria-label="Ayarlar"><svg><use href="#i-gear"/></svg></button>
+    <button class="tb" id="fileBtn" title="Dosya gönder" aria-label="Dosya gönder"><svg><use href="#i-file"/></svg></button>
+    <button class="tb" id="fsBtn" title="Tam ekran" aria-label="Tam ekran"><svg><use href="#i-full"/></svg></button>
+    <span id="stats">—</span>
+    <button class="tb" id="barToggle" title="Çubuğu gizle" aria-label="Çubuğu gizle"><svg><use href="#i-up"/></svg></button>
   </div>
 
-  <div id="view">
-    <div id="toolbar">
-      <button class="danger" id="discBtn">⛔ Kes</button>
-      <button class="ghost" id="fileBtn">📁 Dosya</button>
-      <button class="ghost" id="fsBtn">⛶ Tam Ekran</button>
-      <input type="file" id="filePick" style="display:none">
-      <span id="jpegCtl" style="display:none; align-items:center; gap:6px;">
-        <label class="lbl" style="margin:0" for="qSel">Kalite</label>
-        <select id="qSel">
-          <option value="45">Düşük</option>
-          <option value="60" selected>Orta</option>
-          <option value="75">Yüksek</option>
-        </select>
-        <label class="lbl" style="margin:0 0 0 6px" for="fSel">Hız</label>
-        <select id="fSel">
-          <option value="5">5</option>
-          <option value="8" selected>8</option>
-          <option value="12">12</option>
-        </select>
-      </span>
-      <span class="meta" id="meta">—</span>
+  <div class="sheet" id="keysSheet" hidden>
+    <h3>Değiştirici (dokun: basılı kalır)</h3>
+    <div class="keys" id="modKeys">
+      <button class="key" data-mod="Control">Ctrl</button>
+      <button class="key" data-mod="Alt">Alt</button>
+      <button class="key" data-mod="Shift">Shift</button>
+      <button class="key" data-mod="Meta">Win/⌘</button>
     </div>
-    <div id="stage"><canvas id="screen"></canvas></div>
-    <div id="viewHint"><kbd>Tık</kbd> mouse • <kbd>Tekerlek</kbd> scroll • <kbd>Sağ tık</kbd> çalışır • Klavyen doğrudan gider</div>
+    <h3>Tuşlar</h3>
+    <div class="keys" id="specialKeys">
+      <button class="key" data-key="Escape">Esc</button>
+      <button class="key" data-key="Tab">Tab</button>
+      <button class="key" data-key="Enter">Enter</button>
+      <button class="key" data-key="Backspace">⌫</button>
+      <button class="key" data-key="Delete">Del</button>
+      <button class="key" data-key="Home">Home</button>
+      <button class="key" data-key="End">End</button>
+      <button class="key" data-key="PageUp">PgUp</button>
+      <button class="key" data-key="PageDown">PgDn</button>
+      <button class="key" data-key="ArrowLeft">←</button>
+      <button class="key" data-key="ArrowUp">↑</button>
+      <button class="key" data-key="ArrowDown">↓</button>
+      <button class="key" data-key="ArrowRight">→</button>
+    </div>
+    <h3>Kısayollar</h3>
+    <div class="keys" id="comboKeys">
+      <button class="key" data-combo="Control+c">Kopyala</button>
+      <button class="key" data-combo="Control+v">Yapıştır</button>
+      <button class="key" data-combo="Control+x">Kes</button>
+      <button class="key" data-combo="Control+z">Geri al</button>
+      <button class="key" data-combo="Control+a">Tümü</button>
+      <button class="key" data-combo="Alt+Tab">Alt+Tab</button>
+      <button class="key" data-combo="Alt+F4">Alt+F4</button>
+      <button class="key" data-combo="Meta">Başlat</button>
+    </div>
+    <h3>F tuşları</h3>
+    <div class="keys" id="fKeys"></div>
+    <button class="rowbtn" id="pasteBtn">📋 Telefon panosundaki metni yaz</button>
   </div>
-</main>
+
+  <div class="sheet" id="setSheet" hidden>
+    <h3>Dokunmatik kontrol</h3>
+    <div class="seg" id="modeSeg">
+      <button data-mode="trackpad">Touchpad</button>
+      <button data-mode="direct">Dokunmatik ekran</button>
+    </div>
+    <p class="note" id="modeNote"></p>
+    <h3>Görüntü</h3>
+    <div class="seg" id="qualSeg">
+      <button data-q="fast">Hızlı</button>
+      <button data-q="balanced">Dengeli</button>
+      <button data-q="sharp">Net</button>
+    </div>
+    <button class="rowbtn" id="fitBtn">🔍 Yakınlaştırmayı sıfırla</button>
+    <h3>Bağlantı</h3>
+    <dl id="info"></dl>
+  </div>
+
+  <textarea id="kb" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Uzak klavye"></textarea>
+  <input type="file" id="filePick" multiple hidden>
+  <div id="toast" hidden></div>
+  <div id="overlay" hidden><div class="box"><b id="ovTitle">Bağlantı koptu</b><p id="ovText"></p><button class="go" id="ovRetry">Yeniden bağlan</button><button class="no" id="ovClose">Kapat</button></div></div>
+</section>
 
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const pill = $('pill'), errBox = $('err'), errMsg = $('errMsg'), meta = $('meta');
-const canvas = $('screen'), ctx = canvas.getContext('2d');
-let ws = null, connected = false, mode = 'id';
-let useJpeg = false; // WebCodecs/güvenli bağlam yoksa host JPEG gönderir
-let decoder = null, sps = null, pps = null, cfgW = 0, cfgH = 0, hostW = 0, hostH = 0;
-let frames = 0, fpsT = 0, ts = 0, targetFps = 30, needKey = true;
-let jpegBusy = false, pendingJpeg = null;
-const FALLBACK_CODECS = ['avc1.420028', 'avc1.4D0028', 'avc1.640028'];
+const FRAME_VER = 3, HDR = 16, FLAG_KEY = 1, FLAG_JPEG = 2;
+const canvas = $('screen'), ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+const stage = $('stage');
+const hasWebCodecs = window.isSecureContext && typeof VideoDecoder !== 'undefined';
+const isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
 
-function setPill(txt, cls, spin) {
-  pill.innerHTML = (spin ? '<span class="spinner"></span>' : '● ') + txt;
-  pill.className = cls || '';
+let role = 'relay', hostName = '';
+let ws = null, connected = false, savedPw = '', savedId = '';
+let resumeToken = '', autoTries = 0, autoReconnecting = false;
+let jpegMode = false, frameW = 0, frameH = 0, hadFrame = false;
+
+// ---------------- yardımcılar ----------------
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } }
+function showMsg(text, kind) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (kind || 'err'); m.hidden = !text; }
+let toastT = 0;
+function toast(text, ms) { const t = $('toast'); t.textContent = text; t.hidden = false; clearTimeout(toastT); if (ms !== 0) toastT = setTimeout(() => t.hidden = true, ms || 2600); }
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+// ---------------- giriş ekranı ----------------
+const idInput = $('idInput');
+idInput.addEventListener('input', () => {
+  const d = idInput.value.replace(/\D/g, '').slice(0, 9);
+  idInput.value = [d.slice(0, 3), d.slice(3, 6), d.slice(6, 9)].filter(Boolean).join(' ');
+});
+$('eyeBtn').onclick = () => { const p = $('pw'); p.type = p.type === 'password' ? 'text' : 'password'; };
+
+function applyRole() {
+  if (role === 'host') {
+    $('idPane').hidden = true;
+    $('sub').textContent = hostName ? 'Bağlanılacak: ' + hostName : 'Bu bilgisayara bağlan';
+    $('hint').innerHTML = 'Şifre, bilgisayarda RemoteFriend penceresinde yazar. Bağlantıyı orada <b>E</b> ile onaylamaları gerekir.';
+    $('recents').hidden = true;
+  } else {
+    $('idPane').hidden = false;
+    renderRecents();
+  }
+  if (!hasWebCodecs) {
+    $('hint').innerHTML += '<br><br>⚠️ Bu sayfa HTTPS değil ya da tarayıcı eski: görüntü daha yavaş JPEG modunda gelir.';
+  }
 }
-function showErr(t) { errMsg.textContent = t; errBox.style.display = 'block'; }
-function hideErr() { errBox.style.display = 'none'; }
 
-// sekmeler
-$('tabId').onclick = () => { mode = 'id'; $('tabId').classList.add('sel'); $('tabAddr').classList.remove('sel'); $('idPane').style.display = ''; $('addrPane').style.display = 'none'; };
-$('tabAddr').onclick = () => { mode = 'addr'; $('tabAddr').classList.add('sel'); $('tabId').classList.remove('sel'); $('addrPane').style.display = ''; $('idPane').style.display = 'none'; };
-// ID auto-format: 123 456 789
-$('idInput').addEventListener('input', () => {
-  const d = $('idInput').value.replace(/\D/g, '').slice(0, 9);
-  $('idInput').value = [d.slice(0, 3), d.slice(3, 6), d.slice(6, 9)].filter(Boolean).join(' ');
+function renderRecents() {
+  const list = load('rf_recents', []).filter(r => r && /^\d{9}$/.test(r.id));
+  const box = $('recentList'); box.innerHTML = '';
+  $('recents').hidden = !list.length;
+  for (const r of list.slice(0, 6)) {
+    const row = document.createElement('div');
+    row.className = 'recent';
+    const when = r.ts ? new Date(r.ts).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' }) : '';
+    row.innerHTML = '<b>' + esc(r.id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3')) + '</b>' +
+      (r.name ? '<span style="margin-left:0">' + esc(r.name) + '</span>' : '') +
+      '<span>' + esc(when) + '</span><button type="button" aria-label="Sil">✕</button>';
+    row.querySelector('button').onclick = e => { e.stopPropagation(); store('rf_recents', load('rf_recents', []).filter(x => x.id !== r.id)); renderRecents(); };
+    row.onclick = () => { idInput.value = r.id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3'); $('pw').focus(); };
+    box.appendChild(row);
+  }
+}
+function rememberRecent(id, name) {
+  if (!id) return;
+  const list = load('rf_recents', []).filter(x => x.id !== id);
+  list.unshift({ id, name: name || '', ts: Date.now() });
+  store('rf_recents', list.slice(0, 8));
+}
+
+fetch('info', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => {
+  if (j && j.role) { role = j.role; hostName = j.name || ''; }
+}).catch(() => {}).finally(() => {
+  applyRole();
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (q.get('id')) idInput.value = q.get('id').replace(/\D/g, '').replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+  (role === 'host' || idInput.value ? $('pw') : idInput).focus({ preventScroll: true });
 });
 
-(function init() {
-  const host = location.hostname || '127.0.0.1';
-  const port = location.port || '33201';
-  $('addr').value = host + ':' + port;
-  // Parola localStorage'a yazılmaz. LAN IP'sindeki düz HTTP güvenli bağlam değildir;
-  // bu durumda WebCodecs kapalı kalabilir ve daha yavaş JPEG yolu kullanılır.
-  if (!window.isSecureContext || typeof VideoDecoder === 'undefined') {
-    $('loginHint').textContent += ' Bu sayfa güvenli HTTPS bağlamında değil; tarayıcı JPEG moduna düşebilir.';
-  }
-  renderRecents();
-})();
+$('form').addEventListener('submit', e => { e.preventDefault(); connect(); });
+$('cancelBtn').onclick = () => { if (ws) { ws._quiet = true; ws.close(); } resetLogin(); };
 
-function loadRecents() {
-  try {
-    const v = JSON.parse(localStorage.getItem('rf_recents') || '[]');
-    return Array.isArray(v) ? v : [];
-  } catch (_) { return []; }
+function setBusy(on, text) {
+  const b = $('connectBtn');
+  b.disabled = on;
+  b.innerHTML = on ? '<span class="spinner"></span>' + esc(text || 'Bağlanıyor…') : 'Bağlan';
+  $('cancelBtn').hidden = !on;
 }
-function renderRecents() {
-  const list = loadRecents();
-  const box = $('recentList'); box.innerHTML = '';
-  if (!list.length) { box.innerHTML = '<span style="color:var(--dim);font-size:13px">Henüz bağlantı yok.</span>'; return; }
-  for (const u of list.slice(0, 8)) {
-    const d = document.createElement('div');
-    d.className = 'recent';
-    const when = u.ts ? new Date(u.ts).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-    d.innerHTML = '<div><b>' + esc(u.label) + '</b></div><div class="t">' + esc(when) + '</div><span class="x" title="Sil">×</span>';
-    d.querySelector('.x').onclick = (ev) => {
-      ev.stopPropagation();
-      localStorage.setItem('rf_recents', JSON.stringify(loadRecents().filter(x => x.target !== u.target)));
-      renderRecents();
-    };
-    d.onclick = () => {
-      if (u.kind === 'id') { toIdMode(); $('idInput').value = u.target; }
-      else { toAddrMode(); $('addr').value = u.target; }
-      connect();
-    };
-    box.appendChild(d);
-  }
-}
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function toIdMode() { $('tabId').click(); }
-function toAddrMode() { $('tabAddr').click(); }
-function touchRecent(kind, target, label) {
-  let list = loadRecents().filter(x => x.target !== target);
-  list.unshift({ kind, target, label, ts: Date.now() });
-  localStorage.setItem('rf_recents', JSON.stringify(list.slice(0, 10)));
-  renderRecents();
+function resetLogin() { setBusy(false); }
+
+// ---------------- bağlantı ----------------
+function connect(retry, auto) {
+  if (ws && ws.readyState <= 1) return;
+  autoReconnecting = !!auto;
+  showMsg('');
+  const id = retry ? savedId : idInput.value.replace(/\D/g, '');
+  const pw = retry ? savedPw : $('pw').value;
+  if (role !== 'host' && id.length !== 9) { showMsg('9 haneli bilgisayar kodunu eksiksiz yaz.'); idInput.focus(); return; }
+  if (!pw) { showMsg('Şifreyi yaz.'); $('pw').focus(); return; }
+  savedId = id; savedPw = pw;
+  setBusy(true, 'Bağlanıyor…');
+  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  sock.binaryType = 'arraybuffer';
+  ws = sock;
+  sock.onopen = () => sock.send(JSON.stringify({
+    t: 'hello', id: role === 'host' ? undefined : id, password: pw,
+    jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined,
+    resume: (auto && resumeToken) || undefined
+  }));
+  sock.onmessage = ev => { if (ws === sock) onMessage(ev); };
+  sock.onclose = () => { if (ws === sock) onClosed(sock); };
 }
 
-$('connectBtn').onclick = connect;
-$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
-$('idInput').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
-$('discBtn').onclick = disconnect;
-$('fsBtn').onclick = () => {
-  const st = $('stage');
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (st.requestFullscreen) st.requestFullscreen();
-};
-$('qSel').onchange = () => send({ t: 'quality', q: Number($('qSel').value) });
-$('fSel').onchange = () => send({ t: 'fps', fps: Number($('fSel').value) });
-
-function target() {
-  if (mode === 'id') return { kind: 'id', id: $('idInput').value.replace(/\D/g, '') };
-  return { kind: 'addr', addr: $('addr').value.trim() };
-}
-
-function connect() {
-  if (connected) return;
-  hideErr();
-  const t = target();
-  const pw = $('pw').value;
-  if (mode === 'id' && t.id.length !== 9) { showErr('9 haneli kodu eksiksiz yaz.'); return; }
-  if (mode === 'addr' && !t.addr) { showErr('Adres boş.'); return; }
-  setPill('bağlanıyor...', '', true);
-  // ID modunda bu sayfanın sunucusuna (VPS), adres modunda yazılan adrese gidilir
-  const base = mode === 'id' ? (location.host) : t.addr;
-  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  ws = new WebSocket(proto + base + '/ws');
-  ws.binaryType = 'arraybuffer';
-  ws._mode = mode; ws._id = t.id;
-  const noWc = (!window.isSecureContext || typeof VideoDecoder === 'undefined');
-  const forceJpeg = new URLSearchParams(location.search).has('jpeg');
-  ws._done = false;
-  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', password: pw, id: t.id || undefined, jpeg: (noWc || forceJpeg) || undefined }));
-  ws.onclose = () => onClose('Bağlantı kapandı (host kapalı ya da onay vermedi).');
-  ws.onerror = () => onClose('Bağlanamadı. Adres/kod ve ağını kontrol et.');
-  ws.onmessage = onMsg;
-}
-function disconnect() { if (ws) { ws._silent = true; ws.close(); } }
-function onClose(msg) {
-  if (ws && ws._done) return; // zaten gösterildi
-  if (ws) ws._done = true;
-  const silent = ws && ws._silent;
+function onClosed(sock) {
   const was = connected;
   connected = false;
-  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
-  sps = pps = null; cfgW = cfgH = 0; useJpeg = false;
-  needKey = true; ts = 0; targetFps = 30; jpegBusy = false; pendingJpeg = null;
-  $('view').style.display = 'none';
-  $('loginCard').style.display = 'block';
-  setPill('hazır', '');
-  if (msg && !silent && (was || !$('view').dataset.ok)) showErr(msg);
-  delete $('view').dataset.ok;
-}
-
-function onMsg(ev) {
-  if (typeof ev.data === 'string') {
-    let m;
-    try { m = JSON.parse(ev.data); }
-    catch (_) { showErr('Sunucudan geçersiz yanıt geldi.'); return; }
-    if (m.t === 'reject') { onClose('Reddedildi: ' + (m.msg || '')); if (ws) ws.close(); }
-    else if (m.t === 'wait') { setPill('host onayı bekleniyor...', 'wait', true); }
-    else if (m.t === 'welcome') {
-      connected = true;
-      useJpeg = !!m.jpeg;
-      $('jpegCtl').style.display = useJpeg ? 'inline-flex' : 'none';
-      targetFps = Math.max(5, Math.min(60, Number(m.fps) || (useJpeg ? 10 : 30)));
-      needKey = true; ts = 0;
-      $('view').dataset.ok = '1';
-      hideErr();
-      $('loginCard').style.display = 'none';
-      $('view').style.display = 'block';
-      setPill('bağlı', 'on');
-      meta.textContent = useJpeg
-        ? 'JPEG modu • HTTPS/WebCodecs ile daha hızlı olur'
-        : 'H.264 • görüntü bekleniyor';
-      const t = target();
-      touchRecent(t.kind, t.kind === 'id' ? $('idInput').value : t.addr,
-        t.kind === 'id' ? ('ID ' + $('idInput').value) : t.addr);
-      fpsT = performance.now(); frames = 0;
-    }
+  stopViewer();
+  if (sock._quiet) { resetLogin(); return; }
+  // Kısa kopma: host onayı sormadan (belirteçle) birkaç kez otomatik dene.
+  if ((was || autoReconnecting) && resumeToken && autoTries < 4 && !sock._reason) {
+    autoTries++;
+    toast('Bağlantı koptu, yeniden bağlanılıyor… (' + autoTries + ')', 0);
+    setTimeout(() => connect(true, true), 700 * autoTries);
     return;
   }
-  const buf = new Uint8Array(ev.data);
-  if (buf.length < 8) return;
-  const dv = new DataView(ev.data, 0, 8);
-  hostW = dv.getUint32(0, true); hostH = dv.getUint32(4, true);
-  if (!hostW || !hostH || hostW > 8192 || hostH > 8192) return;
-  if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
-  if (useJpeg) { feedJpeg(buf.subarray(8)); return; }
-  feed(buf.subarray(8));
-}
-
-function markFrame(codec) {
-  frames++;
-  const now = performance.now();
-  if (now - fpsT >= 1000) {
-    meta.textContent = hostW + '×' + hostH + ' • ' + frames + ' fps' + (codec ? ' (' + codec + ')' : '');
-    frames = 0; fpsT = now;
+  if (was || autoReconnecting) {
+    autoReconnecting = false;
+    $('toast').hidden = true;
+    $('ovTitle').textContent = 'Bağlantı koptu';
+    $('ovText').textContent = sock._reason || 'Ağ kesildi ya da uzak bilgisayar oturumu kapattı.';
+    $('overlay').hidden = false;
+  } else {
+    showLogin();
+    showMsg(sock._reason || 'Sunucuya ulaşılamadı. İnternet bağlantını ve adresi kontrol et.');
   }
 }
 
-function splitNals(buf) {
-  const pos = [];
-  for (let i = 0; i + 3 < buf.length; i++) {
-    if (buf[i] === 0 && buf[i + 1] === 0) {
-      if (buf[i + 2] === 1) { pos.push([i, 3]); i += 2; }
-      else if (buf[i + 2] === 0 && buf[i + 3] === 1) { pos.push([i, 4]); i += 3; }
+function onMessage(ev) {
+  if (typeof ev.data !== 'string') {
+    if (!connected) { ws._reason = 'Uzaktaki bilgisayardaki RemoteFriend sürümü eski. Host programını güncelle.'; ws.close(); return; }
+    onFrame(ev.data);
+    return;
+  }
+  let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+  switch (m.t) {
+    case 'wait': if (autoReconnecting) toast('Uzak bilgisayarda onay bekleniyor (E)…', 0);
+      setBusy(true, 'Onay bekleniyor…'); showMsg('Uzaktaki bilgisayarda bağlantının onaylanması (E tuşu) bekleniyor.', 'info'); break;
+    case 'reject': ws._reason = 'Reddedildi: ' + (m.msg || 'bilinmeyen neden'); ws.close(); break;
+    case 'welcome': onWelcome(m); break;
+    case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
+    case 'quality': setQualityUi(m.p); break;
+    case 'file_done': toast('✓ Gönderildi: ' + (m.name || 'dosya'), 4000); break;
+    case 'file_err': toast('Dosya hatası: ' + (m.msg || ''), 5000); break;
+  }
+}
+
+function onWelcome(m) {
+  connected = true;
+  resumeToken = m.resume || '';
+  if (autoReconnecting) toast('Yeniden bağlandı ✓', 1800);
+  autoTries = 0; autoReconnecting = false;
+  jpegMode = !!m.jpeg || m.codec === 'jpeg';
+  if (m.name) hostName = m.name;
+  if (m.v && m.v !== FRAME_VER) toast('Uyarı: host sürümü farklı (' + m.v + '). Host ve sunucuyu güncelle.', 6000);
+  if (role !== 'host') rememberRecent(savedId, hostName);
+  setQualityUi(m.preset || 'balanced');
+  showMsg('');
+  setBusy(false);
+  $('pw').value = '';
+  startViewer();
+}
+
+// ---------------- görüntüleyici ----------------
+let decoder = null, decCfg = '', sps = null, pps = null, needKey = true, lastKeyReq = 0;
+let jpegBusy = false, jpegNext = null;
+let statFrames = 0, statBytes = 0, statT = 0, fps = 0, kbps = 0, rtt = 0, pingTimer = 0, statsTimer = 0;
+let wakeLock = null;
+
+function showLogin() { $('viewer').hidden = true; $('login').hidden = false; resetLogin(); }
+
+function startViewer() {
+  $('login').hidden = true;
+  $('viewer').hidden = false;
+  $('overlay').hidden = true;
+  $('waitMsg').hidden = false;
+  $('waitTxt').textContent = 'Görüntü bekleniyor…';
+  hadFrame = false; needKey = true; frameW = frameH = 0;
+  view.zoom = 1;
+  setMode(load('rf_mode', isTouch ? 'trackpad' : 'direct'));
+  stage.classList.toggle('mouse', !isTouch);
+  statT = performance.now(); statFrames = statBytes = 0;
+  pingTimer = setInterval(() => send({ t: 'ping', ts: performance.now() }), 2000);
+  statsTimer = setInterval(updateStats, 1000);
+  try { navigator.wakeLock && navigator.wakeLock.request('screen').then(l => wakeLock = l).catch(() => {}); } catch (_) {}
+}
+
+function stopViewer() {
+  releaseAllKeys(false);
+  clearInterval(pingTimer); clearInterval(statsTimer);
+  closeDecoder();
+  sps = pps = null; jpegBusy = false; jpegNext = null;
+  closeSheets();
+  try { wakeLock && wakeLock.release(); } catch (_) {}
+  wakeLock = null;
+}
+
+function updateStats() {
+  const now = performance.now(), dt = (now - statT) / 1000;
+  fps = Math.round(statFrames / dt); kbps = Math.round(statBytes * 8 / 1000 / dt);
+  statFrames = statBytes = 0; statT = now;
+  const txt = (frameW ? frameW + '×' + frameH + ' · ' : '') + fps + ' fps · ' + (kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbit/s' : kbps + ' kbit/s') + (rtt ? ' · ' + rtt + ' ms' : '');
+  $('stats').textContent = txt;
+  if (!$('setSheet').hidden) renderInfo();
+}
+
+function renderInfo() {
+  const rows = [
+    ['Bilgisayar', hostName || '—'],
+    ['Kodlama', jpegMode ? 'JPEG (yavaş yol)' : 'H.264 (WebCodecs)'],
+    ['Çözünürlük', frameW ? frameW + ' × ' + frameH : '—'],
+    ['Kare hızı', fps + ' fps'],
+    ['Veri', kbps + ' kbit/s'],
+    ['Gecikme (RTT)', rtt ? rtt + ' ms' : '—'],
+  ];
+  $('info').innerHTML = rows.map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('');
+}
+
+function onFrame(buf) {
+  if (buf.byteLength < HDR) return;
+  const u8 = new Uint8Array(buf, 0, HDR);
+  if (u8[0] !== FRAME_VER) {
+    $('waitTxt').textContent = 'Host sürümü bu sayfayla uyumsuz. Host programını güncelle.';
+    return;
+  }
+  const dv = new DataView(buf, 0, HDR);
+  const w = dv.getUint32(4, true), h = dv.getUint32(8, true), seq = dv.getUint32(12, true);
+  if (!w || !h || w > 8192 || h > 8192) return;
+  statBytes += buf.byteLength;
+  const payload = new Uint8Array(buf, HDR);
+  if (u8[1] & FLAG_JPEG) feedJpeg(payload, seq);
+  else feedH264(payload, seq, w, h);
+}
+
+function frameSize(w, h) {
+  if (w === frameW && h === frameH) return;
+  // Kalite değişince çözünürlük değişir: imleci aynı göreli konumda tut.
+  if (frameW && frameH && cur.x >= 0) { cur.x = cur.x * w / frameW; cur.y = cur.y * h / frameH; }
+  frameW = w; frameH = h;
+  canvas.width = w; canvas.height = h;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  if (cur.x < 0 || cur.x >= w || cur.y >= h) { cur.x = w / 2; cur.y = h / 2; }
+  layout();
+}
+
+function drawn(seq) {
+  statFrames++;
+  send({ t: 'ack', s: seq });
+  if (!hadFrame) { hadFrame = true; $('waitMsg').hidden = true; layout(); }
+}
+
+function requestKey() {
+  const now = performance.now();
+  if (now - lastKeyReq > 800) { lastKeyReq = now; send({ t: 'kf' }); }
+}
+
+// --- H.264 (WebCodecs) ---
+function splitNals(b) {
+  const starts = [];
+  for (let i = 0; i + 2 < b.length; i++) {
+    if (b[i] === 0 && b[i + 1] === 0) {
+      if (b[i + 2] === 1) { starts.push([i, 3]); i += 2; }
+      else if (b[i + 2] === 0 && i + 3 < b.length && b[i + 3] === 1) { starts.push([i, 4]); i += 3; }
     }
   }
   const out = [];
-  for (let k = 0; k < pos.length; k++) {
-    const s = pos[k][0] + pos[k][1];
-    const e = (k + 1 < pos.length) ? pos[k + 1][0] : buf.length;
-    if (e > s) out.push({ type: buf[s] & 0x1F, data: buf.slice(s, e) });
+  for (let k = 0; k < starts.length; k++) {
+    const s = starts[k][0] + starts[k][1], e = k + 1 < starts.length ? starts[k + 1][0] : b.length;
+    if (e > s) out.push({ type: b[s] & 0x1f, data: b.subarray(s, e) });
   }
   return out;
 }
-
-function avccDesc(sps, pps) {
-  const out = new Uint8Array(8 + sps.length + 3 + pps.length);
-  out[0] = 1; out[1] = sps[1]; out[2] = sps[2]; out[3] = sps[3];
-  out[4] = 0xFF; out[5] = 0xE1;
-  out[6] = (sps.length >> 8) & 0xFF; out[7] = sps.length & 0xFF;
+function avcc(sps, pps) {
+  const out = new Uint8Array(11 + sps.length + pps.length);
+  out.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 255]);
   out.set(sps, 8);
   let o = 8 + sps.length;
-  out[o++] = 1;
-  out[o++] = (pps.length >> 8) & 0xFF; out[o++] = pps.length & 0xFF;
+  out[o++] = 1; out[o++] = pps.length >> 8; out[o++] = pps.length & 255;
   out.set(pps, o);
   return out;
 }
-
-function nalsToAvcc(nals) {
+function toAvccSample(nals) {
   let total = 0;
-  const keep = [];
-  for (const n of nals) {
-    if (n.type === 7 || n.type === 8) continue;
-    keep.push(n.data); total += 4 + n.data.length;
-  }
+  for (const n of nals) if (n.type !== 7 && n.type !== 8 && n.type !== 9) total += 4 + n.data.length;
   const out = new Uint8Array(total);
   let o = 0;
-  for (const d of keep) {
-    out[o++] = (d.length >>> 24) & 0xFF; out[o++] = (d.length >>> 16) & 0xFF;
-    out[o++] = (d.length >>> 8) & 0xFF; out[o++] = d.length & 0xFF;
-    out.set(d, o); o += d.length;
+  for (const n of nals) {
+    if (n.type === 7 || n.type === 8 || n.type === 9) continue;
+    const l = n.data.length;
+    out[o++] = l >>> 24; out[o++] = (l >>> 16) & 255; out[o++] = (l >>> 8) & 255; out[o++] = l & 255;
+    out.set(n.data, o); o += l;
   }
   return out;
 }
+function closeDecoder() { if (decoder) { try { decoder.close(); } catch (_) {} } decoder = null; decCfg = ''; }
+function hex(b) { return Array.from(b, x => x.toString(16).padStart(2, '0')).join(''); }
 
-function closeDecoder() {
-  if (decoder) { try { decoder.close(); } catch (_) {} }
-  decoder = null; cfgW = cfgH = 0;
-}
-
-function ensureDecoder() {
-  if (decoder && cfgW === hostW && cfgH === hostH) return true;
-  closeDecoder();
+function ensureDecoder(w, h) {
   if (!sps || !pps) return false;
-  const desc = avccDesc(sps, pps);
-  const codecs = ['avc1.' + [desc[1], desc[2], desc[3]].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase()];
-  for (const c of [...codecs, ...FALLBACK_CODECS]) {
-    try {
-      decoder = new VideoDecoder({
-        output: drawFrame,
-        error: () => { setPill('decode hatası', 'err'); closeDecoder(); needKey = true; }
-      });
-      decoder.configure({ codec: c, codedWidth: hostW, codedHeight: hostH, description: desc });
-      cfgW = hostW; cfgH = hostH;
-      return true;
-    } catch (_) { closeDecoder(); }
-  }
-  showErr('Tarayıcın H.264 çözemiyor. Güncel Chrome/Edge ve HTTPS dene.');
-  return false;
-}
-
-function feed(annexb) {
-  if (!window.isSecureContext || typeof VideoDecoder === 'undefined') {
-    showErr('WebCodecs güvenli bağlamda kullanılamıyor; hosttan JPEG modu istenmeliydi. HTTPS veya yerel istemci kullan.');
-    return;
-  }
-  const nals = splitNals(annexb);
-  let hasVcl = false;
-  for (const n of nals) {
-    if (n.type === 7) { sps = n.data; continue; }
-    if (n.type === 8) { pps = n.data; continue; }
-    if (n.type === 5 || n.type === 1) hasVcl = true;
-  }
-  if (!hasVcl) return;
-  const isKey = nals.some(n => n.type === 5);
-
-  // Decode kuyruğu büyürse gecikme saniyelerce birikmesin. Zincir bozulduğu için
-  // delta kareleri bir sonraki IDR/key frame gelene kadar atlarız.
-  if (decoder && decoder.decodeQueueSize > 2) {
-    closeDecoder();
-    needKey = true;
-  }
-  if (needKey && !isKey) return;
-  if (!ensureDecoder()) return;
-
-  const avcc = nalsToAvcc(nals);
-  if (!avcc.length) return;
+  const key = w + 'x' + h + ':' + hex(sps) + ':' + hex(pps);
+  if (decoder && decoder.state === 'configured' && decCfg === key) return true;
+  closeDecoder();
+  const desc = avcc(sps, pps);
+  const codec = 'avc1.' + hex(sps.subarray(1, 4));
+  decoder = new VideoDecoder({
+    output: f => {
+      frameSize(f.displayWidth, f.displayHeight);
+      ctx.drawImage(f, 0, 0);
+      const seq = Math.round(f.timestamp / 1000);
+      f.close();
+      drawn(seq);
+    },
+    error: e => { console.warn('decode', e); closeDecoder(); needKey = true; requestKey(); }
+  });
   try {
-    decoder.decode(new EncodedVideoChunk({
-      type: isKey ? 'key' : 'delta',
-      timestamp: ts,
-      data: avcc
-    }));
-    ts += Math.round(1000000 / targetFps); // WebCodecs zaman damgası mikrosaniyedir.
-    if (isKey) needKey = false;
-  } catch (_) {
+    decoder.configure({ codec, codedWidth: w, codedHeight: h, description: desc, optimizeForLatency: true });
+  } catch (e) {
     closeDecoder();
-    needKey = true;
+    $('waitTxt').textContent = 'Tarayıcı bu görüntüyü çözemedi (' + codec + '). Güncel Chrome/Safari/Edge dene.';
+    return false;
   }
+  decCfg = key;
+  return true;
 }
 
-// JPEG decode yavaşsa kuyruk yapmak yerine yalnızca en yeni bekleyen kareyi tut.
-function feedJpeg(bytes) {
-  if (jpegBusy) { pendingJpeg = bytes; return; }
+function feedH264(payload, seq, w, h) {
+  if (!hasWebCodecs) return;
+  const nals = splitNals(payload);
+  let isKey = false, vcl = false;
+  for (const n of nals) {
+    if (n.type === 7) sps = n.data.slice();
+    else if (n.type === 8) pps = n.data.slice();
+    else if (n.type === 5) { isKey = true; vcl = true; }
+    else if (n.type === 1) vcl = true;
+  }
+  if (!vcl) return;
+  if (decoder && decoder.decodeQueueSize > 4) { closeDecoder(); needKey = true; requestKey(); }
+  // Atlanan kareler de onaylanır: host'un gönderim penceresi dolup donmasın.
+  if (needKey && !isKey) { requestKey(); send({ t: 'ack', s: seq }); return; }
+  if (!ensureDecoder(w, h)) { needKey = true; requestKey(); send({ t: 'ack', s: seq }); return; }
+  try {
+    decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: seq * 1000, data: toAvccSample(nals) }));
+    if (isKey) needKey = false;
+  } catch (e) { closeDecoder(); needKey = true; requestKey(); }
+}
+
+// --- JPEG ---
+function feedJpeg(bytes, seq) {
+  if (jpegBusy) { jpegNext = [bytes, seq]; return; }
   jpegBusy = true;
   createImageBitmap(new Blob([bytes], { type: 'image/jpeg' })).then(bmp => {
-    hostW = bmp.width; hostH = bmp.height;
-    if (canvas.width !== hostW || canvas.height !== hostH) { canvas.width = hostW; canvas.height = hostH; }
+    frameSize(bmp.width, bmp.height);
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
-    markFrame('JPEG');
+    drawn(seq);
   }).catch(() => {}).finally(() => {
     jpegBusy = false;
-    const next = pendingJpeg;
-    pendingJpeg = null;
-    if (next) feedJpeg(next);
+    const n = jpegNext; jpegNext = null;
+    if (n) feedJpeg(n[0], n[1]);
   });
 }
 
-function drawFrame(f) {
-  ctx.drawImage(f, 0, 0);
-  f.close();
-  markFrame('H.264');
+// ---------------- görünüm (sığdır / yakınlaştır / kaydır) ----------------
+const view = { zoom: 1, s: 1, ox: 0, oy: 0 };
+function stageSize() { return [stage.clientWidth, stage.clientHeight]; }
+function baseScale() { const [sw, sh] = stageSize(); return frameW ? Math.min(sw / frameW, sh / frameH) : 1; }
+function clampView() {
+  const [sw, sh] = stageSize();
+  const dw = frameW * view.s, dh = frameH * view.s;
+  view.ox = dw <= sw ? (sw - dw) / 2 : Math.min(0, Math.max(sw - dw, view.ox));
+  view.oy = dh <= sh ? (sh - dh) / 2 : Math.min(0, Math.max(sh - dh, view.oy));
+}
+function applyView() {
+  clampView();
+  canvas.style.transform = 'translate(' + view.ox + 'px,' + view.oy + 'px) scale(' + view.s + ')';
+  placeCursor();
+}
+function layout() {
+  if (!frameW) return;
+  const cx = (stageSize()[0] / 2 - view.ox) / view.s, cy = (stageSize()[1] / 2 - view.oy) / view.s;
+  view.s = baseScale() * view.zoom;
+  view.ox = stageSize()[0] / 2 - cx * view.s; view.oy = stageSize()[1] / 2 - cy * view.s;
+  if (view.zoom === 1) { view.ox = 0; view.oy = 0; }
+  applyView();
+}
+function zoomAt(px, py, newZoom) {
+  newZoom = Math.min(6, Math.max(1, newZoom));
+  const fx = (px - view.ox) / view.s, fy = (py - view.oy) / view.s;
+  view.zoom = newZoom;
+  view.s = baseScale() * newZoom;
+  view.ox = px - fx * view.s; view.oy = py - fy * view.s;
+  applyView();
+}
+window.addEventListener('resize', () => layout());
+$('fitBtn').onclick = () => { view.zoom = 1; layout(); closeSheets(); };
+
+function stagePoint(clientX, clientY) { const r = stage.getBoundingClientRect(); return [clientX - r.left, clientY - r.top]; }
+function toFrame(clientX, clientY) {
+  const [px, py] = stagePoint(clientX, clientY);
+  return [(px - view.ox) / view.s, (py - view.oy) / view.s];
 }
 
-// ---- input ----
-function toHost(e) {
-  const r = canvas.getBoundingClientRect();
-  const x = Math.round((e.clientX - r.left) / r.width * hostW);
-  const y = Math.round((e.clientY - r.top) / r.height * hostH);
-  if (x < 0 || y < 0 || x >= hostW || y >= hostH) return null;
-  return { x, y };
-}
-function send(o) { if (connected && ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-
-let lastM = null, pendingMouse = null, mouseRaf = 0;
-let lastTouchTs = 0, touchTwoFinger = false; // dokunmatik fareöykünmesini bastırır
-function freshMouseEvent() { return Date.now() - lastTouchTs > 500; }
-canvas.addEventListener('touchstart', e => {
-  lastTouchTs = Date.now();
-  if (e.touches.length === 2) { touchTwoFinger = true; }
-  const t = e.changedTouches[0];
-  const p = toHost(t); if (!p) { e.preventDefault(); return; }
-  lastM = p;
-  send({ t: 'mouse', x: p.x, y: p.y });
-  send({ t: 'down', b: 'left' });
-  e.preventDefault();
-}, { passive: false });
-canvas.addEventListener('touchmove', e => {
-  lastTouchTs = Date.now();
-  const t = e.changedTouches[0];
-  const p = toHost(t); if (!p) { e.preventDefault(); return; }
-  if (!lastM || lastM.x !== p.x || lastM.y !== p.y) { lastM = p; send({ t: 'mouse', x: p.x, y: p.y }); }
-  e.preventDefault();
-}, { passive: false });
-function touchEnd(e) {
-  lastTouchTs = Date.now();
-  send({ t: 'up', b: touchTwoFinger ? 'right' : 'left' });
-  touchTwoFinger = false;
-  e.preventDefault();
-}
-canvas.addEventListener('touchend', touchEnd, { passive: false });
-canvas.addEventListener('touchcancel', touchEnd, { passive: false });
-canvas.addEventListener('mousemove', e => {
-  if (!freshMouseEvent()) return;
-  pendingMouse = p;
-  if (mouseRaf) return;
-  mouseRaf = requestAnimationFrame(() => {
-    mouseRaf = 0;
-    const q = pendingMouse; pendingMouse = null;
-    if (q && (!lastM || lastM.x !== q.x || lastM.y !== q.y)) {
-      lastM = q;
-      send({ t: 'mouse', x: q.x, y: q.y });
-    }
+// ---------------- fare ----------------
+const cur = { x: -1, y: -1 };
+let lastSent = '', moveRaf = 0;
+function sendMove() {
+  if (moveRaf) return;
+  moveRaf = requestAnimationFrame(() => {
+    moveRaf = 0;
+    const x = Math.round(Math.min(frameW - 1, Math.max(0, cur.x))), y = Math.round(Math.min(frameH - 1, Math.max(0, cur.y)));
+    const k = x + ',' + y;
+    if (k !== lastSent) { lastSent = k; send({ t: 'mouse', x, y }); }
   });
+}
+function moveNow() {
+  if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; }
+  const x = Math.round(Math.min(frameW - 1, Math.max(0, cur.x))), y = Math.round(Math.min(frameH - 1, Math.max(0, cur.y)));
+  lastSent = x + ',' + y;
+  send({ t: 'mouse', x, y });
+}
+function click(b) { moveNow(); send({ t: 'down', b: b || 'left' }); send({ t: 'up', b: b || 'left' }); releaseOneShotMods(); }
+let buttonsDown = new Set();
+function btnDown(b) { moveNow(); buttonsDown.add(b); send({ t: 'down', b }); $('cursorDot').classList.add('down'); }
+function btnUp(b) { if (!buttonsDown.has(b)) return; buttonsDown.delete(b); moveNow(); send({ t: 'up', b }); $('cursorDot').classList.remove('down'); releaseOneShotMods(); }
+
+function placeCursor() {
+  const dot = $('cursorDot');
+  if (mode !== 'trackpad' || !frameW) { dot.hidden = true; return; }
+  dot.hidden = false;
+  dot.style.left = (view.ox + cur.x * view.s) + 'px';
+  dot.style.top = (view.oy + cur.y * view.s) + 'px';
+}
+// Yakınken imleç ekran dışına çıkmasın: görünüm imleci takip eder.
+function followCursor() {
+  if (view.zoom <= 1) return placeCursor();
+  const [sw, sh] = stageSize(), m = 40;
+  const px = view.ox + cur.x * view.s, py = view.oy + cur.y * view.s;
+  if (px < m) view.ox += m - px; else if (px > sw - m) view.ox -= px - (sw - m);
+  if (py < m) view.oy += m - py; else if (py > sh - m) view.oy -= py - (sh - m);
+  applyView();
+}
+
+// Masaüstü fare
+const btnName = b => b === 2 ? 'right' : b === 1 ? 'middle' : 'left';
+stage.addEventListener('mousemove', e => {
+  if (!connected || !frameW || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  [cur.x, cur.y] = toFrame(e.clientX, e.clientY);
+  sendMove();
 });
-canvas.addEventListener('mousedown', e => {
-  if (!freshMouseEvent()) { e.preventDefault(); return; }
-  const p = toHost(e); if (!p) return;
-  send({ t: 'mouse', x: p.x, y: p.y });
-  send({ t: 'down', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
+stage.addEventListener('mousedown', e => {
+  if (!connected || !frameW || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  closeSheets();
+  [cur.x, cur.y] = toFrame(e.clientX, e.clientY);
+  btnDown(btnName(e.button));
   e.preventDefault();
 });
-canvas.addEventListener('mouseup', e => {
-  if (!freshMouseEvent()) return;
-  send({ t: 'up', b: e.button === 2 ? 'right' : (e.button === 1 ? 'middle' : 'left') });
+window.addEventListener('mouseup', e => {
+  if (!connected || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  btnUp(btnName(e.button));
 });
-canvas.addEventListener('contextmenu', e => e.preventDefault());
-canvas.addEventListener('wheel', e => {
-  const mult = e.deltaMode === 1 ? 1 : (e.deltaMode === 2 ? 20 : 1 / 50);
-  const dx = Math.trunc(e.deltaX * mult), dy = Math.trunc(e.deltaY * mult);
-  if (dx || dy) send({ t: 'scroll', dx, dy });
+stage.addEventListener('contextmenu', e => e.preventDefault());
+let wheelAcc = 0, wheelAccX = 0;
+stage.addEventListener('wheel', e => {
   e.preventDefault();
+  if (!connected) return;
+  const unit = e.deltaMode === 1 ? 1 / 3 : e.deltaMode === 2 ? 3 : 1 / 100;
+  wheelAcc += e.deltaY * unit; wheelAccX += e.deltaX * unit;
+  const dy = Math.trunc(wheelAcc), dx = Math.trunc(wheelAccX);
+  if (dy || dx) { wheelAcc -= dy; wheelAccX -= dx; send({ t: 'scroll', dx, dy }); }
 }, { passive: false });
 
-document.addEventListener('keydown', e => {
-  if (!connected) return;
-  const ae = document.activeElement;
-  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
-  send({ t: 'key', code: e.key, down: true });
-  e.preventDefault();
-});
-document.addEventListener('keyup', e => {
-  if (!connected) return;
-  send({ t: 'key', code: e.key, down: false });
-  e.preventDefault();
-});
+// ---------------- dokunmatik ----------------
+let mode = 'trackpad';
+function setMode(m) {
+  mode = m === 'direct' ? 'direct' : 'trackpad';
+  store('rf_mode', mode);
+  for (const b of document.querySelectorAll('#modeSeg button')) b.classList.toggle('on', b.dataset.mode === mode);
+  $('modeNote').textContent = mode === 'trackpad'
+    ? 'Parmağını kaydır: imleç hareket eder. Dokun: tıkla. İki parmakla dokun: sağ tık. İki parmakla kaydır: kaydırma. Basılı tut ve sürükle: tut-sürükle. İki parmakla aç/kapa: yakınlaştır.'
+    : 'Dokunduğun yer tıklanır. Basılı tut: sağ tık. Sürükle: tut-sürükle. İki parmak: kaydır / yakınken gezin, aç/kapa: yakınlaştır.';
+  placeCursor();
+}
+for (const b of document.querySelectorAll('#modeSeg button')) b.onclick = () => setMode(b.dataset.mode);
 
-// ---- dosya ----
-$('fileBtn').onclick = () => $('filePick').click();
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-async function waitSocketDrain() {
-  while (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 2 * 1024 * 1024) {
-    await sleep(20);
+// Hareket durumu: 'one' (tek parmak) ya da 'two' (iki parmak). İki parmak bir kez
+// değdiyse tüm parmaklar kalkana kadar hareket 'two' kalır (ayrı kalkışlar tıklama üretmez).
+const T = { g: null, start: 0, sx: 0, sy: 0, lx: 0, ly: 0, moved: 0, drag: false, long: 0, longFired: false,
+            twoMoved: false, pinch: null, scrollAcc: 0, scrollAccX: 0 };
+const TAP_MOVE = 10, LONG_MS = 550;
+
+function centroid(ts) { let x = 0, y = 0; for (const t of ts) { x += t.clientX; y += t.clientY; } return [x / ts.length, y / ts.length]; }
+function dist(ts) { return Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY); }
+function vibrate() { try { navigator.vibrate && navigator.vibrate(15); } catch (_) {} }
+
+stage.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (!connected || !frameW) return;
+  closeSheets();
+  const ts = Array.from(e.touches);
+  if (ts.length === 1 && T.g === null) {
+    const t = ts[0];
+    Object.assign(T, { g: 'one', start: performance.now(), sx: t.clientX, sy: t.clientY, lx: t.clientX, ly: t.clientY, moved: 0, drag: false, longFired: false });
+    if (mode === 'direct') { [cur.x, cur.y] = toFrame(t.clientX, t.clientY); sendMove(); }
+    clearTimeout(T.long);
+    T.long = setTimeout(() => {
+      if (T.g !== 'one' || T.moved > TAP_MOVE) return;
+      T.longFired = true; vibrate();
+      if (mode === 'direct') click('right');
+      else { T.drag = true; btnDown('left'); }   // touchpad: basılı tut + sürükle
+    }, LONG_MS);
+  } else if (ts.length >= 2 && T.g !== 'two') {
+    clearTimeout(T.long);
+    if (T.drag) { T.drag = false; btnUp('left'); }
+    const two = ts.slice(0, 2), [cx, cy] = centroid(two);
+    Object.assign(T, { g: 'two', start: performance.now(), twoMoved: T.g === 'one' && T.moved > TAP_MOVE,
+      pinch: { d0: dist(two), z0: view.zoom, cx, cy, lastCx: cx, lastCy: cy, zooming: false }, scrollAcc: 0, scrollAccX: 0 });
+  } else if (ts.length > 2) {
+    T.twoMoved = true; // üç parmak: tıklama sayma
   }
-  if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('bağlantı kapandı');
+}, { passive: false });
+
+stage.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!connected || !frameW) return;
+  const ts = Array.from(e.touches);
+  if (T.g === 'one' && ts.length === 1) {
+    const t = ts[0];
+    const dx = t.clientX - T.lx, dy = t.clientY - T.ly;
+    T.lx = t.clientX; T.ly = t.clientY;
+    T.moved = Math.max(T.moved, Math.hypot(t.clientX - T.sx, t.clientY - T.sy));
+    if (mode === 'trackpad') {
+      // 1x: imleç parmağı ekrandaki görüntüyle birebir izler; hızlı harekette ivmelenir.
+      const speed = Math.hypot(dx, dy);
+      const gain = (speed > 14 ? 2.4 : speed > 6 ? 1.6 : 1.0) / view.s;
+      cur.x = Math.min(frameW - 1, Math.max(0, cur.x + dx * gain));
+      cur.y = Math.min(frameH - 1, Math.max(0, cur.y + dy * gain));
+      followCursor(); sendMove();
+    } else {
+      [cur.x, cur.y] = toFrame(t.clientX, t.clientY);
+      if (!T.drag && !T.longFired && T.moved > TAP_MOVE) {
+        clearTimeout(T.long);
+        // Sürükleme: ilk dokunulan noktada bas, sonra parmağı izle.
+        const now = [cur.x, cur.y];
+        [cur.x, cur.y] = toFrame(T.sx, T.sy);
+        T.drag = true; btnDown('left');
+        [cur.x, cur.y] = now;
+      }
+      if (T.drag) sendMove();
+    }
+  } else if (T.g === 'two' && ts.length >= 2 && T.pinch) {
+    const p = T.pinch, two = ts.slice(0, 2), d = dist(two), [cx, cy] = centroid(two);
+    const [px, py] = stagePoint(cx, cy);
+    const mdx = cx - p.lastCx, mdy = cy - p.lastCy;
+    if (!p.zooming && Math.abs(d - p.d0) > 45) { p.zooming = true; T.twoMoved = true; }
+    if (p.zooming) {
+      zoomAt(px, py, p.z0 * d / p.d0);
+      view.ox += mdx; view.oy += mdy; applyView();
+    } else {
+      if (Math.hypot(cx - p.cx, cy - p.cy) > 8) T.twoMoved = true;
+      if (mode === 'direct' && view.zoom > 1.01) {
+        view.ox += mdx; view.oy += mdy; applyView();
+      } else if (T.twoMoved) {
+        // Doğal kaydırma: parmaklar yukarı -> içerik yukarı (aşağı kaydır).
+        T.scrollAcc -= mdy / 28; T.scrollAccX -= mdx / 28;
+        const sy = Math.trunc(T.scrollAcc), sx = Math.trunc(T.scrollAccX);
+        if (sy || sx) { T.scrollAcc -= sy; T.scrollAccX -= sx; send({ t: 'scroll', dx: sx, dy: sy }); }
+      }
+    }
+    p.lastCx = cx; p.lastCy = cy;
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  e.preventDefault();
+  if (e.touches.length > 0) return; // tüm parmaklar kalkınca karar ver
+  clearTimeout(T.long);
+  const dur = performance.now() - T.start;
+  if (connected && T.g === 'two') {
+    if (!T.twoMoved && dur < 400) click('right');
+  } else if (connected && T.g === 'one') {
+    if (T.drag) { T.drag = false; btnUp('left'); }
+    else if (!T.longFired && T.moved <= TAP_MOVE && dur < 400) {
+      if (mode === 'direct') [cur.x, cur.y] = toFrame(T.sx, T.sy);
+      click('left');
+    }
+  }
+  T.g = null; T.pinch = null;
+}
+stage.addEventListener('touchend', touchEnd, { passive: false });
+stage.addEventListener('touchcancel', e => {
+  e.preventDefault();
+  clearTimeout(T.long);
+  if (T.drag) { T.drag = false; btnUp('left'); }
+  T.g = null; T.pinch = null;
+}, { passive: false });
+
+// ---------------- klavye ----------------
+const pressed = new Map();       // e.code -> gönderilen tuş adı
+const stickyMods = new Set();    // özel tuş panelinden basılı tutulanlar
+function keyDown(k) { send({ t: 'key', code: k, down: true }); }
+function keyUp(k) { send({ t: 'key', code: k, down: false }); }
+function tapKey(k) { keyDown(k); keyUp(k); releaseOneShotMods(); }
+function releaseOneShotMods() {
+  if (!stickyMods.size) return;
+  for (const m of stickyMods) keyUp(m);
+  stickyMods.clear();
+  for (const b of document.querySelectorAll('#modKeys .key')) b.classList.remove('on');
+}
+function releaseAllKeys(sendUps) {
+  if (sendUps !== false) { for (const k of pressed.values()) keyUp(k); for (const b of buttonsDown) send({ t: 'up', b }); }
+  pressed.clear(); buttonsDown.clear();
+  releaseOneShotMods();
+}
+
+const kb = $('kb');
+const SENT = '                ';  // 16 boşluk: silme tuşu algılanabilsin
+let kbLast = SENT, composing = false;
+function kbReset() { kb.value = SENT; kbLast = SENT; try { kb.setSelectionRange(SENT.length, SENT.length); } catch (_) {} }
+kbReset();
+
+function onKeyDown(e) {
+  if (!connected || $('viewer').hidden) return;
+  const t = e.target;
+  if (t && t !== kb && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  if (e.isComposing || e.key === 'Process' || e.key === 'Unidentified' || e.key === 'Dead' || e.keyCode === 229) return;
+  // Klavye alanındaki yazılabilir karakterleri 'input' olayı gönderir (telefon klavyeleri).
+  if (t === kb && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) return;
+  // AltGr (Türkçe klavyede @ € { [ vb.): karakteri metin olarak gönder. Windows'ta
+  // tarayıcı AltGr'den önce sahte bir Ctrl basışı üretir; onu geri al.
+  if (e.key === 'AltGraph') {
+    if (pressed.has('ControlLeft')) { keyUp(pressed.get('ControlLeft')); pressed.delete('ControlLeft'); }
+    e.preventDefault(); return;
+  }
+  if (e.key.length === 1 && e.getModifierState && e.getModifierState('AltGraph')) {
+    send({ t: 'text', s: e.key }); e.preventDefault(); return;
+  }
+  if (e.repeat && pressed.has(e.code)) { keyUp(pressed.get(e.code)); keyDown(pressed.get(e.code)); e.preventDefault(); return; }
+  pressed.set(e.code || e.key, e.key);
+  keyDown(e.key);
+  e.preventDefault();
+}
+function onKeyUp(e) {
+  if (!connected) return;
+  const k = pressed.get(e.code || e.key);
+  if (k === undefined) return;
+  pressed.delete(e.code || e.key);
+  keyUp(k);
+  e.preventDefault();
+}
+window.addEventListener('keydown', onKeyDown, true);
+window.addEventListener('keyup', onKeyUp, true);
+window.addEventListener('blur', () => releaseAllKeys());
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllKeys(); });
+
+kb.addEventListener('compositionstart', () => composing = true);
+kb.addEventListener('compositionend', () => { composing = false; kbDiff(); kbReset(); });
+kb.addEventListener('input', () => { kbDiff(); if (!composing && (kb.value.length < 8 || kb.value.length > 64)) kbReset(); });
+function kbDiff() {
+  const now = kb.value, old = kbLast;
+  let i = 0;
+  while (i < old.length && i < now.length && old[i] === now[i]) i++;
+  const removed = old.length - i, added = now.slice(i);
+  for (let k = 0; k < removed; k++) tapKey('Backspace');
+  if (added) {
+    const parts = added.split('\n');
+    parts.forEach((p, idx) => { if (p) { send({ t: 'text', s: p }); releaseOneShotMods(); } if (idx < parts.length - 1) tapKey('Enter'); });
+  }
+  kbLast = now;
+}
+$('kbBtn').onclick = () => {
+  if (document.activeElement === kb) { kb.blur(); $('kbBtn').classList.remove('on'); return; }
+  kbReset(); kb.focus({ preventScroll: true }); $('kbBtn').classList.add('on');
+};
+kb.addEventListener('blur', () => $('kbBtn').classList.remove('on'));
+
+// özel tuşlar
+const fk = $('fKeys');
+for (let i = 1; i <= 12; i++) { const b = document.createElement('button'); b.className = 'key'; b.dataset.key = 'F' + i; b.textContent = 'F' + i; fk.appendChild(b); }
+for (const b of document.querySelectorAll('#specialKeys .key, #fKeys .key')) b.onclick = () => tapKey(b.dataset.key);
+for (const b of document.querySelectorAll('#modKeys .key')) b.onclick = () => {
+  const m = b.dataset.mod;
+  if (stickyMods.has(m)) { stickyMods.delete(m); keyUp(m); b.classList.remove('on'); }
+  else { stickyMods.add(m); keyDown(m); b.classList.add('on'); }
+};
+for (const b of document.querySelectorAll('#comboKeys .key')) b.onclick = () => {
+  const keys = b.dataset.combo.split('+');
+  for (const k of keys) keyDown(k);
+  for (const k of keys.slice().reverse()) keyUp(k);
+  releaseOneShotMods();
+};
+$('pasteBtn').onclick = async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) { send({ t: 'text', s: text.slice(0, 4000) }); toast('Pano metni yazıldı (' + Math.min(text.length, 4000) + ' karakter)'); }
+    else toast('Pano boş');
+  } catch (_) { toast('Pano okunamadı (izin verilmedi ya da HTTPS değil)'); }
+};
+
+// ---------------- çubuk / paneller ----------------
+function closeSheets() { $('keysSheet').hidden = true; $('setSheet').hidden = true; $('keysBtn').classList.remove('on'); $('setBtn').classList.remove('on'); }
+function toggleSheet(id, btn) {
+  const open = $(id).hidden;
+  closeSheets();
+  if (open) { $(id).hidden = false; btn.classList.add('on'); if (id === 'setSheet') renderInfo(); }
+}
+$('keysBtn').onclick = () => toggleSheet('keysSheet', $('keysBtn'));
+$('setBtn').onclick = () => toggleSheet('setSheet', $('setBtn'));
+$('discBtn').onclick = () => { resumeToken = ''; if (ws) { ws._quiet = true; ws.close(); } connected = false; stopViewer(); showLogin(); };
+$('barToggle').onclick = () => {
+  const b = $('bar'); b.classList.toggle('min');
+  $('barToggle').innerHTML = '<svg><use href="#' + (b.classList.contains('min') ? 'i-down' : 'i-up') + '"/></svg>';
+  closeSheets();
+};
+$('fsBtn').onclick = () => {
+  const d = document;
+  if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+  else { const el = d.documentElement; (el.requestFullscreen || el.webkitRequestFullscreen || (() => toast('Tarayıcı tam ekranı desteklemiyor'))).call(el); }
+};
+document.addEventListener('fullscreenchange', () => setTimeout(layout, 50));
+
+function setQualityUi(p) { for (const b of document.querySelectorAll('#qualSeg button')) b.classList.toggle('on', b.dataset.q === p); }
+for (const b of document.querySelectorAll('#qualSeg button')) b.onclick = () => { setQualityUi(b.dataset.q); send({ t: 'quality', p: b.dataset.q }); };
+
+$('ovRetry').onclick = () => { $('overlay').hidden = true; autoTries = 0; showLogin(); connect(true, !!resumeToken); };
+$('ovClose').onclick = () => { $('overlay').hidden = true; showLogin(); };
+
+// ---------------- dosya gönderme ----------------
+$('fileBtn').onclick = () => { closeSheets(); $('filePick').click(); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function drain() {
+  while (ws && ws.readyState === 1 && ws.bufferedAmount > 1024 * 1024) await sleep(20);
+  if (!ws || ws.readyState !== 1) throw new Error('bağlantı kapandı');
 }
 $('filePick').addEventListener('change', async () => {
-  const f = $('filePick').files[0];
-  if (!f) return;
-  const MAX = 512 * 1024 * 1024;
-  if (!f.size || f.size > MAX) {
-    showErr('Dosya boş veya 512 MiB sınırından büyük.');
-    $('filePick').value = '';
-    return;
-  }
-  const rnd = new Uint32Array(1);
-  crypto.getRandomValues(rnd);
-  const id = Date.now() * 1000 + (rnd[0] % 1000); // Number güvenli tamsayı aralığında
-  const CH = 64 * 1024;
-  try {
-    for (let off = 0; off < f.size; off += CH) {
-      const part = new Uint8Array(await f.slice(off, Math.min(off + CH, f.size)).arrayBuffer());
-      let bin = '';
-      for (let i = 0; i < part.length; i += 8192)
-        bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
-      await waitSocketDrain();
-      ws.send(JSON.stringify({
-        t: 'file', transfer_id: id, name: f.name, offset: off, total: f.size,
-        data: btoa(bin), last: off + part.length === f.size
-      }));
-    }
-  } catch (e) {
-    showErr('Dosya gönderilemedi: ' + (e && e.message ? e.message : e));
-  } finally {
-    $('filePick').value = '';
+  const files = Array.from($('filePick').files || []);
+  $('filePick').value = '';
+  for (const f of files) {
+    if (!f.size || f.size > 512 * 1024 * 1024) { toast(f.name + ': boş ya da 512 MB sınırından büyük', 4000); continue; }
+    const rnd = new Uint32Array(1); crypto.getRandomValues(rnd);
+    const id = Date.now() * 1000 + (rnd[0] % 1000);
+    const CH = 192 * 1024;
+    try {
+      for (let off = 0; off < f.size; off += CH) {
+        const part = new Uint8Array(await f.slice(off, Math.min(off + CH, f.size)).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < part.length; i += 8192) bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
+        await drain();
+        send({ t: 'file', transfer_id: id, name: f.name, offset: off, total: f.size, data: btoa(bin), last: off + part.length === f.size });
+        toast('Gönderiliyor: ' + f.name + ' %' + Math.floor((off + part.length) * 100 / f.size), 0);
+      }
+    } catch (e) { toast('Gönderilemedi: ' + (e && e.message || e), 4000); return; }
   }
 });
 </script>

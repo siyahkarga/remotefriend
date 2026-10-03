@@ -23,17 +23,35 @@
 - JPEG decode yalnızca en yeni bekleyen kareyi tutuyor.
 - Input ve ağ kanalları bounded; eski mouse hareketleri gerektiğinde düşüyor.
 
+## v0.6.0 değişiklikleri
+
+- **Tek geçiş dönüşüm:** ham kare (BGRx/RGBA) doğrudan I420'ye çevrilir; küçültme aynı geçişte
+  (kutu filtresi) ve 4 iş parçacığında yapılır. Eski hattaki RGBA kopya → resize → RGB kopya →
+  YUV adımları kalktı (1080p'de ~1 ms).
+- **Hasar tabanlı akış:** Wayland'da PipeWire yalnızca ekran değişince kare verir (30 fps tercih,
+  60'a kadar); X11/Windows/macOS'ta değişmeyen kare kodlanmaz. Durağan ekranda bant genişliği ~0.
+- **İstek üzerine anahtar kare:** saniyede bir zorunlu IDR yok (P-karelere daha çok bit kalır);
+  IDR yalnızca yeni izleyici, kare kaybı ya da istemci isteğinde. Durağan ekranda yeni izleyiciye
+  son kare yeniden kodlanıp gönderilir (siyah ekran yok).
+- **Gecikme sınırı:** istemci her kareyi onaylar (`ack`); 8 kareden fazlası ya da 700 ms'den eskisi
+  onaysızsa yeni kareler kaynakta atlanır ve temiz bir anahtar kare istenir. Ağ tamponlarında
+  saniyelerce gecikme birikmez.
+- **Uyarlamalı bit hızı:** tıkanıklıkta %30 düşer, 6 sn sorunsuz kalınca %15 artar (kodlayıcı
+  yeniden kurulmadan).
+- **Kalite ön ayarları:** Hızlı / Dengeli / Net (tarayıcıdan canlı).
+- Debug derlemede de bağımlılıklar optimize derlenir (`cargo run` ile de akıcı).
 
 ## Darboğazı terminalden ölçme
 
-Aktif bir izleyici varken host her yaklaşık 5 saniyede şu satırı yazar:
+Aktif bir izleyici varken host her 10 saniyede şu satırı yazar:
 
 ```text
-video ölçüm: 27.8 fps, capture 4.2 ms, encode 27.1 ms, 1600x900, izleyici 1
+video: 29.6 fps, 2400 kbit/s, dönüşüm 1.1 ms, kodlama 13.9 ms, 1920x1080, izleyici 1
 ```
 
-- `encode` 33 ms'nin belirgin biçimde üstündeyse 30 FPS'i yazılımsal OpenH264 sınırlıyor; önce `RF_MAX_WIDTH=1280` dene.
-- `capture` yüksekse ekran yakalama yolu sınırlıyor; Wayland'da PipeWire izninin verildiğini ve `pipewire format` logunun geldiğini kontrol et.
+- `kodlama` 33 ms'nin belirgin biçimde üstündeyse 30 FPS'i yazılımsal OpenH264 sınırlıyor; tarayıcıda
+  ⚙ → **Hızlı** seç ya da `RF_QUALITY=fast`.
+- fps düşük ama kodlama hızlıysa ekran az değişiyordur (normal) ya da Wayland'da izin verilmemiştir.
 - Host ölçümü yüksek, istemci FPS'i düşükse istemci decode/GPU texture yüklemesi veya ağ gecikmesi sınırlıyor.
 - Tarayıcı meta satırında `JPEG` yazıyorsa HTTPS/WebCodecs yerine fallback kullanılıyordur.
 
