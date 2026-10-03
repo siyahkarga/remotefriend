@@ -19,7 +19,7 @@ Download for your system from the [latest release](https://github.com/siyahkarga
 |---|---|---|
 | Windows | [RemoteFriend-Setup.exe](https://github.com/siyahkarga/remotefriend/releases/latest/download/RemoteFriend-Setup.exe) | Run it. If SmartScreen appears: **More info → Run anyway**. |
 | macOS | [RemoteFriend-macOS.dmg](https://github.com/siyahkarga/remotefriend/releases/latest/download/RemoteFriend-macOS.dmg) | Drag RemoteFriend to Applications. First start: **right-click → Open**. |
-| Ubuntu / Debian | [RemoteFriend-linux-amd64.deb](https://github.com/siyahkarga/remotefriend/releases/latest/download/RemoteFriend-linux-amd64.deb) | Double-click it, or `sudo apt install ./RemoteFriend-linux-amd64.deb` |
+| Ubuntu 24.04+ / Debian 13+ | [RemoteFriend-linux-amd64.deb](https://github.com/siyahkarga/remotefriend/releases/latest/download/RemoteFriend-linux-amd64.deb) | Double-click it, or `sudo apt install ./RemoteFriend-linux-amd64.deb` |
 | Other Linux | [RemoteFriend-linux-x86_64.tar.gz](https://github.com/siyahkarga/remotefriend/releases/latest/download/RemoteFriend-linux-x86_64.tar.gz) | Extract, then run `./install.sh` (no root needed). |
 
 Then open **RemoteFriend** from your applications menu. The installers are not code-signed

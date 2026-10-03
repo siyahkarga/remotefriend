@@ -17,8 +17,9 @@ env:
 
 jobs:
   linux:
-    # Oldest supported glibc: packages run on Ubuntu 22.04+, Debian 12+ and newer.
-    runs-on: ubuntu-22.04
+    # PipeWire headers on 22.04 are too old for the pipewire crate; 24.04 builds run on
+    # Ubuntu 24.04+, Debian 13+, Fedora 40+ and other current distributions.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
