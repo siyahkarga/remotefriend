@@ -281,6 +281,10 @@ function renderRecents() {
     box.appendChild(row);
   }
 }
+// Host'ta "K" (kalıcı) ile onaylanan bu tarayıcının belirteci; parolanın yerine geçmez.
+function deviceKey() { return role === 'host' ? 'rf_dev_lan_' + location.host : 'rf_dev_' + savedId; }
+function deviceToken() { const t = load(deviceKey(), ''); return /^[0-9a-f]{64}$/.test(t) ? t : undefined; }
+
 function rememberRecent(id, name) {
   if (!id) return;
   const list = load('rf_recents', []).filter(x => x.id !== id);
@@ -325,7 +329,8 @@ function connect(retry, auto) {
   sock.onopen = () => sock.send(JSON.stringify({
     t: 'hello', id: role === 'host' ? undefined : id, password: pw,
     jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined,
-    resume: (auto && resumeToken) || undefined
+    resume: (auto && resumeToken) || undefined,
+    device: deviceToken()
   }));
   sock.onmessage = ev => { if (ws === sock) onMessage(ev); };
   sock.onclose = () => { if (ws === sock) onClosed(sock); };
@@ -364,7 +369,8 @@ function onMessage(ev) {
   let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
   switch (m.t) {
     case 'wait': if (autoReconnecting) toast('Uzak bilgisayarda onay bekleniyor (E)…', 0);
-      setBusy(true, 'Onay bekleniyor…'); showMsg('Uzaktaki bilgisayarda bağlantının onaylanması (E tuşu) bekleniyor.', 'info'); break;
+      setBusy(true, 'Onay bekleniyor…');
+      showMsg('Uzaktaki bilgisayarda onay bekleniyor: E = bu sefer, K = kalıcı (bu cihaz bir daha sormadan bağlanır).', 'info'); break;
     case 'reject': ws._reason = 'Reddedildi: ' + (m.msg || 'bilinmeyen neden'); ws.close(); break;
     case 'welcome': onWelcome(m); break;
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
@@ -377,6 +383,7 @@ function onMessage(ev) {
 function onWelcome(m) {
   connected = true;
   resumeToken = m.resume || '';
+  if (m.device && /^[0-9a-f]{64}$/.test(m.device)) { store(deviceKey(), m.device); toast('Bu cihaz kalıcı olarak onaylandı ✓', 3000); }
   if (autoReconnecting) toast('Yeniden bağlandı ✓', 1800);
   autoTries = 0; autoReconnecting = false;
   jpegMode = !!m.jpeg || m.codec === 'jpeg';

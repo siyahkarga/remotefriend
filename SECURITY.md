@@ -27,7 +27,7 @@ VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle re
 - Tarayıcı parolası `localStorage` içinde tutulmuyor.
 - Host kayıt sırrı ve ayarlar Unix'te `0600`, config dizini `0700` izinle yazılıyor.
 
-## v0.6.0 ile eklenenler
+## v0.6.2 ile eklenenler
 
 - Hatalı parola kilidi (host'ta, tüm yollar için): 60 sn içinde 5 hata → 1 dk, tekrarında 2/4/8/16 dk.
   Kilit süresince parola hiç değerlendirilmez.
@@ -41,6 +41,11 @@ VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle re
 - Sıkı CSP (`default-src 'none'`), `X-Frame-Options: DENY`, `Permissions-Policy`.
 - Onay soruları tek bir stdin okuyucusundan geçer (zaman aşımına uğrayan soru sonraki cevabı çalamaz).
 - Üretilen şifreler okunaklı (`abcde-23456`, ~50 bit); kilit ile çevrimiçi tahmin pratikte imkânsız.
+  Şifre `~/.config/remotefriend/password` (0600) içinde kalıcıdır; `--new-password` ile yenilenir.
+- Güvenilir cihaz: operatör **K** ile onaylarsa tarayıcıya 256 bit belirteç verilir, host yalnızca SHA-256
+  özetini saklar (`trusted_devices.json`, 0600). Belirteç şifrenin yerine geçmez, yalnızca onayı atlar.
+  `--forget-devices` ile hepsi iptal edilir.
+- Kopan oturum için tek kullanımlık, 10 dk geçerli yeniden bağlanma belirteci (yine şifre gerekir).
 
 ## Güvenli dağıtım
 

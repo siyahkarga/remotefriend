@@ -740,13 +740,20 @@ async fn web_serve(port: u16, state: Arc<State>) -> Result<()> {
                     .map(|v| {
                         let pw: String = v.get("password").and_then(|x| x.as_str())
                             .unwrap_or("").chars().take(200).collect();
-                        // Yeniden bağlanma belirteci host'a parolayla birlikte iletilir.
-                        let resume = v.get("resume").and_then(|x| x.as_str()).unwrap_or("");
-                        let auth = if resume.len() == 32 && resume.bytes().all(|b| b.is_ascii_hexdigit()) {
-                            format!("rf-resume:{resume}:{pw}")
-                        } else {
-                            pw
+                        // Yeniden bağlanma / güvenilir cihaz belirteçleri host'a parolayla birlikte
+                        // iletilir: [rf-resume:<32hex>:][rf-dev:<64hex>:]<parola>
+                        let hex = |k: &str, n: usize| {
+                            v.get(k).and_then(|x| x.as_str())
+                                .filter(|t| t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit()))
+                                .map(str::to_string)
                         };
+                        let mut auth = pw;
+                        if let Some(d) = hex("device", 64) {
+                            auth = format!("rf-dev:{d}:{auth}");
+                        }
+                        if let Some(r) = hex("resume", 32) {
+                            auth = format!("rf-resume:{r}:{auth}");
+                        }
                         (
                             v.get("id").and_then(|x| x.as_str())
                                 .map(|s| s.replace(' ', "")).unwrap_or_default(),

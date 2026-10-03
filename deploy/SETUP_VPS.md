@@ -29,7 +29,7 @@ curl -sL .../setup-vps.sh | sudo DOMAIN=uzak.ornek.com EMAIL=sen@ornek.com bash
 # IP otomatik bulunamazsa
 curl -sL .../setup-vps.sh | sudo SERVER_IP=1.2.3.4 bash
 # belirli sürüm
-curl -sL .../setup-vps.sh | sudo VERSION=v0.6.0 bash
+curl -sL .../setup-vps.sh | sudo VERSION=v0.6.2 bash
 ```
 
 Bulut sağlayıcının güvenlik grubunda da **80, 443 ve 33202/TCP** açık olmalı (80, sertifika alımı için).

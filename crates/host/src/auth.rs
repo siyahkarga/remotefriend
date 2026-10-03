@@ -52,12 +52,43 @@ pub(crate) enum Auth {
     Locked(u64),
 }
 
+fn password_path() -> std::path::PathBuf {
+    remote_friend_common::identity::config_dir().join("password")
+}
+
+/// Kayıtlı (kalıcı) üretilmiş parolayı oku; biçimi bozuksa yok say.
+fn load_saved_password() -> Option<String> {
+    let p = std::fs::read_to_string(password_path()).ok()?;
+    let p = p.trim().to_string();
+    let n = remote_friend_common::normalize_password(&p);
+    (n.len() == 10 && n.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(p)
+}
+
 /// Parolayı bir kez ayarla. Döner: (gösterilecek parola, ortamdan mı geldi).
-pub(crate) fn init() -> (String, bool) {
+///
+/// Öncelik: REMOTE_FRIEND_PASS > kayıtlı kalıcı parola > yeni üretilen (kaydedilir).
+/// `new_password` (ya da RF_NEW_PASSWORD=1) kayıtlı parolayı yeniler.
+/// RF_EPHEMERAL_PASSWORD=1: her açılışta yeni parola (kaydedilmez).
+pub(crate) fn init(new_password: bool) -> (String, bool) {
     let configured = std::env::var("REMOTE_FRIEND_PASS").ok().filter(|s| !s.trim().is_empty());
+    let ephemeral = std::env::var("RF_EPHEMERAL_PASSWORD").map(|v| v == "1").unwrap_or(false);
+    let renew = new_password || std::env::var("RF_NEW_PASSWORD").map(|v| v == "1").unwrap_or(false);
     let secret = match &configured {
         Some(p) => Secret { value: p.trim().to_string(), generated: false },
-        None => Secret { value: remote_friend_common::new_session_password(), generated: true },
+        None if ephemeral => Secret { value: remote_friend_common::new_session_password(), generated: true },
+        None => {
+            let value = match load_saved_password().filter(|_| !renew) {
+                Some(p) => p,
+                None => {
+                    let p = remote_friend_common::new_session_password();
+                    if let Err(e) = remote_friend_common::identity::write_private(&password_path(), p.as_bytes()) {
+                        tracing::warn!("parola kaydedilemedi (bu açılışa özel kalacak): {e}");
+                    }
+                    p
+                }
+            };
+            Secret { value, generated: true }
+        }
     };
     if !secret.generated && secret.value.chars().count() < 10 {
         tracing::warn!("zayıf REMOTE_FRIEND_PASS: en az 10 karakter kullan");

@@ -53,7 +53,14 @@ Başlatıcılar yeni sürüm çıkınca programı kendisi günceller. Ekranda ş
 ### 3. Bağlan
 
 Telefonda/tarayıcıda web adresini aç → bilgisayar kodu + şifre → **Bağlan**.
-Host'ta terminalde **E** ile onayla (masaüstü bildirimi de gelir).
+Host terminalinde (masaüstü bildirimi de gelir):
+
+- **E** = yalnızca bu sefer
+- **K** = **kalıcı**: bu telefon/tarayıcı bundan sonra onay sormadan (yalnızca şifreyle) bağlanır.
+  Bilgisayar başında olmayacaksan telefonunu bir kez **K** ile onayla.
+- **H** = reddet
+
+Bağlantı kısa süre koparsa (ağ değişimi, uygulama değiştirme) sayfa onay sormadan kendiliğinden yeniden bağlanır.
 
 ## Telefonda kullanım
 
@@ -80,10 +87,12 @@ Ortam değişkenleri ("Dengeli" profili ayarlar): `RF_QUALITY=fast|balanced|shar
 
 ## Güvenlik
 
-- Her bağlantı **şifre + host'ta onay (E)** ister. Gözetimsiz kullanım için `REMOTE_FRIEND_AUTO_ACCEPT=1`
-  (yalnızca güçlü, kalıcı `REMOTE_FRIEND_PASS` ile).
-- Şifre her açılışta yeniden üretilir (`abcde-23456` biçiminde, ~50 bit; büyük/küçük harf ve tire önemsiz).
-  Kalıcı şifre için `REMOTE_FRIEND_PASS` ayarla (en az 10 karakter).
+- Her bağlantı **şifre + host'ta onay** ister; **K** ile kalıcı onaylanan cihazlar yalnızca şifreyle girer
+  (host cihaz belirtecinin yalnızca SHA-256 özetini saklar). Tam gözetimsiz: `REMOTE_FRIEND_AUTO_ACCEPT=1`.
+- Şifre ilk açılışta üretilir ve **kalıcıdır** (`abcde-23456` biçiminde, ~50 bit; büyük/küçük harf ve
+  tire önemsiz). Yenilemek: `remote-friend-host --new-password`. Her açılışta yeni şifre için
+  `RF_EPHEMERAL_PASSWORD=1`; kendi şifren için `REMOTE_FRIEND_PASS` (en az 10 karakter).
+- Kalıcı onaylı cihazları unutmak: `remote-friend-host --forget-devices`.
 - Hatalı şifre kilidi: 60 sn'de 5 hata → 1 dk kilit, tekrarında 2/4/8/16 dk. Sunucu ayrıca IP başına
   dakikada 12 bağlantı isteği sınırı uygular.
 - İnternet yolu: tarayıcı ↔ VPS HTTPS, host ↔ VPS TLS + parmak izi sabitleme. **Röle uçtan uca şifreli

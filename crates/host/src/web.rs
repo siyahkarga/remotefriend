@@ -137,16 +137,15 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
 
     // 1. hello (15 sn): {t:"hello", password, jpeg?, resume?}
     let hello = tokio::time::timeout(Duration::from_secs(15), stream.next()).await;
-    let (password, want_jpeg, resume) = match hello {
+    let (password, want_jpeg, resume, device) = match hello {
         Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => match serde_json::from_str::<serde_json::Value>(&t) {
-            Ok(v) => (
-                v.get("password").and_then(|p| p.as_str()).unwrap_or("").chars().take(256).collect::<String>(),
-                v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false),
-                v.get("resume").and_then(|r| r.as_str()).unwrap_or("").chars().take(64).collect::<String>(),
-            ),
-            Err(_) => (String::new(), false, String::new()),
+            Ok(v) => {
+                let field = |k: &str, n: usize| v.get(k).and_then(|x| x.as_str()).unwrap_or("").chars().take(n).collect::<String>();
+                (field("password", 256), v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false), field("resume", 64), field("device", 64))
+            }
+            Err(_) => Default::default(),
         },
-        _ => (String::new(), false, String::new()),
+        _ => Default::default(),
     };
     match crate::auth::check_password(&password, &peer_ip) {
         crate::auth::Auth::Ok => {}
@@ -163,16 +162,22 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
         }
     }
 
-    // 2. operatör onayı (kısa kopmadan dönen oturum için belirteç yeterli)
-    let approved = if crate::approval::consume_resume(&resume) {
-        println!("*** tarayıcı ({peer_ip}): oturum yeniden bağlandı");
-        true
+    // 2. operatör onayı: kısa kopmadan dönen oturum ya da güvenilir cihaz için gerekmez.
+    use crate::approval::Decision;
+    let who = format!("tarayıcı (yerel ağ, {peer_ip})");
+    let decision = if crate::approval::consume_resume(&resume) {
+        println!("*** {who}: oturum yeniden bağlandı");
+        Decision::Once
+    } else if crate::approval::is_trusted(&device) {
+        println!("*** {who}: güvenilir cihaz, onaysız bağlandı");
+        Decision::Once
     } else {
         let _ = sink.send(Message::Text(r#"{"t":"wait"}"#.into())).await;
-        let who = format!("tarayıcı (yerel ağ, {peer_ip})");
-        tokio::task::spawn_blocking(move || crate::approval::ask(&who)).await.unwrap_or(false)
+        let w = who.clone();
+        tokio::task::spawn_blocking(move || crate::approval::ask(&w, true)).await.unwrap_or(Decision::Deny)
     };
-    if !approved {
+    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
+    if decision == Decision::Deny {
         let _ = sink.send(Message::Text(reject_json("host bağlantıyı reddetti"))).await;
         return;
     }
@@ -208,13 +213,13 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
             }
         }
     });
-    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "tarayıcı (LAN)").await;
+    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "tarayıcı (LAN)", issued).await;
     reader.abort();
     let _ = writer.await;
 }
 
 /// VPS dial-back hattı üzerinden tarayıcı oturumu. kmsg tür 0 = video, 1 = JSON.
-pub(crate) async fn session_kmsg<R, W>(mut rd: R, mut wr: W, jpeg: bool)
+pub(crate) async fn session_kmsg<R, W>(mut rd: R, mut wr: W, jpeg: bool, issued_device: Option<String>)
 where
     R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
     W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
@@ -255,7 +260,7 @@ where
             }
         }
     });
-    run_session(inbox, ctrl_tx, video_tx, jpeg, "tarayıcı (internet)").await;
+    run_session(inbox, ctrl_tx, video_tx, jpeg, "tarayıcı (internet)", issued_device).await;
     reader.abort();
     let _ = writer.await;
 }
@@ -385,6 +390,7 @@ async fn run_session(
     video_out: mpsc::Sender<Vec<u8>>,
     jpeg: bool,
     peer: &str,
+    issued_device: Option<String>,
 ) {
     #[cfg(target_os = "linux")]
     crate::wayland::ensure_started();
@@ -398,6 +404,8 @@ async fn run_session(
         "fps": video::profile(video::preset()).fps,
         // Bağlantı koparsa kısa süre içinde host onayı sormadan yeniden bağlanmak için.
         "resume": crate::approval::grant_resume(),
+        // Operatör "kalıcı" onay verdiyse: tarayıcı saklar, sonraki bağlantılarda onay sorulmaz.
+        "device": issued_device,
     });
     if ctrl.send(welcome.to_string()).await.is_err() {
         return;

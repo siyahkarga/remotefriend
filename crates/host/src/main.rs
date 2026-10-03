@@ -79,7 +79,19 @@ async fn main() -> Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "bilgisayar".into());
     let _ = HOST_NAME.set(pc_name.clone());
-    let (password, from_env) = auth::init();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--forget-devices") {
+        println!("{} güvenilir cihaz silindi; bir sonraki bağlantıda yine onay istenecek.", approval::forget_devices());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("remote-friend-host [--new-password] [--forget-devices]");
+        println!("  --new-password    kalıcı şifreyi yenile (eski şifre artık çalışmaz)");
+        println!("  --forget-devices  'kalıcı izin' verilmiş tüm cihazları unut");
+        return Ok(());
+    }
+    let (password, from_env) = auth::init(args.iter().any(|a| a == "--new-password"));
 
     // Wayland: izin penceresi host başlarken çıksın (operatör bilgisayar başındayken).
     #[cfg(target_os = "linux")]
@@ -121,7 +133,18 @@ async fn main() -> Result<()> {
     }
     println!("    Yerel ağdan     : http://{lan_ip}:{http_port}");
     println!("  └────────────────────────────────────────────────────────┘");
-    println!("  Her bağlantı bu terminalde onay ister (E/H).");
+    let trusted = approval::trusted_count();
+    if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false) {
+        println!("  Onay KAPALI (REMOTE_FRIEND_AUTO_ACCEPT=1): doğru şifreyi bilen herkes bağlanır.");
+    } else {
+        println!("  Yeni cihazlar bu terminalde onay ister: E = bu sefer, K = kalıcı (cihaz hatırlanır).");
+        if trusted > 0 {
+            println!("  Kalıcı izinli cihaz: {trusted}  (hepsini unutmak için: remote-friend-host --forget-devices)");
+        }
+    }
+    if !from_env {
+        println!("  Şifre kalıcıdır; yenilemek için: remote-friend-host --new-password");
+    }
     if native_bind != "127.0.0.1" && native_bind != "::1" {
         println!("  Not: yerel ağ yolu şifresizdir; internet yolu TLS/HTTPS kullanır.");
     }
@@ -235,8 +258,10 @@ where
     if need_approval {
         write_packet(&mut wr, &Packet::WaitingForApproval).await?;
         let prompt_peer = peer.clone();
-        let approved = tokio::task::spawn_blocking(move || approval::ask(&prompt_peer)).await.unwrap_or(false);
-        if !approved {
+        let decision = tokio::task::spawn_blocking(move || approval::ask(&prompt_peer, false))
+            .await
+            .unwrap_or(approval::Decision::Deny);
+        if decision == approval::Decision::Deny {
             write_packet(&mut wr, &Packet::Reject("host bağlantıyı reddetti".into())).await?;
             anyhow::bail!("operatör reddetti");
         }
@@ -488,9 +513,12 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
         };
         if let RvMsg::ApprovalRequest { client, addr, kind, token, auth: candidate } = msg {
             let peer = format!("internet ({addr}, {kind})");
-            let (password, resume) = approval::split_relay_auth(candidate.as_deref().unwrap_or(""));
-            let verdict = auth::check_password(password, &addr);
-            let resumed = matches!(verdict, auth::Auth::Ok) && resume.is_some_and(approval::consume_resume);
+            let relay_auth = approval::split_relay_auth(candidate.as_deref().unwrap_or(""));
+            let verdict = auth::check_password(relay_auth.password, &addr);
+            let password_ok = matches!(verdict, auth::Auth::Ok);
+            let resumed = password_ok && relay_auth.resume.is_some_and(approval::consume_resume);
+            let trusted = password_ok && relay_auth.device.is_some_and(approval::is_trusted);
+            let can_remember = kind.starts_with("web");
             if !matches!(verdict, auth::Auth::Ok) {
                 tracing::warn!("{peer}: parola doğrulaması başarısız/kilitli; onay sorulmadı");
                 let _ = out_tx.try_send(RvMsg::ApprovalAnswer { client, allow: false });
@@ -501,15 +529,22 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
             let id = id.to_string();
             let secret = secret.to_string();
             tokio::spawn(async move {
-                let ok = if resumed {
+                use approval::Decision;
+                let decision = if resumed {
                     println!("*** {peer}: oturum yeniden bağlandı");
-                    true
+                    Decision::Once
+                } else if trusted {
+                    println!("*** {peer}: güvenilir cihaz, onaysız bağlandı");
+                    Decision::Once
                 } else {
                     let prompt_peer = peer.clone();
-                    tokio::task::spawn_blocking(move || approval::ask(&prompt_peer)).await.unwrap_or(false)
+                    tokio::task::spawn_blocking(move || approval::ask(&prompt_peer, can_remember))
+                        .await
+                        .unwrap_or(Decision::Deny)
                 };
-                if ok {
-                    dial_back(&target2, token, &kind, &id, &secret).await;
+                if decision != Decision::Deny {
+                    let issued = (decision == Decision::Always).then(|| approval::trust_device(&peer));
+                    dial_back(&target2, token, &kind, &id, &secret, issued).await;
                 } else {
                     let _ = out_tx2.try_send(RvMsg::ApprovalAnswer { client, allow: false });
                 }
@@ -521,7 +556,7 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
 }
 
 /// Onaylanan istemci için sunucuya geri bağlan, oturumu bu hat üzerinden yürüt.
-async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret: &str) {
+async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret: &str, issued: Option<String>) {
     use remote_friend_common::io::write_rv;
     use remote_friend_common::RvMsg;
     let peer = format!("internet:{:08x}", token as u32);
@@ -536,8 +571,8 @@ async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret:
             }
             tracing::info!("{peer}: dial-back kuruldu ({kind})");
             match kind {
-                "web-jpeg" => web::session_kmsg(rd, wr, true).await,
-                "web" => web::session_kmsg(rd, wr, false).await,
+                "web-jpeg" => web::session_kmsg(rd, wr, true, issued).await,
+                "web" => web::session_kmsg(rd, wr, false, issued).await,
                 _ => {
                     if let Err(e) = session_native(rd, wr, peer.clone(), false).await {
                         tracing::warn!("{peer}: {e:#}");

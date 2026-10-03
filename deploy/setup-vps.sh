@@ -10,7 +10,7 @@
 #   DOMAIN=uzak.ornek.com  kendi alan adın (yoksa <ip>.sslip.io kullanılır, ayar gerekmez)
 #   EMAIL=sen@ornek.com    Let's Encrypt bildirimleri için (isteğe bağlı)
 #   NO_TLS=1               HTTPS kurma (önerilmez: telefonda görüntü yavaş, şifre açık gider)
-#   VERSION=v0.6.0         belirli sürüm
+#   VERSION=v0.6.2         belirli sürüm
 set -euo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/siyahkarga/remotefriend/main"

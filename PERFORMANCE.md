@@ -23,7 +23,7 @@
 - JPEG decode yalnızca en yeni bekleyen kareyi tutuyor.
 - Input ve ağ kanalları bounded; eski mouse hareketleri gerektiğinde düşüyor.
 
-## v0.6.0 değişiklikleri
+## v0.6.2 değişiklikleri
 
 - **Tek geçiş dönüşüm:** ham kare (BGRx/RGBA) doğrudan I420'ye çevrilir; küçültme aynı geçişte
   (kutu filtresi) ve 4 iş parçacığında yapılır. Eski hattaki RGBA kopya → resize → RGB kopya →
