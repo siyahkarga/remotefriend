@@ -1,5 +1,5 @@
-//! Son bağlanılanlar + favoriler + thumbnail saklama.
-//! Konum: ~/.config/remotefriend/recents.json
+//! Recent connections, favorites and thumbnails.
+//! Stored in ~/.config/remotefriend/recents.json
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ pub struct RecentEntry {
     pub name: String,
     pub fav: bool,
     pub last_seen: u64,
-    /// config dizinindeki küçük önizleme png'si
+    /// Small preview PNG in the config folder
     pub thumb: Option<String>,
 }
 
@@ -36,7 +36,7 @@ pub fn save_recents(r: &[RecentEntry]) {
     let _ = std::fs::write(p, serde_json::to_string_pretty(r).unwrap_or_default());
 }
 
-/// unix saniye
+/// Unix seconds
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -44,7 +44,7 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Bağlantıyı kaydet/güncelle (max 20, favoriler korunur)
+/// Add/update a connection (max 20; favorites are kept)
 pub fn touch_recent(recents: &mut Vec<RecentEntry>, addr: &str, name: &str) {
     if let Some(e) = recents.iter_mut().find(|e| e.addr == addr) {
         e.last_seen = now_unix();
@@ -60,13 +60,13 @@ pub fn touch_recent(recents: &mut Vec<RecentEntry>, addr: &str, name: &str) {
             thumb: None,
         });
     }
-    // favoriler önce, sonra yeniler; 20'yi aşanı at (favs korunur)
+    // favorites first, then most recent; drop beyond 20
     recents.sort_by(|a, b| b.fav.cmp(&a.fav).then(b.last_seen.cmp(&a.last_seen)));
     recents.truncate(20);
     save_recents(recents);
 }
 
-/// 320px önizleme kaydet, dosya adını döndür
+/// Save a 320 px preview and return its file name
 pub fn save_thumb(addr: &str, img: &egui::ColorImage) -> Option<String> {
     let [w, h] = img.size;
     if w == 0 || h == 0 {

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# RemoteFriend tek tıkla kurulum + başlatma (macOS, Apple Silicon ve Intel).
-# Finder'da çift tıkla. Yeni sürüm varsa günceller, sunucu ayarını bir kez sorar.
+# Terminal host (alternative). Most people should install RemoteFriend-macOS.dmg instead.
+# RemoteFriend one-click install + start (macOS, Apple Silicon and Intel).
+# Double-click in Finder. Updates when a new release is out and asks for the server once.
 #
-# İlk çalıştırmada macOS iki izin ister (Sistem Ayarları > Gizlilik ve Güvenlik):
-#   - Ekran Kaydı      (görüntü için)
-#   - Erişilebilirlik  (fare/klavye kontrolü için)
-# İzni Terminal uygulamasına ver, sonra bu dosyayı tekrar çalıştır.
+# On first run macOS asks for two permissions (System Settings > Privacy & Security):
+#   - Screen Recording  (for video)
+#   - Accessibility     (for mouse/keyboard control)
+# Grant them to the Terminal app, then run this file again.
 set -euo pipefail
 
 REPO_API="https://api.github.com/repos/siyahkarga/remotefriend/releases/latest"
@@ -18,16 +19,16 @@ cd "$BIN_DIR"
 latest="$(curl -s --max-time 8 "$REPO_API" | grep '"tag_name"' | cut -d'"' -f4 || true)"
 current="$(cat "$VER_FILE" 2>/dev/null || true)"
 updated_ok=1
-for bin in remote-friend-host remote-friend-client; do
+for bin in remote-friend-host; do
   if [ ! -x "$BIN_DIR/$bin" ] || { [ -n "$latest" ] && [ "$latest" != "$current" ]; }; then
-    echo "İndiriliyor: $bin ${latest:-}"
+    echo "Downloading: $bin ${latest:-}"
     if curl -fsSL "$BASE/$bin-macos" -o "$BIN_DIR/$bin.new"; then
       chmod +x "$BIN_DIR/$bin.new"
       xattr -d com.apple.quarantine "$BIN_DIR/$bin.new" 2>/dev/null || true
       mv -f "$BIN_DIR/$bin.new" "$BIN_DIR/$bin"
     else
       rm -f "$BIN_DIR/$bin.new"
-      [ -x "$BIN_DIR/$bin" ] || { echo "İNDİRME HATASI: internet bağlantısını kontrol et." >&2; read -r -p "Enter..."; exit 1; }
+      [ -x "$BIN_DIR/$bin" ] || { echo "DOWNLOAD ERROR: check your internet connection." >&2; read -r -p "Press Enter to close..."; exit 1; }
       updated_ok=0
     fi
   fi
@@ -38,12 +39,12 @@ mkdir -p "$(dirname "$ENV_FILE")"
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 if [ -z "${RF_RV_SERVER+x}" ]; then
-  echo "İnternetten (telefondan) bağlanmak için VPS adresini yaz; sadece yerel ağ için boş bırak."
-  read -r -p "Sunucu [örnek 1.2.3.4:33202, boş = yerel ağ]: " RF_RV_SERVER || true
+  echo "To connect over the internet (e.g. from your phone), enter the VPS address; leave empty for local network only."
+  read -r -p "Server [e.g. 1.2.3.4:33202, empty = local network]: " RF_RV_SERVER || true
 fi
-# Değerler kabuk-güvenli tırnaklanır (şifrede boşluk, $, ; vb. olabilir).
+# Values are shell-quoted safely (the password may contain spaces, $, ; etc.).
 {
-  echo "# Otomatik oluşturuldu; tekrar sorması için bu dosyayı sil."
+  echo "# Generated automatically; delete this file to be asked again."
   printf 'RF_RV_SERVER=%q\n' "${RF_RV_SERVER:-}"
   [ -n "${RF_WEB_URL:-}" ] && printf 'RF_WEB_URL=%q\n' "$RF_WEB_URL"
   [ -n "${RF_RV_FP:-}" ] && printf 'RF_RV_FP=%q\n' "$RF_RV_FP"
@@ -53,6 +54,6 @@ fi
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 export RF_RV_SERVER RF_WEB_URL RF_RV_FP REMOTE_FRIEND_PASS
 
-echo "Not: görüntü gelmezse Ekran Kaydı, kontrol çalışmazsa Erişilebilirlik iznini Terminal'e ver."
+echo "Note: if there is no video, grant Screen Recording to Terminal; if control does not work, grant Accessibility."
 echo
 "$BIN_DIR/remote-friend-host"

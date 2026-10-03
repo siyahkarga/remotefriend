@@ -1,4 +1,4 @@
-//! Gelen dosyalar: sıralı parçalar, boyut/sayı sınırı, güvenli ad, atomik tamamlama.
+//! Incoming files: ordered chunks, size/count limits, safe names, atomic completion.
 
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
@@ -27,7 +27,7 @@ fn max_file_bytes() -> u64 {
         .unwrap_or(512 * 1024 * 1024)
 }
 
-/// Gelen dosyalar: REMOTE_FRIEND_DIR, yoksa İndirilenler/RemoteFriend.
+/// Incoming files go to REMOTE_FRIEND_DIR, otherwise Downloads/RemoteFriend.
 pub(crate) fn receive_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("REMOTE_FRIEND_DIR") {
         return d.into();
@@ -36,7 +36,7 @@ pub(crate) fn receive_dir() -> std::path::PathBuf {
     let Some(home) = home else {
         return remote_friend_common::identity::config_dir().join("received");
     };
-    // Linux'ta yerelleştirilmiş klasör adı (ör. "İndirilenler") user-dirs.dirs'te yazar.
+    // On Linux the localized folder name (e.g. a translated "Downloads") is listed in user-dirs.dirs.
     #[cfg(target_os = "linux")]
     if let Ok(cfg) = std::fs::read_to_string(home.join(".config/user-dirs.dirs")) {
         for line in cfg.lines() {
@@ -57,7 +57,7 @@ pub(crate) fn receive_dir() -> std::path::PathBuf {
 }
 
 fn safe_file_name(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("dosya");
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
     let mut out = String::with_capacity(base.len().min(128));
     for c in base.chars().take(128) {
         if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
@@ -67,42 +67,42 @@ fn safe_file_name(name: &str) -> String {
         }
     }
     if out.is_empty() || out == "." || out == ".." {
-        "dosya".into()
+        "file".into()
     } else {
         out
     }
 }
 
-/// Bir parça yaz. Dosya tamamlandıysa son yolunu döndürür.
+/// Write one chunk. Returns the final path once the file is complete.
 pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<String>> {
     use std::io::Write as _;
 
     const MAX_CHUNK: usize = 256 * 1024;
     if c.transfer_id == 0 {
-        anyhow::bail!("geçersiz transfer ID");
+        anyhow::bail!("invalid transfer ID");
     }
     if c.total == 0 || c.total > max_file_bytes() {
-        anyhow::bail!("dosya boyutu sınır dışında: {}", c.total);
+        anyhow::bail!("file size out of range: {}", c.total);
     }
     if c.data.is_empty() || c.data.len() > MAX_CHUNK {
-        anyhow::bail!("dosya parçası sınır dışında: {}", c.data.len());
+        anyhow::bail!("file chunk size out of range: {}", c.data.len());
     }
     let end = c.offset
         .checked_add(c.data.len() as u64)
-        .context("dosya offset taşması")?;
+        .context("file offset overflow")?;
     if end > c.total {
-        anyhow::bail!("dosya parçası bildirilen toplamı aşıyor");
+        anyhow::bail!("file chunk exceeds the declared total");
     }
-    // Hatalı son-parça işaretini dosyayı oluşturmadan/yazmadan önce reddet.
-    // Aksi halde saldırgan geçersiz ilk chunk'larla transfer yuvalarını 10 dakika
-    // boyunca doldurabilirdi.
+    // Reject a wrong last-chunk flag before creating/writing the file.
+    // Otherwise an attacker could fill the transfer slots with invalid first chunks
+    // for 10 minutes.
     let reached_end = end == c.total;
     if c.last != reached_end {
-        anyhow::bail!("dosya son-parça işareti toplam boyutla uyuşmuyor");
+        anyhow::bail!("file last-chunk flag does not match the total size");
     }
 
     let dir = receive_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("klasör oluşturulamadı: {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create folder: {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -110,7 +110,7 @@ pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<St
     }
 
     let mut transfers = transfer_map().lock().unwrap();
-    // Yarım kalan transferleri sonsuza kadar açık tutma.
+    // Don't keep unfinished transfers open forever.
     let stale: Vec<u64> = transfers
         .iter()
         .filter(|(_, t)| t.updated.elapsed() > Duration::from_secs(600))
@@ -124,10 +124,10 @@ pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<St
 
     if c.offset == 0 {
         if transfers.len() >= 8 {
-            anyhow::bail!("çok fazla eşzamanlı dosya transferi");
+            anyhow::bail!("too many concurrent file transfers");
         }
         if transfers.contains_key(&c.transfer_id) {
-            anyhow::bail!("transfer ID zaten kullanımda");
+            anyhow::bail!("transfer ID already in use");
         }
         let safe = safe_file_name(&c.name);
         let stamp = SystemTime::now()
@@ -158,9 +158,9 @@ pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<St
     let complete = {
         let state = transfers
             .get_mut(&c.transfer_id)
-            .context("transfer ilk parça ile başlamadı")?;
+            .context("transfer did not start with the first chunk")?;
         if state.total != c.total || state.expected != c.offset {
-            anyhow::bail!("dosya parçaları sırasız veya toplam boyut değişti");
+            anyhow::bail!("file chunks out of order or total size changed");
         }
         state.file.write_all(&c.data)?;
         state.expected = end;
@@ -170,16 +170,16 @@ pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<St
     };
 
     if complete {
-        let mut state = transfers.remove(&c.transfer_id).expect("transfer az önce vardı");
+        let mut state = transfers.remove(&c.transfer_id).expect("transfer existed a moment ago");
         state.file.flush()?;
         state.file.sync_all()?;
         drop(state.file);
         std::fs::rename(&state.part_path, &state.final_path)?;
-        tracing::info!("dosya tamamlandı: {} ({} byte)", state.final_path.display(), state.total);
-        println!("*** Dosya alındı: {}", state.final_path.display());
+        tracing::info!("file complete: {} ({} bytes)", state.final_path.display(), state.total);
+        crate::status::notice(format!("File received: {}", state.final_path.display()));
         return Ok(Some(state.final_path.display().to_string()));
     }
-    tracing::debug!("dosya parçası: id={} {}/{}", c.transfer_id, end, c.total);
+    tracing::debug!("file chunk: id={} {}/{}", c.transfer_id, end, c.total);
     Ok(None)
 }
 

@@ -1,10 +1,10 @@
-//! Tarayıcı oturumları.
+//! Browser sessions.
 //!
-//! - LAN: host'un kendi HTTP/WebSocket sunucusu (http://HOST:33201).
-//! - İnternet: VPS rölesi üzerinden dial-back hattı (kmsg çerçeveleri).
+//! - LAN: the host's own HTTP/WebSocket server (http://HOST:33201).
+//! - Internet: dial-back link through the VPS relay (kmsg frames).
 //!
-//! İki taşıma da aynı oturum çekirdeğini (`run_session`) kullanır: hoş geldin,
-//! video akışı + akış kontrolü (kare onayı), girdi, kalite, dosya.
+//! Both transports share the same session core (`run_session`): welcome,
+//! video stream + flow control (frame acks), input, quality, files.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -27,10 +27,10 @@ use tokio::sync::{broadcast, mpsc};
 use crate::video::{self, EncodedFrame};
 
 const PAGE: &str = remote_friend_common::webapp::WEBAPP;
-/// Tarayıcıdan gelen tek metin mesajı sınırı (dosya parçası base64 dahil).
+/// Size limit for a single text message from the browser (including base64 file chunks).
 const MAX_TEXT: usize = 400 * 1024;
-/// Bu süre istemciden hiç mesaj gelmezse oturum kapanır (arka plana alınan telefon sekmesi
-/// dahil; dönünce sayfa onaysız yeniden bağlanır).
+/// The session closes if no message arrives from the client for this long (including a phone
+/// tab sent to the background; when it returns, the page reconnects without approval).
 const SESSION_IDLE: Duration = Duration::from_secs(45);
 
 #[derive(Clone)]
@@ -52,11 +52,11 @@ pub async fn serve(http_addr: String, name: String) -> Result<()> {
         .with_state(WsState { slots: Arc::new(tokio::sync::Semaphore::new(max_sessions)), name });
     let listener = tokio::net::TcpListener::bind(&http_addr)
         .await
-        .with_context(|| format!("web bind hatası: {http_addr}"))?;
-    tracing::info!("web sunucusu: {http_addr}");
+        .with_context(|| format!("cannot open web port {http_addr}"))?;
+    tracing::info!("web server: {http_addr}");
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
-        .context("web serve")?;
+        .context("web server")?;
     Ok(())
 }
 
@@ -116,7 +116,7 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> Response {
     if !origin_allowed(&headers) {
-        tracing::warn!("yerel WebSocket Origin reddedildi");
+        tracing::warn!("local WebSocket origin rejected");
         return StatusCode::FORBIDDEN.into_response();
     }
     let permit = match state.slots.clone().try_acquire_owned() {
@@ -135,7 +135,7 @@ fn reject_json(msg: &str) -> String {
 async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit, peer_ip: String) {
     let (mut sink, mut stream) = socket.split();
 
-    // 1. hello (15 sn): {t:"hello", password, jpeg?, resume?}
+    // 1. hello (15 s): {t:"hello", password, jpeg?, resume?}
     let hello = tokio::time::timeout(Duration::from_secs(15), stream.next()).await;
     let (password, want_jpeg, resume, device) = match hello {
         Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => match serde_json::from_str::<serde_json::Value>(&t) {
@@ -151,25 +151,25 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
         crate::auth::Auth::Ok => {}
         crate::auth::Auth::Bad => {
             tokio::time::sleep(Duration::from_millis(400)).await;
-            let _ = sink.send(Message::Text(reject_json("şifre hatalı"))).await;
+            let _ = sink.send(Message::Text(reject_json("wrong password"))).await;
             return;
         }
         crate::auth::Auth::Locked(secs) => {
             let _ = sink
-                .send(Message::Text(reject_json(&format!("çok fazla hatalı deneme; {secs} sn sonra tekrar dene"))))
+                .send(Message::Text(reject_json(&format!("too many wrong attempts; try again in {secs} s"))))
                 .await;
             return;
         }
     }
 
-    // 2. operatör onayı: kısa kopmadan dönen oturum ya da güvenilir cihaz için gerekmez.
+    // 2. operator approval: not needed for a session resuming after a brief drop or for a trusted device.
     use crate::approval::Decision;
-    let who = format!("tarayıcı (yerel ağ, {peer_ip})");
+    let who = format!("browser {peer_ip} (local network)");
     let decision = if crate::approval::consume_resume(&resume) {
-        println!("*** {who}: oturum yeniden bağlandı");
+        crate::status::notice(format!("{who}: session resumed"));
         Decision::Once
     } else if crate::approval::is_trusted(&device) {
-        println!("*** {who}: güvenilir cihaz, onaysız bağlandı");
+        crate::status::notice(format!("{who}: trusted device connected"));
         Decision::Once
     } else {
         let _ = sink.send(Message::Text(r#"{"t":"wait"}"#.into())).await;
@@ -178,12 +178,12 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
     };
     let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
     if decision == Decision::Deny {
-        let _ = sink.send(Message::Text(reject_json("host bağlantıyı reddetti"))).await;
+        let _ = sink.send(Message::Text(reject_json("the remote computer denied the connection"))).await;
         return;
     }
-    tracing::info!("tarayıcı (LAN) kabul edildi (jpeg={want_jpeg})");
+    tracing::info!("browser (LAN) accepted (jpeg={want_jpeg})");
 
-    // 3. taşıma görevleri
+    // 3. transport tasks
     let (inbox_tx, inbox) = mpsc::channel::<String>(256);
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
     let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
@@ -213,12 +213,12 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
             }
         }
     });
-    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "tarayıcı (LAN)", issued).await;
+    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "browser (LAN)", issued).await;
     reader.abort();
     let _ = writer.await;
 }
 
-/// VPS dial-back hattı üzerinden tarayıcı oturumu. kmsg tür 0 = video, 1 = JSON.
+/// Browser session over the VPS dial-back link. kmsg type 0 = video, 1 = JSON.
 pub(crate) async fn session_kmsg<R, W>(mut rd: R, mut wr: W, jpeg: bool, issued_device: Option<String>)
 where
     R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
@@ -252,7 +252,7 @@ where
                     }
                 }
                 Ok((1, _)) => {
-                    tracing::warn!("röle: tarayıcı mesajı çok büyük; oturum kapatılıyor");
+                    tracing::warn!("relay: browser message too large; closing session");
                     break;
                 }
                 Ok(_) => {}
@@ -260,27 +260,27 @@ where
             }
         }
     });
-    run_session(inbox, ctrl_tx, video_tx, jpeg, "tarayıcı (internet)", issued_device).await;
+    run_session(inbox, ctrl_tx, video_tx, jpeg, "browser (internet)", issued_device).await;
     reader.abort();
     let _ = writer.await;
 }
 
-/// Akış kontrolü: istemcinin onaylamadığı kare sayısı/yaşı sınırlanır. Böylece
-/// yavaş ağda kareler soket tamponlarında birikip saniyelerce gecikme oluşmaz;
-/// fazlası atlanır, ardından temiz bir anahtar kare istenir.
+/// Flow control: the number/age of frames not yet acked by the client is capped, so
+/// on a slow network frames don't pile up in socket buffers and add seconds of delay;
+/// the excess is skipped and then a clean keyframe is requested.
 pub(crate) struct Flow {
     inflight: VecDeque<(u64, Instant)>,
     ack_seen: bool,
     need_key: bool,
     jpeg: bool,
     last_key_req: Option<Instant>,
-    /// En son gönderilen kare (girdi koordinatı dönüşümü için).
+    /// Most recently sent frame (for input coordinate mapping).
     pub last: Option<Arc<EncodedFrame>>,
 }
 
 const MAX_INFLIGHT_FRAMES: usize = 8;
 const MAX_INFLIGHT_AGE: Duration = Duration::from_millis(700);
-/// Bu kadar eski onaysız kare kayıp sayılır (istemci atmış olabilir); pencere kilitlenmez.
+/// An unacked frame this old counts as lost (the client may have dropped it), so the window never locks up.
 const INFLIGHT_EXPIRE: Duration = Duration::from_millis(2000);
 
 impl Flow {
@@ -316,7 +316,7 @@ impl Flow {
         }
     }
 
-    /// İstemci çözücüsünü sıfırladı: onaylanmamış kareleri attı, yeni anahtar kare istiyor.
+    /// The client reset its decoder: it dropped unacked frames and wants a new keyframe.
     pub(crate) fn want_key(&mut self) {
         self.inflight.clear();
         self.need_key = true;
@@ -332,7 +332,7 @@ impl Flow {
                 || self.inflight.front().is_some_and(|(_, t)| t.elapsed() > MAX_INFLIGHT_AGE))
     }
 
-    /// Bu kare gönderilmeli mi?
+    /// Should this frame be sent?
     pub(crate) fn admit(&mut self, f: &EncodedFrame) -> bool {
         if f.jpeg {
             if self.window_full() {
@@ -365,7 +365,7 @@ impl Flow {
         self.last = Some(f.clone());
     }
 
-    /// JPEG oturumunda atlanan kare varsa ekran durağanlaşınca da güncel kare gelsin.
+    /// If a JPEG session skipped frames, still deliver a fresh frame once the screen goes static.
     pub(crate) fn jpeg_catch_up(&mut self) {
         if self.jpeg && self.need_key && !self.window_full() {
             self.need_key = false;
@@ -374,7 +374,7 @@ impl Flow {
         }
     }
 
-    /// İstemci karesindeki noktayı yakalama uzayına çevir.
+    /// Map a point in the client's frame to capture space.
     pub(crate) fn map_point(&self, x: u32, y: u32) -> Option<(u32, u32)> {
         self.last.as_ref().map(|f| f.to_capture(x, y))
     }
@@ -402,25 +402,26 @@ async fn run_session(
         "name": crate::host_name(),
         "preset": video::preset().name(),
         "fps": video::profile(video::preset()).fps,
-        // Bağlantı koparsa kısa süre içinde host onayı sormadan yeniden bağlanmak için.
+        // Lets the client reconnect shortly after a drop without asking the host for approval.
         "resume": crate::approval::grant_resume(),
-        // Operatör "kalıcı" onay verdiyse: tarayıcı saklar, sonraki bağlantılarda onay sorulmaz.
+        // If the operator chose "always": the browser stores this and later connections skip approval.
         "device": issued_device,
     });
     if ctrl.send(welcome.to_string()).await.is_err() {
         return;
     }
+    let _session = crate::status::SessionGuard::new();
     let mut frames = subscribe(jpeg);
     let mut flow = Flow::new(jpeg);
     let mut files = FileTransfers::default();
-    // İstemci 2 sn'de bir ping atar; uzun sessizlik = kopmuş bağlantı (yarım açık soket).
+    // The client pings every 2 s; a long silence means a dead connection (half-open socket).
     let mut last_rx = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 if last_rx.elapsed() > SESSION_IDLE {
-                    tracing::info!("{peer}: {} sn yanıt yok, oturum kapatılıyor", SESSION_IDLE.as_secs());
+                    tracing::info!("{peer}: no reply for {} s, closing session", SESSION_IDLE.as_secs());
                     break;
                 }
                 flow.jpeg_catch_up();
@@ -444,16 +445,16 @@ async fn run_session(
                 let Some(text) = msg else { break };
                 last_rx = Instant::now();
                 if let Err(e) = handle_message(&text, &mut flow, &ctrl, &mut files) {
-                    tracing::debug!("{peer}: mesaj hatası: {e:#}");
+                    tracing::debug!("{peer}: message error: {e:#}");
                 }
             }
         }
     }
     crate::input::release_all();
-    tracing::info!("{peer}: oturum kapandı");
+    tracing::info!("{peer}: session closed");
 }
 
-/// Tamamlanan/başarısız dosyaları istemciye bildirmek için isim takibi.
+/// Tracks file names so completed/failed files can be reported to the client.
 #[derive(Default)]
 struct FileTransfers {
     names: std::collections::HashMap<u64, String>,
@@ -507,7 +508,7 @@ fn handle_message(t: &str, flow: &mut Flow, ctrl: &mpsc::Sender<String>, files: 
         }
         Some("ack") => {
             if let Some(s) = v.get("s").and_then(|n| n.as_u64()) {
-                // Başlıkta seq'in düşük 32 biti gider; tam değeri son gönderilenden kur.
+                // The header carries only the low 32 bits of seq; rebuild the full value from the last sent frame.
                 let full = flow.last.as_ref().map_or(s, |f| (f.seq & !0xffff_ffff) | s);
                 flow.on_ack(full);
             }
@@ -527,10 +528,10 @@ fn handle_message(t: &str, flow: &mut Flow, ctrl: &mpsc::Sender<String>, files: 
             use base64::Engine;
             let data_b64 = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
             if data_b64.len() > MAX_TEXT {
-                anyhow::bail!("dosya parçası çok büyük");
+                anyhow::bail!("file chunk too large");
             }
             let id = v.get("transfer_id").and_then(|n| n.as_u64()).unwrap_or(0);
-            let name: String = v.get("name").and_then(|x| x.as_str()).unwrap_or("dosya").chars().take(128).collect();
+            let name: String = v.get("name").and_then(|x| x.as_str()).unwrap_or("file").chars().take(128).collect();
             let chunk = FileChunk {
                 transfer_id: id,
                 name: name.clone(),

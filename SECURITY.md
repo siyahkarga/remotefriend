@@ -1,68 +1,68 @@
-# RemoteFriend Güvenlik Notları
+# RemoteFriend Security Notes
 
-## Tehdit modeli
+## Threat model
 
-RemoteFriend, parola bilen ve host tarafından onaylanan bir istemciye ekran, input ve dosya aktarımı yetkisi verir. Bu yetki pratikte bilgisayar başında oturmak kadar güçlüdür. Şifreyi paylaşma, host terminalini açık bırakma ve `REMOTE_FRIEND_AUTO_ACCEPT=1` ayarını günlük kullanımda açma.
+RemoteFriend gives a client that knows the password, and that the host approves, access to the screen, input and file transfer. In practice this is as powerful as sitting at the computer. Don't share the password, don't leave the host running unattended, and don't enable `REMOTE_FRIEND_AUTO_ACCEPT=1` for everyday use.
 
-## Hangi hatlar şifreli?
+## Which links are encrypted?
 
-| Yol | Şifreleme | Kullanım |
+| Path | Encryption | Use |
 |---|---|---|
-| LAN native `33200` | Yok | Yalnızca güvenilir LAN veya VPN |
-| LAN web `33201` | Varsayılan kurulumda HTTP/WS | Yalnızca güvenilir LAN; HTTPS ters proxy tercih edilir |
-| Native internet `33202` | İstemci/host → VPS TLS + fingerprint pinning | Güvenilir VPS gerekir; E2E değildir |
-| VPS web | Kurulum betiği Let's Encrypt HTTPS kurar; host dial-back TLS VPS'de sonlanır | Güvenilir VPS gerekir; E2E değildir |
+| LAN native `33200` | None | Trusted LAN or VPN only |
+| LAN web `33201` | HTTP/WS in the default setup | Trusted LAN only; an HTTPS reverse proxy is preferred |
+| Native internet `33202` | Client/host → VPS TLS + fingerprint pinning | Requires a trusted VPS; not E2E |
+| VPS web | The setup script installs Let's Encrypt HTTPS; host dial-back TLS terminates on the VPS | Requires a trusted VPS; not E2E |
 
-VPS relay trafik içeriğini iletmeden önce TLS'yi sonlandırır. Bu nedenle relay sunucusu parolayı, ekranı, input'u ve dosyaları görebilir. Sunucu ele geçirilirse gizlilik kaybolur. Gerçek uçtan uca gizlilik bu sürümün kapsamı dışındadır.
+The VPS relay terminates TLS before forwarding traffic. The relay server can therefore see the password, screen, input and files. If the server is compromised, confidentiality is lost. True end-to-end confidentiality is out of scope for this release.
 
-## v0.5.6 ile düzeltilen yüksek riskli sorunlar
+## High-risk issues fixed in v0.5.6
 
-- Tarayıcı → VPS yolundaki parola artık hosta iletilip doğrulanıyor.
-- Özel rustls doğrulayıcı artık TLS 1.2/1.3 handshake imzalarını gerçekten doğruluyor.
-- 9 haneli ID tek başına host kaydı için yeterli değil; kalıcı 256 bit host sırrı gerekiyor.
-- Varsayılan `1234` kaldırıldı; şifre verilmezse rastgele oturum şifresi üretiliyor.
-- WebSocket `Origin` doğrulaması eklendi.
-- Mesaj, bağlantı, dosya boyutu, chunk, eşzamanlı transfer ve oturum limitleri eklendi.
-- Gelen dosyalar tahmin edilebilir `/tmp` adlarına ve rastgele offsetlere yazılmıyor; sıralı chunk, güvenli ad, `.part` ve atomik rename kullanılıyor.
-- Tarayıcı parolası `localStorage` içinde tutulmuyor.
-- Host kayıt sırrı ve ayarlar Unix'te `0600`, config dizini `0700` izinle yazılıyor.
+- The password on the browser → VPS path is now forwarded to the host and verified.
+- The custom rustls verifier now actually verifies TLS 1.2/1.3 handshake signatures.
+- The 9-digit ID alone is no longer enough to register a host; a persistent 256-bit host secret is required.
+- The default `1234` password was removed; if no password is given, a random session password is generated.
+- WebSocket `Origin` validation was added.
+- Limits on message, connection, file size, chunk, concurrent transfer and session counts were added.
+- Incoming files are no longer written to predictable `/tmp` names or at arbitrary offsets; sequential chunks, safe names, `.part` files and atomic renames are used.
+- The browser password is not stored in `localStorage`.
+- On Unix, the host registration secret and settings are written with `0600` permissions and the config directory with `0700`.
 
-## v0.6.2 ile eklenenler
+## Added in v0.6.2
 
-- Hatalı parola kilidi (host'ta, tüm yollar için): 60 sn içinde 5 hata → 1 dk, tekrarında 2/4/8/16 dk.
-  Kilit süresince parola hiç değerlendirilmez.
-- Röle sunucusunda IP başına dakikada 12 bağlantı isteği sınırı (nginx arkasında `X-Real-IP` yalnızca
-  yerel proxy'den kabul edilir).
-- VPS kurulumunda otomatik HTTPS (Let's Encrypt; alan adı yoksa sslip.io): tarayıcı yolunda parola ve
-  görüntü artık internette düz metin gitmez.
-- TLS anahtarı systemd `LoadCredential=` ile verilir; anahtar dosyası servis kullanıcısına açılmak zorunda değil.
-- Wayland'da girdi masaüstünün RemoteDesktop portalıyla verilir (kullanıcı onayı, iptal edilebilir).
-- Oturum biterken basılı kalan tuş/fare düğmeleri host'ta otomatik bırakılır.
-- Sıkı CSP (`default-src 'none'`), `X-Frame-Options: DENY`, `Permissions-Policy`.
-- Onay soruları tek bir stdin okuyucusundan geçer (zaman aşımına uğrayan soru sonraki cevabı çalamaz).
-- Üretilen şifreler okunaklı (`abcde-23456`, ~50 bit); kilit ile çevrimiçi tahmin pratikte imkânsız.
-  Şifre `~/.config/remotefriend/password` (0600) içinde kalıcıdır; `--new-password` ile yenilenir.
-- Güvenilir cihaz: operatör **K** ile onaylarsa tarayıcıya 256 bit belirteç verilir, host yalnızca SHA-256
-  özetini saklar (`trusted_devices.json`, 0600). Belirteç şifrenin yerine geçmez, yalnızca onayı atlar.
-  `--forget-devices` ile hepsi iptal edilir.
-- Kopan oturum için tek kullanımlık, 10 dk geçerli yeniden bağlanma belirteci (yine şifre gerekir).
+- Failed-password lockout (on the host, for all paths): 5 failures within 60 s → 1 min lockout, then 2/4/8/16 min on repeat.
+  During a lockout the password is not evaluated at all.
+- Relay server limit of 12 connection requests per minute per IP (behind nginx, `X-Real-IP` is accepted only
+  from the local proxy).
+- Automatic HTTPS in the VPS setup (Let's Encrypt; sslip.io if there is no domain): on the browser path the password and
+  video no longer travel over the internet in plaintext.
+- The TLS key is provided via systemd `LoadCredential=`; the key file does not have to be readable by the service user.
+- On Wayland, input goes through the desktop's RemoteDesktop portal (user consent, revocable).
+- Keys and mouse buttons still held when a session ends are released on the host automatically.
+- Strict CSP (`default-src 'none'`), `X-Frame-Options: DENY`, `Permissions-Policy`.
+- Approval prompts go through a single stdin reader (a prompt that times out can't steal the next answer).
+- Generated passwords are readable (`abcde-23456`, ~50 bits); with the lockout, online guessing is impractical.
+  The password persists in `~/.config/remotefriend/password` (0600); regenerate it with `--new-password`.
+- Trusted devices: if the operator approves with **Always allow**, the browser receives a 256-bit token and the host stores only its
+  SHA-256 hash (`trusted_devices.json`, 0600). The token does not replace the password; it only skips the approval prompt.
+  `--forget-devices` revokes all of them.
+- A single-use reconnect token, valid for 10 minutes, for dropped sessions (the password is still required).
 
-## Güvenli dağıtım
+## Secure deployment
 
-- `33200` ve `33201` portlarını WAN'a yönlendirme.
-- VPS web arayüzünü `127.0.0.1:33203` üzerinde tutup Nginx/HTTPS arkasında yayınla.
-- `33202` için TLS sertifikasının SHA-256 fingerprint'ini host ve native client üzerinde pinle.
-- VPS'de ayrı `remotefriend` sistem kullanıcısı, `UMask=0077` ve systemd hardening kullan.
-- Host kayıt dosyasını (`/var/lib/remotefriend/hosts.json`) yedekle ve gizli tut.
-- Host cihazındaki `~/.config/remotefriend/host_secret` kaybolursa aynı ID yeniden kaydolamaz; VPS yöneticisi ilgili registry kaydını manuel kaldırmalıdır.
+- Do not forward ports `33200` and `33201` to the WAN.
+- Keep the VPS web UI on `127.0.0.1:33203` and publish it behind Nginx/HTTPS.
+- Pin the SHA-256 fingerprint of the `33202` TLS certificate on the host and the native client.
+- On the VPS, use a dedicated `remotefriend` system user, `UMask=0077` and systemd hardening.
+- Back up the host registry file (`/var/lib/remotefriend/hosts.json`) and keep it private.
+- If `~/.config/remotefriend/host_secret` on the host device is lost, the same ID cannot register again; the VPS administrator must remove the corresponding registry entry manually.
 
-## Bilinen kalan riskler
+## Known remaining risks
 
-- Relay uçtan uca şifreli değil.
-- LAN native ve varsayılan LAN web trafiği şifreli değil.
-- Kilit host genelindedir: ID'yi bilen biri bilerek hatalı deneme yaparak meşru kullanıcıyı kısa süreliğine
-  kilitleyebilir (hizmet engelleme). Bu, tahmin saldırısına karşı bilinçli bir takastır.
-- Ekran yakalama, input enjeksiyonu ve dosya aktarımı işletim sistemi kullanıcısının yetkileriyle çalışır.
-- Windows'ta hassas dosya izinleri Unix `0600` semantiğiyle birebir uygulanmaz; kullanıcı profilinin NTFS ACL'leri korunmalıdır.
+- The relay is not end-to-end encrypted.
+- LAN native and default LAN web traffic are not encrypted.
+- The lockout applies to the whole host: someone who knows the ID can deliberately make failed attempts and briefly lock out
+  the legitimate user (denial of service). This is a deliberate trade-off against guessing attacks.
+- Screen capture, input injection and file transfer run with the privileges of the OS user.
+- On Windows, sensitive file permissions are not enforced with exact Unix `0600` semantics; the NTFS ACLs of the user profile must be kept intact.
 
-Güvenlik açığı bildirimlerinde parola, host secret, TLS private key, ekran görüntüsü veya gerçek kişisel dosya ekleme.
+When reporting a vulnerability, do not include passwords, host secrets, TLS private keys, screenshots or real personal files.

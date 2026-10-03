@@ -1,89 +1,136 @@
 name: build
 
+# Every push builds and packages all platforms (artifacts on the run page).
+# Pushing a tag like v1.2.3 also publishes a GitHub release with the installers.
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            host_ext: .exe
-            artifact: remotefriend-windows
-          - os: ubuntu-latest
-            host_ext: ""
-            artifact: remotefriend-linux
-          - os: macos-latest
-            artifact: remotefriend-macos
-    runs-on: ${{ matrix.os }}
+  linux:
+    # Oldest supported glibc: packages run on Ubuntu 22.04+, Debian 12+ and newer.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Linux sistem bagimliliklari
-        if: runner.os == 'Linux'
+      - name: System libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libegl1-mesa-dev libgtk-3-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
-
-      - name: Tum hedefleri kontrol et
-        run: cargo check --locked --workspace --all-targets
-
-      - name: Testler (protokol + host video/girdi)
-        run: cargo test --locked -p remote-friend-common -p remote-friend-host
-
-      - name: Release build
-        if: runner.os != 'macOS'
-        run: cargo build --locked --release -p remote-friend-host -p remote-friend-client -p remote-friend-rendezvous
-
-      - name: macOS universal build (Apple Silicon + Intel)
-        if: runner.os == 'macOS'
+          sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libegl1-mesa-dev libgtk-3-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev nasm
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      - run: cargo build --locked --release -p remotefriend -p remote-friend-host -p remote-friend-rendezvous
+      - name: Package (.deb + portable .tar.gz)
         run: |
-          rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target aarch64-apple-darwin
-          cargo build --locked --release -p remote-friend-host -p remote-friend-client --target x86_64-apple-darwin
-
-      - name: Windows paketi hazirla
-        if: runner.os == 'Windows'
-        run: |
-          mkdir dist
-          copy target\release\remote-friend-host.exe dist\
-          copy target\release\remote-friend-client.exe dist\
-          copy target\release\remote-friend-rendezvous.exe dist\
-          copy start_remotefriend_win64.bat dist\
-          
-          copy README.md dist\
-
-      - name: Linux paketi hazirla
-        if: runner.os == 'Linux'
-        run: |
-          mkdir dist
-          cp target/release/remote-friend-host target/release/remote-friend-client target/release/remote-friend-rendezvous dist/
-          cp README.md dist/
-
-      - name: macOS paketi hazirla
-        if: runner.os == 'macOS'
-        run: |
-          mkdir dist
-          for b in remote-friend-host remote-friend-client; do
-            lipo -create target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b -output dist/$b-macos
-          done
-          cp start_remotefriend_macos.command dist/
-          cp README.md dist/
-
+          cargo install cargo-deb --locked
+          cargo deb --no-build -p remotefriend -o target/remotefriend.deb
+          mkdir -p dist pkg/RemoteFriend
+          cp target/remotefriend.deb dist/RemoteFriend-linux-amd64.deb
+          cp target/release/remotefriend target/release/remote-friend-host pkg/RemoteFriend/
+          cp assets/remotefriend.desktop pkg/RemoteFriend/
+          cp assets/icon-256.png pkg/RemoteFriend/remotefriend.png
+          cp packaging/linux/install.sh pkg/RemoteFriend/
+          tar -C pkg -czf dist/RemoteFriend-linux-x86_64.tar.gz RemoteFriend
+          # Plain binaries for the VPS setup script and the terminal starter.
+          cp target/release/remote-friend-host target/release/remote-friend-rendezvous dist/
+          cp start_remotefriend_linux.sh dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: linux
           path: dist/
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      - run: cargo build --locked --release -p remotefriend -p remote-friend-host
+      - name: Installer (NSIS)
+        shell: pwsh
+        run: |
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            choco install nsis -y --no-progress
+            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          }
+          $version = (Select-String -Path crates/app/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          Push-Location packaging/windows
+          & $makensis /V2 "/DVERSION=$version" "/DSRC=..\..\target\release" remotefriend.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item packaging/windows/RemoteFriend-Setup.exe dist/
+          Copy-Item target/release/remote-friend-host.exe dist/
+          Copy-Item start_remotefriend_win64.bat dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      - name: Universal build (Apple Silicon + Intel)
+        run: |
+          cargo build --locked --release -p remotefriend -p remote-friend-host --target aarch64-apple-darwin
+          cargo build --locked --release -p remotefriend -p remote-friend-host --target x86_64-apple-darwin
+      - name: App bundle + disk image
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/app/Cargo.toml | head -1)
+          APP=dmg/RemoteFriend.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
+          lipo -create target/aarch64-apple-darwin/release/remotefriend target/x86_64-apple-darwin/release/remotefriend -output "$APP/Contents/MacOS/remotefriend"
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
+          # Ad-hoc signature (required to run on Apple Silicon; not notarized).
+          codesign --force --deep --sign - "$APP"
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname RemoteFriend -srcfolder dmg -ov -format UDZO dist/RemoteFriend-macOS.dmg
+          lipo -create target/aarch64-apple-darwin/release/remote-friend-host target/x86_64-apple-darwin/release/remote-friend-host -output dist/remote-friend-host-macos
+          codesign --force --sign - dist/remote-friend-host-macos
+          cp start_remotefriend_macos.command dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

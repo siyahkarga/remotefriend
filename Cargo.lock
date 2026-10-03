@@ -4040,24 +4040,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "remote-friend-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui",
- "image 0.25.10",
- "openh264",
- "remote-friend-common",
- "rfd",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "remote-friend-common"
 version = "0.1.0"
 dependencies = [
@@ -4120,6 +4102,26 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "remotefriend"
+version = "0.6.3"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui",
+ "image 0.25.10",
+ "openh264",
+ "remote-friend-common",
+ "remote-friend-host",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "winresource",
 ]
 
 [[package]]
@@ -6146,6 +6148,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

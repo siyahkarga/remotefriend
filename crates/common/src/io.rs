@@ -1,5 +1,5 @@
-//! Framed paket IO: her mesaj u32-LE uzunluk + bincode.
-//! Herhangi bir AsyncRead/AsyncWrite üzerinde çalışır (TCP, TLS, dial-back).
+//! Framed packet IO: each message is a u32 length prefix + bincode.
+//! Works over any AsyncRead/AsyncWrite (TCP, TLS, dial-back).
 
 use anyhow::Result;
 use anyhow::Context as _;
@@ -10,14 +10,14 @@ use super::{decode, encode, rv_decode, rv_encode, Packet, RvMsg};
 pub const MAX_MSG: usize = 24_000_000;
 pub const MAX_CONTROL_MSG: usize = 1_000_000;
 
-/// Ham framed blob: [uzunluk:u32][bayt] (relay kopyalama için, decode etmeden).
+/// Raw framed blob: [length:u32][bytes] (for relay copying, without decoding).
 pub async fn read_blob<R>(r: &mut R) -> Result<Vec<u8>>
 where
     R: AsyncReadExt + Unpin,
 {
     let len = r.read_u32().await? as usize;
     if len > MAX_MSG {
-        anyhow::bail!("blob çok büyük: {len}");
+        anyhow::bail!("blob too large: {len}");
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
@@ -28,7 +28,7 @@ pub async fn write_blob<W>(w: &mut W, blob: &[u8]) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    if blob.len() > MAX_MSG { anyhow::bail!("blob çok büyük: {}", blob.len()); }
+    if blob.len() > MAX_MSG { anyhow::bail!("blob too large: {}", blob.len()); }
     w.write_u32(blob.len() as u32).await?;
     w.write_all(blob).await?;
     Ok(())
@@ -41,7 +41,7 @@ where
     let max_len = max_len.min(MAX_MSG);
     let len = r.read_u32().await? as usize;
     if len > max_len {
-        anyhow::bail!("paket çok büyük: {len} (sınır {max_len})");
+        anyhow::bail!("packet too large: {len} (limit {max_len})");
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
@@ -61,7 +61,7 @@ where
 {
     let buf = encode(p)?;
     if buf.len() > MAX_MSG {
-        anyhow::bail!("paket çok büyük: {}", buf.len());
+        anyhow::bail!("packet too large: {}", buf.len());
     }
     w.write_u32(buf.len() as u32).await?;
     w.write_all(&buf).await?;
@@ -74,7 +74,7 @@ where
 {
     let len = r.read_u32().await? as usize;
     if len > MAX_CONTROL_MSG {
-        anyhow::bail!("rv paket çok büyük: {len}");
+        anyhow::bail!("rv packet too large: {len}");
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
@@ -87,20 +87,20 @@ where
 {
     let buf = rv_encode(m)?;
     if buf.len() > MAX_CONTROL_MSG {
-        anyhow::bail!("rv paket çok büyük: {}", buf.len());
+        anyhow::bail!("rv packet too large: {}", buf.len());
     }
     w.write_u32(buf.len() as u32).await?;
     w.write_all(&buf).await?;
     Ok(())
 }
 
-/// Web-oturum dial-back hattı: [tür:1B][uzunluk:u32][bayt].
-/// tür 0 = binary (video), 1 = text (JSON). Tarayıcı WS karşılıkları.
+/// Web-session dial-back line: [kind:1B][length:u32][bytes].
+/// kind 0 = binary (video), 1 = text (JSON). Map to browser WS message types.
 pub async fn write_kmsg<W>(w: &mut W, kind: u8, payload: &[u8]) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    if payload.len() > MAX_MSG { anyhow::bail!("kmsg çok büyük: {}", payload.len()); }
+    if payload.len() > MAX_MSG { anyhow::bail!("kmsg too large: {}", payload.len()); }
     w.write_u8(kind).await?;
     w.write_u32(payload.len() as u32).await?;
     w.write_all(payload).await?;
@@ -113,21 +113,21 @@ where
 {
     let kind = r.read_u8().await?;
     let len = r.read_u32().await? as usize;
-    // kmsg hem küçük JSON kontrollerini hem de video karelerini taşır. Tür bazlı
-    // daha dar JSON sınırı uç noktalarda ayrıca uygulanır.
+    // kmsg carries both small JSON control messages and video frames. A tighter
+    // per-kind JSON limit is enforced separately at the endpoints.
     if len > MAX_MSG {
-        anyhow::bail!("kmsg çok büyük: {len}");
+        anyhow::bail!("kmsg too large: {len}");
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
     Ok((kind, buf))
 }
 
-/// Önceden etiketlenmiş [tür, ...bayt] yazımı.
+/// Write a pre-tagged [kind, ...bytes] message.
 pub async fn write_kmsg_raw<W>(w: &mut W, tagged: &[u8]) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    let (kind, payload) = tagged.split_first().context("boş kmsg")?;
+    let (kind, payload) = tagged.split_first().context("empty kmsg")?;
     write_kmsg(w, *kind, payload).await
 }

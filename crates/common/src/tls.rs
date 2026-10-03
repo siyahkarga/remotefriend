@@ -1,12 +1,12 @@
-//! TLS yardımcısı: fingerprint-pin'li istemci + sunucu acceptor.
-//! Güvenlik modeli: istemci tam sertifika SHA-256 parmak izini pinler ve
-//! TLS handshake imzasını rustls ile doğrular. İsim/CA doğrulaması yerine pin kullanılır.
+//! TLS helpers: fingerprint-pinned client + server acceptor.
+//! Security model: the client pins the full certificate SHA-256 fingerprint and
+//! verifies the TLS handshake signature with rustls. Pinning replaces name/CA validation.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-/// rustls kripto sağlayıcısını açıkça kur (ring). TLS kullanan her binary
-/// başında bir kez çağırılmalı (yoksa "Could not determine CryptoProvider").
+/// Explicitly install the rustls crypto provider (ring). Every binary that uses TLS
+/// must call this once at startup (otherwise "Could not determine CryptoProvider").
 pub fn init_crypto() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
@@ -33,12 +33,12 @@ impl rustls::client::danger::ServerCertVerifier for FpVerifier {
                 if norm(&got) == norm(fp) {
                     Ok(rustls::client::danger::ServerCertVerified::assertion())
                 } else {
-                    tracing::warn!("SERTİFİKA UYUMSUZLUĞU! (MITM olabilir!)");
-                    Err(rustls::Error::General("sertifika fingerprint uyuşmadı".into()))
+                    tracing::warn!("CERTIFICATE MISMATCH! (possible MITM!)");
+                    Err(rustls::Error::General("certificate fingerprint mismatch".into()))
                 }
             }
             None => Err(rustls::Error::General(
-                "sunucu fingerprint yok: RF_RV_FP gerekli".into(),
+                "no server fingerprint: RF_RV_FP is required".into(),
             )),
         }
     }
@@ -80,10 +80,10 @@ impl rustls::client::danger::ServerCertVerifier for FpVerifier {
     }
 }
 
-/// Sunucuya TLS ile bağlan.
-/// fp verildiyse sertifika parmak izi pinlenir (self-signed için).
-/// fp yoksa sistem kök sertifikalarıyla normal doğrulama yapılır
-/// (domain + Let's Encrypt varsa parmak iziyle uğraşmaya gerek yok).
+/// Connect to the server over TLS.
+/// If fp is given, the certificate fingerprint is pinned (for self-signed certificates).
+/// Without fp, normal validation against the bundled root certificates is used
+/// (with a domain + Let's Encrypt there is no need to deal with fingerprints).
 pub async fn tls_connect(
     addr: &str,
     server_name: &str,
@@ -94,8 +94,8 @@ pub async fn tls_connect(
         tokio::net::TcpStream::connect(addr),
     )
     .await
-    .with_context(|| format!("TCP bağlantı zaman aşımı: {addr}"))?
-    .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
+    .with_context(|| format!("TCP connection timed out: {addr}"))?
+    .with_context(|| format!("TCP connection failed: {addr}"))?;
     let config = match fp {
         Some(fp) => rustls::ClientConfig::builder()
             .dangerous()
@@ -111,19 +111,19 @@ pub async fn tls_connect(
     };
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|_| anyhow::anyhow!("geçersiz sunucu adı"))?;
+        .map_err(|_| anyhow::anyhow!("invalid server name"))?;
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
         connector.connect(name, stream),
     )
     .await
-    .context("TLS handshake zaman aşımı")?
-    .context("TLS handshake başarısız")
+    .context("TLS handshake timed out")?
+    .context("TLS handshake failed")
 }
 
-/// Sunucunun o anki sertifika parmak izini DOĞRULAMADAN okur.
-/// SADECE TOFU (ilk bağlanışta kullanıcıya gösterip onay almak) için kullanılır.
-/// Bu bağlantı üzerinden hassas veri gönderilmez; onay sonrası pinli bağlanılır.
+/// Reads the server's current certificate fingerprint WITHOUT verifying it.
+/// ONLY for TOFU (show it to the user on first connection and ask for confirmation).
+/// No sensitive data is sent over this connection; after confirmation a pinned connection is used.
 pub async fn fetch_server_fingerprint(addr: &str, server_name: &str) -> Result<String> {
     #[derive(Debug)]
     struct AcceptAny;
@@ -166,30 +166,30 @@ pub async fn fetch_server_fingerprint(addr: &str, server_name: &str) -> Result<S
         tokio::net::TcpStream::connect(addr),
     )
     .await
-    .with_context(|| format!("TCP bağlantı zaman aşımı: {addr}"))?
-    .with_context(|| format!("TCP bağlanamadı: {addr}"))?;
+    .with_context(|| format!("TCP connection timed out: {addr}"))?
+    .with_context(|| format!("TCP connection failed: {addr}"))?;
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAny))
         .with_no_client_auth();
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|_| anyhow::anyhow!("geçersiz sunucu adı"))?;
+        .map_err(|_| anyhow::anyhow!("invalid server name"))?;
     let tls = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         connector.connect(name, stream),
     )
     .await
-    .context("TLS handshake zaman aşımı")?
-    .context("TLS handshake başarısız")?;
+    .context("TLS handshake timed out")?
+    .context("TLS handshake failed")?;
     let (_, conn) = tls.get_ref();
     let cert = conn
         .peer_certificates()
         .and_then(|certs| certs.first())
-        .context("sunucu sertifika göndermedi")?;
+        .context("server did not send a certificate")?;
     Ok(super::fingerprint_full(cert.as_ref()))
 }
-/// Sunucu tarafı TLS acceptor (sertifika dosyalarından).
+/// Server-side TLS acceptor (from certificate files).
 pub fn tls_acceptor(
     cert_path: &str,
     key_path: &str,
@@ -198,27 +198,27 @@ pub fn tls_acceptor(
     use std::io::BufReader;
 
     let cert_file = std::fs::File::open(cert_path)
-        .with_context(|| format!("sertifika açılamadı: {cert_path}"))?;
+        .with_context(|| format!("could not open certificate: {cert_path}"))?;
     let mut reader = BufReader::new(cert_file);
     let certs: Vec<_> = certs(&mut reader).collect::<Result<_, _>>()?;
     if certs.is_empty() {
-        anyhow::bail!("sertifika dosyasında cert yok");
+        anyhow::bail!("no certificate found in certificate file");
     }
     let key_file =
-        std::fs::File::open(key_path).with_context(|| format!("anahtar açılamadı: {key_path}"))?;
+        std::fs::File::open(key_path).with_context(|| format!("could not open key: {key_path}"))?;
     let mut reader = BufReader::new(key_file);
     let keys = pkcs8_private_keys(&mut reader).collect::<Result<Vec<_>, _>>()?;
     if keys.is_empty() {
         let key_file = std::fs::File::open(key_path)?;
         let mut reader = BufReader::new(key_file);
         let rsa_keys = rsa_private_keys(&mut reader).collect::<Result<Vec<_>, _>>()?;
-        let first = rsa_keys.into_iter().next().context("özel anahtar bulunamadı")?;
+        let first = rsa_keys.into_iter().next().context("private key not found")?;
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, rustls::pki_types::PrivateKeyDer::Pkcs1(first))?;
         return Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)));
     }
-    let key = keys.into_iter().next().context("özel anahtar bulunamadı")?;
+    let key = keys.into_iter().next().context("private key not found")?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, rustls::pki_types::PrivateKeyDer::Pkcs8(key))?;

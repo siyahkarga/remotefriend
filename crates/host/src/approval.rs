@@ -1,12 +1,16 @@
-//! Operatör onayı (terminalde E/H). Tek stdin okuyucu: zaman aşımına uğrayan bir
-//! sorunun bekleyen okuma thread'i sonraki cevabı "çalamaz".
+//! Connection approval. In the desktop app the UI shows Allow / Always allow / Deny;
+//! on the terminal the operator types A / P / N. A single stdin reader thread is used so
+//! a timed-out question can never "steal" the answer to the next one.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::status::{self, Answer, PromptKind};
+
 static LINES: OnceLock<Mutex<Receiver<String>>> = OnceLock::new();
 static ASK_LOCK: Mutex<()> = Mutex::new(());
+const ASK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn lines() -> &'static Mutex<Receiver<String>> {
     LINES.get_or_init(|| {
@@ -19,7 +23,7 @@ fn lines() -> &'static Mutex<Receiver<String>> {
                 loop {
                     line.clear();
                     match stdin.read_line(&mut line) {
-                        Ok(0) | Err(_) => break, // stdin yok (servis olarak çalışıyor)
+                        Ok(0) | Err(_) => break, // no stdin (service / desktop app)
                         Ok(_) => {
                             if tx.send(line.trim().to_string()).is_err() {
                                 break;
@@ -28,27 +32,26 @@ fn lines() -> &'static Mutex<Receiver<String>> {
                     }
                 }
             })
-            .expect("stdin thread başlatılamadı");
+            .expect("failed to start stdin thread");
         Mutex::new(rx)
     })
 }
 
 fn yes(s: &str) -> bool {
-    matches!(s.to_lowercase().as_str(), "e" | "evet" | "y" | "yes")
-}
-
-/// Terminalde evet/hayır sor. Zaman aşımında ya da stdin yoksa HAYIR.
-pub(crate) fn prompt(question: &str, timeout: Duration) -> bool {
-    prompt_line(question, timeout).is_some_and(|l| yes(&l))
+    matches!(s.to_lowercase().as_str(), "y" | "yes" | "a" | "allow" | "e" | "evet")
 }
 
 fn notify_desktop(peer: &str) {
-    // Mesaj komut satırına/AppleScript'e gider: tırnak ve ters bölü temizlenir.
+    // The text ends up on a command line / in AppleScript: strip quotes and backslashes.
     let peer: String = peer.chars().filter(|c| !matches!(c, '"' | '\\' | '\'' | '`' | '$')).collect();
-    let msg = format!("{peer} bağlanmak istiyor. Onay için host terminalinde E tuşuna bas.");
+    let msg = if status::ui_prompts() {
+        format!("{peer} wants to connect. Open RemoteFriend to allow or deny.")
+    } else {
+        format!("{peer} wants to connect. Answer in the RemoteFriend terminal.")
+    };
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("notify-send")
-        .args(["-u", "critical", "-a", "RemoteFriend", "RemoteFriend: bağlantı isteği", &msg])
+        .args(["-u", "critical", "-a", "RemoteFriend", "RemoteFriend: connection request", &msg])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -62,50 +65,69 @@ fn notify_desktop(peer: &str) {
     let _ = msg;
 }
 
-/// Operatörün kararı.
+/// The operator's decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Decision {
+pub enum Decision {
     Deny,
-    /// Yalnızca bu bağlantı.
+    /// This connection only.
     Once,
-    /// Bu cihaz bundan sonra onaysız bağlanabilir (parola yine gerekir).
+    /// This device may connect without approval from now on (password still required).
     Always,
 }
 
-/// Bağlantı isteğini operatöre sor (parola zaten doğrulandı).
-/// `can_remember`: cihaz kalıcı izin belirtecini saklayabiliyorsa (tarayıcı) "K" seçeneği sunulur.
+/// Ask the operator about a connection request (the password was already verified).
+/// `can_remember`: the client can store a device token (browser), so "always" is offered.
 pub(crate) fn ask(peer: &str, can_remember: bool) -> Decision {
     if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false) {
-        println!("*** {peer}: otomatik kabul (REMOTE_FRIEND_AUTO_ACCEPT=1)");
+        status::notice(format!("{peer}: accepted automatically (REMOTE_FRIEND_AUTO_ACCEPT=1)"));
         return Decision::Once;
     }
     notify_desktop(peer);
-    let options = if can_remember {
-        "E = bu sefer / K = KALICI (bu cihaz bir daha sormadan bağlanır) / H = hayır"
-    } else {
-        "E = evet / H = hayır"
-    };
-    let answer = prompt_line(
-        &format!("*** Bağlantı isteği: {peer}\n*** {options}  (30 sn, varsayılan HAYIR)"),
-        Duration::from_secs(30),
-    );
-    let decision = match answer.as_deref().map(|s| s.to_lowercase()) {
-        Some(a) if can_remember && matches!(a.as_str(), "k" | "kalıcı" | "kalici" | "a" | "always") => Decision::Always,
-        Some(a) if yes(&a) || matches!(a.as_str(), "k" | "kalıcı" | "kalici") => Decision::Once,
-        _ => Decision::Deny,
-    };
-    println!(
-        "*** {peer}: {}",
-        match decision {
-            Decision::Deny => "RET",
-            Decision::Once => "KABUL (bu sefer)",
-            Decision::Always => "KABUL (kalıcı: bu cihaz bir daha sormadan bağlanır)",
+    let decision = if status::ui_prompts() {
+        match status::ask_ui(PromptKind::Connection { peer: peer.to_string(), can_remember }, ASK_TIMEOUT) {
+            Some(Answer::Connection(d)) => d,
+            _ => Decision::Deny,
         }
-    );
+    } else {
+        let options = if can_remember {
+            "A = allow once / P = allow permanently (this device won't be asked again) / N = deny"
+        } else {
+            "A = allow / N = deny"
+        };
+        let answer = prompt_line(
+            &format!("*** Connection request: {peer}\n*** {options}  (30 s, default: deny)"),
+            ASK_TIMEOUT,
+        );
+        match answer.as_deref().map(|s| s.to_lowercase()) {
+            Some(a) if can_remember && matches!(a.as_str(), "p" | "permanent" | "always" | "k") => Decision::Always,
+            Some(a) if yes(&a) || matches!(a.as_str(), "p" | "k") => Decision::Once,
+            _ => Decision::Deny,
+        }
+    };
+    status::notice(format!(
+        "{peer}: {}",
+        match decision {
+            Decision::Deny => "denied",
+            Decision::Once => "allowed (this time)",
+            Decision::Always => "allowed permanently (this device won't be asked again)",
+        }
+    ));
     decision
 }
 
-/// Satırı döndüren soru (zaman aşımı / stdin yok -> None).
+/// First connection to a relay server: trust its certificate fingerprint?
+pub(crate) fn trust_server(addr: &str, fingerprint: &str) -> bool {
+    if status::ui_prompts() {
+        let kind = PromptKind::TrustServer { addr: addr.to_string(), fingerprint: fingerprint.to_string() };
+        return matches!(status::ask_ui(kind, Duration::from_secs(300)), Some(Answer::Trust(true)));
+    }
+    let question = format!(
+        "*** First connection to server {addr}\n*** Certificate fingerprint: {fingerprint}\n*** Does it match the fingerprint printed at the end of the VPS setup? Trust and remember it? (y/n, 120 s)"
+    );
+    prompt_line(&question, Duration::from_secs(120)).is_some_and(|l| yes(&l))
+}
+
+/// Ask a terminal question and return the answer line (timeout / no stdin -> None).
 fn prompt_line(question: &str, timeout: Duration) -> Option<String> {
     let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let rx = lines().lock().unwrap_or_else(|e| e.into_inner());
@@ -114,21 +136,21 @@ fn prompt_line(question: &str, timeout: Duration) -> Option<String> {
     match rx.recv_timeout(timeout) {
         Ok(line) => Some(line),
         Err(RecvTimeoutError::Timeout) => {
-            println!("*** zaman aşımı: HAYIR sayıldı");
+            println!("*** timed out: treated as NO");
             None
         }
         Err(RecvTimeoutError::Disconnected) => {
-            println!("*** terminal girişi yok: onay verilemedi (güvenilir cihaz ya da REMOTE_FRIEND_AUTO_ACCEPT=1)");
+            println!("*** no terminal input: cannot ask (use the desktop app, trusted devices or REMOTE_FRIEND_AUTO_ACCEPT=1)");
             None
         }
     }
 }
 
-// ---- güvenilir cihazlar ----
+// ---- trusted devices ----
 //
-// Operatör bir tarayıcıyı "K" ile kalıcı onaylarsa cihaza 256 bit belirteç verilir.
-// Host yalnızca belirtecin SHA-256 özetini saklar (~/.config/remotefriend/trusted_devices.json, 0600).
-// Belirteç parolanın yerine geçmez; yalnızca terminal onayını atlar.
+// When the operator allows a browser permanently, the device receives a 256-bit token.
+// The host stores only its SHA-256 (~/.config/remotefriend/trusted_devices.json, 0600).
+// The token does not replace the password; it only skips the approval step.
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Device {
@@ -153,11 +175,11 @@ fn load_devices() -> Vec<Device> {
 fn save_devices(list: &[Device]) {
     let data = serde_json::to_vec_pretty(list).unwrap_or_default();
     if let Err(e) = remote_friend_common::identity::write_private(&devices_path(), &data) {
-        tracing::warn!("güvenilir cihaz listesi yazılamadı: {e}");
+        tracing::warn!("could not write trusted device list: {e}");
     }
 }
 
-/// Yeni güvenilir cihaz ekle, istemciye verilecek belirteci döndür.
+/// Add a trusted device and return the token to hand to the client.
 pub(crate) fn trust_device(label: &str) -> String {
     let token = remote_friend_common::new_secret_hex();
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -177,7 +199,7 @@ pub(crate) fn trust_device(label: &str) -> String {
     token
 }
 
-/// Belirteç güvenilir bir cihaza mı ait?
+/// Does the token belong to a trusted device?
 pub(crate) fn is_trusted(token: &str) -> bool {
     if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return false;
@@ -189,11 +211,11 @@ pub(crate) fn is_trusted(token: &str) -> bool {
         .fold(false, |found, d| found | remote_friend_common::constant_time_eq(d.hash.as_bytes(), hash.as_bytes()))
 }
 
-pub(crate) fn trusted_count() -> usize {
+pub fn trusted_count() -> usize {
     load_devices().len()
 }
 
-/// Tüm güvenilir cihazları unut. Silinen sayıyı döndürür.
+/// Forget all trusted devices. Returns how many were removed.
 pub(crate) fn forget_devices() -> usize {
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let n = load_devices().len();
@@ -201,15 +223,15 @@ pub(crate) fn forget_devices() -> usize {
     n
 }
 
-// ---- yeniden bağlanma belirteci ----
+// ---- resume token ----
 //
-// Onaylanmış bir oturum kısa süre kopunca (telefon ağ değiştirdi, sekme arka plana gitti)
-// host başında birinin tekrar E'ye basması gerekmesin. Belirteç tek kullanımlıktır,
-// 10 dk geçerlidir ve parolayla BİRLİKTE gerekir (parolanın yerine geçmez).
+// When an approved session drops briefly (phone switched networks, tab went to the
+// background) nobody should have to approve it again. Single use, valid for 10 minutes,
+// and required TOGETHER with the password (it does not replace it).
 
 static RESUME: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
 const RESUME_TTL: Duration = Duration::from_secs(600);
-/// Röle yolunda belirteç parolanın önüne eklenir: "rf-resume:<32 hex>:<parola>".
+/// On the relay path the token is prefixed to the password: "rf-resume:<32 hex>:<password>".
 const RESUME_PREFIX: &str = "rf-resume:";
 const DEVICE_PREFIX: &str = "rf-dev:";
 
@@ -224,7 +246,7 @@ pub(crate) fn grant_resume() -> String {
     token
 }
 
-/// Geçerliyse belirteci tüketir ve true döner.
+/// Consumes the token if valid and returns true.
 pub(crate) fn consume_resume(token: &str) -> bool {
     if token.len() != 32 {
         return false;
@@ -243,7 +265,7 @@ pub(crate) fn consume_resume(token: &str) -> bool {
     }
 }
 
-/// Röle kimlik verisi: [rf-resume:<32hex>:][rf-dev:<64hex>:]<parola>
+/// Relay auth data: [rf-resume:<32hex>:][rf-dev:<64hex>:]<password>
 pub(crate) struct RelayAuth<'a> {
     pub password: &'a str,
     pub resume: Option<&'a str>,

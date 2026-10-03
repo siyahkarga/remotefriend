@@ -1,22 +1,22 @@
-//! Parola doğrulama + kaba kuvvet sınırı (tüm yollar: LAN web, native, internet).
+//! Password check + brute-force limits (all paths: LAN web, native, internet).
 //!
-//! - Kaynak (IP) başına: 60 sn içinde 5 hata → o kaynak 1 dk kilitli; tekrarında 2/4/8/16 dk.
-//!   1 saat hatasız geçince kilit kademesi sıfırlanır. Böylece ID'yi bilen biri kendi IP'sini
-//!   kilitler, sahibini değil.
-//! - Genel üst sınır (dağıtık deneme): 10 dk içinde 30 hata → herkes 5 dk kilitli.
-//! - Kilit süresince parola HİÇ değerlendirilmez (aksi halde kilit, denemeye açık bir kâhin olurdu).
+//! - Per source (IP): 5 failures within 60 s lock that source for 1 min, then 2/4/8/16 min.
+//!   The level resets after an hour without failures, so someone who knows the ID locks out
+//!   their own IP, not the owner.
+//! - Global cap (distributed guessing): 30 failures within 10 min lock everyone for 5 min.
+//! - While locked, the password is NOT evaluated at all (otherwise the lock would be an oracle).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 struct Secret {
     value: String,
-    /// Üretilmiş parola: tire/boşluk/büyük-küçük harf farkı yok sayılır.
+    /// Generated password: dashes, spaces and letter case are ignored.
     generated: bool,
 }
 
-static SECRET: OnceLock<Secret> = OnceLock::new();
+static SECRET: RwLock<Option<Secret>> = RwLock::new(None);
 
 #[derive(Default)]
 struct Source {
@@ -48,7 +48,7 @@ const GLOBAL_LOCK: Duration = Duration::from_secs(300);
 pub(crate) enum Auth {
     Ok,
     Bad,
-    /// Kalan kilit süresi (sn).
+    /// Remaining lock time (seconds).
     Locked(u64),
 }
 
@@ -56,7 +56,7 @@ fn password_path() -> std::path::PathBuf {
     remote_friend_common::identity::config_dir().join("password")
 }
 
-/// Kayıtlı (kalıcı) üretilmiş parolayı oku; biçimi bozuksa yok say.
+/// Read the saved (persistent) generated password; ignore it if malformed.
 fn load_saved_password() -> Option<String> {
     let p = std::fs::read_to_string(password_path()).ok()?;
     let p = p.trim().to_string();
@@ -64,11 +64,11 @@ fn load_saved_password() -> Option<String> {
     (n.len() == 10 && n.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(p)
 }
 
-/// Parolayı bir kez ayarla. Döner: (gösterilecek parola, ortamdan mı geldi).
+/// Set up the password once. Returns (password to show, came from the environment).
 ///
-/// Öncelik: REMOTE_FRIEND_PASS > kayıtlı kalıcı parola > yeni üretilen (kaydedilir).
-/// `new_password` (ya da RF_NEW_PASSWORD=1) kayıtlı parolayı yeniler.
-/// RF_EPHEMERAL_PASSWORD=1: her açılışta yeni parola (kaydedilmez).
+/// Priority: REMOTE_FRIEND_PASS > saved persistent password > newly generated (saved).
+/// `new_password` (or RF_NEW_PASSWORD=1) renews the saved password.
+/// RF_EPHEMERAL_PASSWORD=1: a new password on every start (not saved).
 pub(crate) fn init(new_password: bool) -> (String, bool) {
     let configured = std::env::var("REMOTE_FRIEND_PASS").ok().filter(|s| !s.trim().is_empty());
     let ephemeral = std::env::var("RF_EPHEMERAL_PASSWORD").map(|v| v == "1").unwrap_or(false);
@@ -81,9 +81,7 @@ pub(crate) fn init(new_password: bool) -> (String, bool) {
                 Some(p) => p,
                 None => {
                     let p = remote_friend_common::new_session_password();
-                    if let Err(e) = remote_friend_common::identity::write_private(&password_path(), p.as_bytes()) {
-                        tracing::warn!("parola kaydedilemedi (bu açılışa özel kalacak): {e}");
-                    }
+                    save_password(&p);
                     p
                 }
             };
@@ -91,15 +89,37 @@ pub(crate) fn init(new_password: bool) -> (String, bool) {
         }
     };
     if !secret.generated && secret.value.chars().count() < 10 {
-        tracing::warn!("zayıf REMOTE_FRIEND_PASS: en az 10 karakter kullan");
+        tracing::warn!("weak REMOTE_FRIEND_PASS: use at least 10 characters");
     }
     let shown = secret.value.clone();
-    let _ = SECRET.set(secret);
+    *SECRET.write().unwrap_or_else(|e| e.into_inner()) = Some(secret);
     (shown, configured.is_some())
 }
 
+fn save_password(p: &str) {
+    if let Err(e) = remote_friend_common::identity::write_private(&password_path(), p.as_bytes()) {
+        tracing::warn!("could not save the password (it will only last until restart): {e}");
+    }
+}
+
+/// Generate and save a new password (desktop app "new password" button).
+/// Returns None when the password comes from REMOTE_FRIEND_PASS.
+pub fn renew_password() -> Option<String> {
+    let mut guard = SECRET.write().unwrap_or_else(|e| e.into_inner());
+    if guard.as_ref().is_some_and(|s| !s.generated) {
+        return None;
+    }
+    let p = remote_friend_common::new_session_password();
+    save_password(&p);
+    *guard = Some(Secret { value: p.clone(), generated: true });
+    drop(guard);
+    crate::status::update(|s| s.password = p.clone());
+    Some(p)
+}
+
 fn matches(candidate: &str) -> bool {
-    let Some(secret) = SECRET.get() else { return false };
+    let guard = SECRET.read().unwrap_or_else(|e| e.into_inner());
+    let Some(secret) = guard.as_ref() else { return false };
     if secret.generated {
         let a = remote_friend_common::normalize_password(candidate);
         let b = remote_friend_common::normalize_password(&secret.value);
@@ -109,7 +129,7 @@ fn matches(candidate: &str) -> bool {
     }
 }
 
-/// Kaynak anahtarı: "1.2.3.4:5678" -> "1.2.3.4"; diğer metinler olduğu gibi.
+/// Source key: "1.2.3.4:5678" -> "1.2.3.4"; other text as is.
 pub(crate) fn source_key(peer: &str) -> String {
     peer.parse::<std::net::SocketAddr>()
         .map(|a| a.ip().to_string())
@@ -147,7 +167,7 @@ pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
         return Auth::Ok;
     }
 
-    // Hatalı deneme: kaynak + genel sayaç.
+    // Failed attempt: per-source and global counters.
     let src = lim.sources.entry(key.clone()).or_default();
     while src.fails.front().is_some_and(|t| now.duration_since(*t) > WINDOW) {
         src.fails.pop_front();
@@ -159,8 +179,7 @@ pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
         src.locks += 1;
         src.fails.clear();
         src.locked_until = Some(now + Duration::from_secs(60 * mins));
-        tracing::warn!("{key}: çok fazla hatalı parola; {mins} dk kilit");
-        println!("!!! {key}: çok fazla hatalı parola denemesi; bu kaynak {mins} dakika kilitlendi.");
+        crate::status::notice(format!("{key}: too many wrong passwords; this source is locked for {mins} min"));
     }
     while lim.global_fails.front().is_some_and(|t| now.duration_since(*t) > GLOBAL_WINDOW) {
         lim.global_fails.pop_front();
@@ -169,9 +188,9 @@ pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
     if lim.global_fails.len() >= GLOBAL_MAX_FAILS {
         lim.global_fails.clear();
         lim.global_until = Some(now + GLOBAL_LOCK);
-        println!("!!! Çok sayıda kaynaktan hatalı parola: tüm bağlantılar 5 dakika kilitlendi.");
+        crate::status::notice("Wrong passwords from many sources: all connections locked for 5 min");
     }
-    // Eski kayıtları temizle (bellek sınırı).
+    // Prune old entries (memory bound).
     if lim.sources.len() > 1024 {
         lim.sources.retain(|_, s| s.locked_until.is_some_and(|u| u > now) || s.last_fail.is_some_and(|t| now.duration_since(t) < WINDOW));
     }
@@ -184,13 +203,13 @@ mod tests {
 
     #[test]
     fn per_source_lockout_does_not_lock_others() {
-        let _ = SECRET.set(Secret { value: "abcde-23456".into(), generated: true });
+        *SECRET.write().unwrap() = Some(Secret { value: "abcde-23456".into(), generated: true });
         for _ in 0..MAX_FAILS {
             assert!(matches!(check_password("yanlis", "10.0.0.1:1000"), Auth::Bad));
         }
-        // Saldırganın kaynağı kilitli: doğru parola bile değerlendirilmez.
+        // The attacker's source is locked: even the right password is not evaluated.
         assert!(matches!(check_password("abcde-23456", "10.0.0.1:2000"), Auth::Locked(_)));
-        // Başka kaynak etkilenmez; üretilmiş parolada biçim farkı önemsiz.
+        // Other sources are unaffected; formatting differences don't matter.
         assert!(matches!(check_password(" ABCDE 23456 ", "10.0.0.2:1000"), Auth::Ok));
     }
 
@@ -198,6 +217,6 @@ mod tests {
     fn source_key_strips_port() {
         assert_eq!(source_key("1.2.3.4:5678"), "1.2.3.4");
         assert_eq!(source_key("[::1]:80"), "::1");
-        assert_eq!(source_key("tarayıcı 1.2.3.4"), "tarayıcı 1.2.3.4");
+        assert_eq!(source_key("browser 1.2.3.4"), "browser 1.2.3.4");
     }
 }

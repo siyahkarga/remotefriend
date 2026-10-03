@@ -1,53 +1,53 @@
-# VPS kurulumu (Ubuntu/Debian)
+# VPS setup (Ubuntu/Debian)
 
-> Güvenlik sınırı: röle uçtan uca şifreli değildir. VPS'i yöneten ya da ele geçiren kişi görüntü,
-> girdi, parola ve dosya içeriğini teknik olarak görebilir. Yalnızca kendi/güvendiğin sunucuyu kullan.
+> Security boundary: the relay is not end-to-end encrypted. Anyone who runs or compromises the VPS can
+> technically see the video, input, password and file contents. Only use a server you own or trust.
 
-## Tek komut (kurulum ve güncelleme)
+## One command (install and update)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/setup-vps.sh | sudo bash
 ```
 
-Betik şunları yapar (tekrar çalıştırmak güvenlidir):
+The script does the following (it is safe to re-run):
 
-1. `nginx`, `certbot`, `ufw` kurar; `remotefriend` sistem kullanıcısını oluşturur.
-2. Son sürüm `remote-friend-rendezvous` dosyasını indirir (önce servisi durdurur, atomik değiştirir).
-3. Röle TLS sertifikasını (`/opt/remotefriend/cert.pem`, port 33202) **korur**; yoksa üretir.
-4. Dosya izinlerini her seferinde onarır.
-5. systemd servisini kurar. Servis sertifikayı `LoadCredential=` ile alır: systemd dosyayı root
-   olarak okuyup servise verir, dosya izinleri yüzünden servis düşmez.
-6. nginx'i kurar ve **Let's Encrypt HTTPS** alır. Alan adın yoksa `<ip-tireli>.sslip.io` kullanılır
-   (ör. `169-58-37-61.sslip.io`, ayar gerekmez). Sertifika otomatik yenilenir.
-7. Güvenlik duvarında 80, 443 ve 33202'yi açar; sonunda web adresini ve parmak izini yazar.
+1. Installs `nginx`, `certbot` and `ufw`; creates the `remotefriend` system user.
+2. Downloads the latest `remote-friend-rendezvous` binary (stops the service first, replaces it atomically).
+3. **Keeps** the relay TLS certificate (`/opt/remotefriend/cert.pem`, port 33202); generates one if missing.
+4. Repairs file permissions on every run.
+5. Installs the systemd service. The service receives the certificate via `LoadCredential=`: systemd
+   reads the file as root and hands it to the service, so file permissions can't take the service down.
+6. Sets up nginx and obtains **Let's Encrypt HTTPS**. If you have no domain, `<ip-with-dashes>.sslip.io`
+   is used (e.g. `169-58-37-61.sslip.io`, no setup needed). The certificate renews automatically.
+7. Opens 80, 443 and 33202 in the firewall; at the end it prints the web address and the fingerprint.
 
-Seçenekler:
+Options:
 
 ```bash
-# kendi alan adın (A kaydı bu VPS'i göstermeli)
-curl -sL .../setup-vps.sh | sudo DOMAIN=uzak.ornek.com EMAIL=sen@ornek.com bash
-# IP otomatik bulunamazsa
+# your own domain (its A record must point to this VPS)
+curl -sL .../setup-vps.sh | sudo DOMAIN=remote.example.com EMAIL=you@example.com bash
+# if the IP can't be detected automatically
 curl -sL .../setup-vps.sh | sudo SERVER_IP=1.2.3.4 bash
-# belirli sürüm
+# specific release
 curl -sL .../setup-vps.sh | sudo VERSION=v0.6.2 bash
 ```
 
-Bulut sağlayıcının güvenlik grubunda da **80, 443 ve 33202/TCP** açık olmalı (80, sertifika alımı için).
+Your cloud provider's security group must also allow **80, 443 and 33202/TCP** (80 is needed to obtain the certificate).
 
-## Host ayarı
+## Host setup
 
-Host başlatıcısı sunucuyu bir kez sorar: `VPS_IP:33202`. İlk bağlanışta host terminali parmak
-izini sorar; kurulumun sonunda yazan parmak iziyle aynıysa **E** de. Telefonda kurulumun yazdığı
-`https://…` adresini aç.
+The host starter asks for the server once: `VPS_IP:33202`. On first connection the host asks you to
+confirm the relay fingerprint; accept it only if it matches the fingerprint printed at the end of setup.
+On your phone, open the `https://…` address printed by the setup script.
 
-## Sorun giderme
+## Troubleshooting
 
-### `Permission denied (os error 13)` ile servis sürekli yeniden başlıyor
+### Service keeps restarting with `Permission denied (os error 13)`
 
-Neden: servis kullanıcısı (`remotefriend`) TLS anahtarını ya da kayıt dosyasını okuyamıyor
-(ör. sertifika elle yeniden üretildi / kopyalandı ve sahibi `root`, izni `600` kaldı).
+Cause: the service user (`remotefriend`) can't read the TLS key or the registry file
+(e.g. the certificate was regenerated/copied by hand and left owned by `root` with mode `600`).
 
-En kolayı kurulum betiğini yeniden çalıştırmak. Elle düzeltmek için **her komutu ayrı satırda** çalıştır:
+The easiest fix is to re-run the setup script. To fix it by hand, run **each command on its own line**:
 
 ```bash
 sudo curl -fsSL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/remotefriend.service -o /etc/systemd/system/remotefriend.service
@@ -61,26 +61,26 @@ sudo systemctl restart remotefriend
 sudo journalctl -u remotefriend -n 30 --no-pager
 ```
 
-Hangi dosyanın okunamadığını görmek için günlüğün **tamamına** bak (`-n 30`); hata satırının
-üstünde `sertifika açılamadı: …`, `anahtar açılamadı: …` ya da `host kayıt dosyası okunamadı: …` yazar.
+To see which file can't be read, look at the **whole** log (`-n 30`); above the error line you'll see
+`could not open certificate: …`, `could not open key: …` or `could not read host registry file: …`.
 
-### HTTPS alınamadı
+### HTTPS could not be obtained
 
-`/tmp/rf-certbot.log` dosyasına bak. En sık neden: 80 numaralı port bulut güvenlik grubunda kapalı
-ya da başka bir web sunucusu 80'i kullanıyor. Düzeltip betiği yeniden çalıştır.
+Check `/tmp/rf-certbot.log`. The most common cause: port 80 is closed in the cloud security group,
+or another web server is using port 80. Fix it and re-run the script.
 
-### "bu ID başka bir host anahtarına kayıtlı"
+### "this ID is registered to a different host key"
 
-Host'un `~/.config/remotefriend/host_secret` dosyası değişti/silindi. Eski kaydı kaldır:
+The host's `~/.config/remotefriend/host_secret` file changed or was deleted. Remove the old entry:
 
 ```bash
 sudo systemctl stop remotefriend
-sudo nano /var/lib/remotefriend/hosts.json   # ilgili 9 haneli ID satırını sil
+sudo nano /var/lib/remotefriend/hosts.json   # delete the line with the 9-digit ID in question
 sudo systemctl start remotefriend
 ```
 
-## Bakım
+## Maintenance
 
-- `/var/lib/remotefriend/hosts.json` dosyasını gizli tut ve yedekle (host kimlik sırları içerir).
-- Röle sertifikası değişirse host'lar parmak izini yeniden sorar; yeni parmak izini güvenli kanaldan doğrula.
-- `RF_PLAIN_OK=1` değerini üretim sunucusunda kullanma.
+- Keep `/var/lib/remotefriend/hosts.json` private and back it up (it contains host identity secrets).
+- If the relay certificate changes, hosts will ask for the fingerprint again; verify the new fingerprint over a trusted channel.
+- Do not use `RF_PLAIN_OK=1` on a production server.

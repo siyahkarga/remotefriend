@@ -1,17 +1,17 @@
-//! Uzak girdiyi yerel masaüstüne uygula.
+//! Apply remote input to the local desktop.
 //!
-//! - Linux Wayland (GNOME/KDE): RemoteDesktop portalı (`wayland.rs`).
-//! - Linux X11, Windows, macOS: enigo (ayrı thread, sıralı).
+//! - Linux Wayland (GNOME/KDE): RemoteDesktop portal (`wayland.rs`).
+//! - Linux X11, Windows, macOS: enigo (dedicated thread, in order).
 //!
-//! Fare koordinatları buraya YAKALAMA uzayında (fiziksel piksel, küçültmeden önce)
-//! gelir; oturum katmanı gönderilen kare boyutundan buraya çevirir.
+//! Mouse coordinates arrive here in CAPTURE space (physical pixels, before downscaling);
+//! the session layer maps them from the sent frame size.
 
 use anyhow::Result;
 use remote_friend_common::{InputEvent, MouseButton, RemoteKey};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-/// Yakalanan monitörün geometrisi (enigo mantıksal koordinat ister).
+/// Geometry of the captured monitor (enigo expects logical coordinates).
 #[derive(Clone, Copy)]
 pub(crate) struct CaptureGeo {
     pub scale: f32,
@@ -27,7 +27,7 @@ pub(crate) fn set_geo(g: CaptureGeo) {
     }
 }
 
-/// Basılı tuş/düğme takibi: oturum koparsa takılı kalan Ctrl/Shift/fare bırakılır.
+/// Tracks held keys/buttons: if the session drops, stuck Ctrl/Shift/mouse buttons are released.
 #[derive(Default)]
 struct Held {
     keys: HashSet<RemoteKey>,
@@ -60,7 +60,7 @@ fn same_button(a: MouseButton, b: MouseButton) -> bool {
     std::mem::discriminant(&a) == std::mem::discriminant(&b)
 }
 
-/// Oturum bittiğinde çağır: basılı kalan her şeyi bırak.
+/// Call when the session ends: release everything still held down.
 pub(crate) fn release_all() {
     let held = HELD.lock().ok().and_then(|mut g| g.take());
     if let Some(held) = held {
@@ -73,10 +73,10 @@ pub(crate) fn release_all() {
     }
 }
 
-/// Girdiyi kuyruğa at (bloklamaz).
+/// Queue the input (non-blocking).
 pub(crate) fn apply(ev: InputEvent) -> Result<()> {
-    // Basılı durumu yalnızca olay gerçekten kuyruğa girdiyse güncelle; aksi halde
-    // düşen bir "bırak" olayı release_all() tarafından telafi edilebilsin.
+    // Update the held state only if the event was actually queued; that way a dropped
+    // "release" event can still be made up for by release_all().
     let tracked = matches!(ev, InputEvent::Key { .. } | InputEvent::MouseDown { .. } | InputEvent::MouseUp { .. });
     let copy = if tracked { Some(ev.clone()) } else { None };
     dispatch(ev)?;
@@ -88,7 +88,7 @@ pub(crate) fn apply(ev: InputEvent) -> Result<()> {
 
 fn dispatch(ev: InputEvent) -> Result<()> {
     if std::env::var("RF_INPUT_DRY").map(|v| v == "1").unwrap_or(false) {
-        tracing::info!("girdi (dry-run): {ev:?}");
+        tracing::info!("input (dry-run): {ev:?}");
         return Ok(());
     }
     #[cfg(target_os = "linux")]
@@ -96,19 +96,19 @@ fn dispatch(ev: InputEvent) -> Result<()> {
         if crate::wayland::send_input(ev) {
             return Ok(());
         }
-        anyhow::bail!("portal girdi kuyruğu dolu/kapalı");
+        anyhow::bail!("portal input queue full/closed");
     }
     enigo_send(ev)
 }
 
-/// Wayland'da portal yoksa uyarıyı bir kez göster.
+/// On Wayland without the portal, show the warning once.
 fn warn_wayland_fallback() {
     #[cfg(target_os = "linux")]
     {
         static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if crate::wayland::is_wayland() && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tracing::warn!(
-                "Wayland'da portal girdisi hazır değil; enigo (X11) yalnızca XWayland pencerelerini kontrol edebilir"
+                "portal input not ready on Wayland; enigo (X11) can only control XWayland windows"
             );
         }
     }
@@ -128,26 +128,26 @@ fn enigo_send(ev: InputEvent) -> Result<()> {
                 let mut enigo = match Enigo::new(&Settings::default()) {
                     Ok(e) => e,
                     Err(e) => {
-                        tracing::error!("girdi sürücüsü açılamadı (macOS: Erişilebilirlik izni gerekli): {e}");
+                        tracing::error!("failed to open input driver (macOS: Accessibility permission required): {e}");
                         return;
                     }
                 };
                 while let Ok(ev) = rx.recv() {
                     if let Err(e) = enigo_apply(&mut enigo, ev) {
-                        tracing::warn!("girdi uygulama hatası: {e:#}");
+                        tracing::warn!("input apply error: {e:#}");
                     }
                 }
             })
-            .expect("input thread başlatılamadı");
+            .expect("failed to start input thread");
         tx
     });
     match tx.try_send(ev) {
         Ok(()) => Ok(()),
-        // Fare hareketinde en yeni koordinat hemen gelir; eskiyi düşürmek kuyruğun
-        // büyüyüp saniyeler geriden gelmesinden iyidir.
+        // For mouse moves the newest position follows right away; dropping the old one
+        // beats letting the queue grow and lag seconds behind.
         Err(TrySendError::Full(InputEvent::MouseMove { .. })) => Ok(()),
-        Err(TrySendError::Full(_)) => anyhow::bail!("girdi kuyruğu dolu"),
-        Err(TrySendError::Disconnected(_)) => anyhow::bail!("girdi sürücüsü kapalı"),
+        Err(TrySendError::Full(_)) => anyhow::bail!("input queue full"),
+        Err(TrySendError::Disconnected(_)) => anyhow::bail!("input driver closed"),
     }
 }
 
@@ -155,8 +155,8 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
     use enigo::{Axis, Coordinate, Direction, Keyboard, Mouse};
     match ev {
         InputEvent::MouseMove { x, y } => {
-            // Yakalama fiziksel pikseldir; Windows %125/%150 ve macOS Retina'da
-            // enigo mantıksal koordinat ister.
+            // Capture is in physical pixels; with Windows 125%/150% scaling and macOS Retina
+            // enigo expects logical coordinates.
             let g = *GEO.lock().unwrap();
             let lx = g.mon_x + (x as f32 / g.scale).round() as i32;
             let ly = g.mon_y + (y as f32 / g.scale).round() as i32;
@@ -240,7 +240,7 @@ fn map_key(k: RemoteKey) -> enigo::Key {
     }
 }
 
-// macOS'ta bu tuşların karşılığı yok; zararsız bir tuşa düşür.
+// These keys have no macOS equivalent; fall back to a harmless key.
 #[cfg(not(target_os = "macos"))]
 fn insert_key() -> enigo::Key {
     enigo::Key::Insert
@@ -274,7 +274,7 @@ fn pause_key() -> enigo::Key {
     enigo::Key::F15
 }
 
-/// X11 keysym (Wayland portalı `NotifyKeyboardKeysym` için).
+/// X11 keysym (for the Wayland portal's `NotifyKeyboardKeysym`).
 #[allow(dead_code)]
 pub(crate) fn keysym(k: RemoteKey) -> u32 {
     use RemoteKey as R;
@@ -317,8 +317,8 @@ pub(crate) fn keysym(k: RemoteKey) -> u32 {
     }
 }
 
-/// Unicode karakter -> keysym. Latin-1 doğrudan; Türkçe harfler klasik keysym'leri
-/// (xkb düzenleri bunları içerir); geri kalanı Unicode keysym (0x01000000 + kod).
+/// Unicode character -> keysym. Latin-1 maps directly; Turkish letters use the classic keysyms
+/// (xkb layouts include them); everything else uses a Unicode keysym (0x01000000 + code point).
 #[allow(dead_code)]
 pub(crate) fn char_keysym(c: char) -> u32 {
     let cp = c as u32;
@@ -335,7 +335,7 @@ pub(crate) fn char_keysym(c: char) -> u32 {
     }
 }
 
-/// Tarayıcı `KeyboardEvent.key` -> RemoteKey. Tek karakter harf, gerisi isim.
+/// Browser `KeyboardEvent.key` -> RemoteKey. A single character is a letter; anything else is a key name.
 pub(crate) fn key_from_web(code: &str) -> Option<RemoteKey> {
     let mut chars = code.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {

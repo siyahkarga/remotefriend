@@ -1,63 +1,63 @@
-# RemoteFriend Performans Rehberi
+# RemoteFriend Performance Guide
 
-## v0.5.5 neden 3–5 FPS'e düşebiliyordu?
+## Why could v0.5.5 drop to 3–5 FPS?
 
-1. Hedef 15 FPS'ti ve capture/encode/send tamamlandıktan sonra sabit 66 ms daha uyunuyordu. Gerçek FPS yaklaşık `1 / (işlem süresi + 66 ms)` oluyordu.
-2. LAN tarayıcı sayfası düz HTTP'de açıldığında WebCodecs çoğu zaman kullanılamıyor, CPU ağırlıklı tam-kare JPEG fallback devreye giriyordu.
-3. Her izleyici ekranı yeniden yakalayıp yeniden kodluyordu.
-4. İstemci her UI turunda aynı RGBA kareyi clone edip GPU texture'ına yeniden yüklüyordu.
-5. Video ve input kuyrukları sınırsız veya gecikmeyi büyütecek biçimdeydi.
-6. RGBA → RGB → YUV420 ve yazılımsal OpenH264 hâlâ CPU maliyetlidir.
+1. The target was 15 FPS, and after capture/encode/send finished it slept a fixed extra 66 ms. Real FPS was roughly `1 / (processing time + 66 ms)`.
+2. When the LAN browser page was opened over plain HTTP, WebCodecs was often unavailable, so the CPU-heavy full-frame JPEG fallback kicked in.
+3. Every viewer captured and encoded the screen separately.
+4. On every UI pass the client cloned the same RGBA frame and re-uploaded it to the GPU texture.
+5. Video and input queues were unbounded or shaped in a way that increased latency.
+6. RGBA → RGB → YUV420 and software OpenH264 are still CPU-expensive.
 
-## v0.5.6 değişiklikleri
+## v0.5.6 changes
 
-- Sabit zamanlı 30 FPS pacing; işlem gecikince ek uyku ve gecikme birikimi yok.
-- Tek global H.264 capture/encode hattı; tüm izleyiciler aynı kodlanmış kareyi alır.
-- Tek global JPEG fallback hattı.
-- Broadcast kuyrukları küçük; yavaş istemci eski kareleri atlayıp güncel kareye gelir.
-- H.264 keyframe aralığı yaklaşık 1 saniye; yeni izleyici hızlı toparlanır.
-- OpenH264 auto-thread, screen-content realtime, frame-skip ve 6 Mbit/s varsayılan profil.
-- xcap monitör seçimi her karede yeniden yapılmıyor.
-- İstemci RGBA kareyi clone etmeden tüketiyor ve GPU texture'ını yalnızca yeni kare geldiğinde güncelliyor.
-- Tarayıcı H.264 decode kuyruğu büyürse eski zinciri bırakıp sonraki keyframe'i bekliyor.
-- JPEG decode yalnızca en yeni bekleyen kareyi tutuyor.
-- Input ve ağ kanalları bounded; eski mouse hareketleri gerektiğinde düşüyor.
+- Fixed-rate 30 FPS pacing; no extra sleep or latency build-up when processing runs late.
+- A single global H.264 capture/encode pipeline; all viewers receive the same encoded frame.
+- A single global JPEG fallback pipeline.
+- Small broadcast queues; a slow client skips old frames and catches up to the latest one.
+- H.264 keyframe interval of about 1 second; new viewers recover quickly.
+- OpenH264 auto-threading, screen-content realtime mode, frame skipping and a 6 Mbit/s default profile.
+- xcap monitor selection is no longer redone on every frame.
+- The client consumes the RGBA frame without cloning it and updates the GPU texture only when a new frame arrives.
+- If the browser H.264 decode queue grows, it drops the old chain and waits for the next keyframe.
+- JPEG decoding keeps only the newest pending frame.
+- Input and network channels are bounded; stale mouse moves are dropped when needed.
 
-## v0.6.2 değişiklikleri
+## v0.6.2 changes
 
-- **Tek geçiş dönüşüm:** ham kare (BGRx/RGBA) doğrudan I420'ye çevrilir; küçültme aynı geçişte
-  (kutu filtresi) ve 4 iş parçacığında yapılır. Eski hattaki RGBA kopya → resize → RGB kopya →
-  YUV adımları kalktı (1080p'de ~1 ms).
-- **Hasar tabanlı akış:** Wayland'da PipeWire yalnızca ekran değişince kare verir (30 fps tercih,
-  60'a kadar); X11/Windows/macOS'ta değişmeyen kare kodlanmaz. Durağan ekranda bant genişliği ~0.
-- **İstek üzerine anahtar kare:** saniyede bir zorunlu IDR yok (P-karelere daha çok bit kalır);
-  IDR yalnızca yeni izleyici, kare kaybı ya da istemci isteğinde. Durağan ekranda yeni izleyiciye
-  son kare yeniden kodlanıp gönderilir (siyah ekran yok).
-- **Gecikme sınırı:** istemci her kareyi onaylar (`ack`); 8 kareden fazlası ya da 700 ms'den eskisi
-  onaysızsa yeni kareler kaynakta atlanır ve temiz bir anahtar kare istenir. Ağ tamponlarında
-  saniyelerce gecikme birikmez.
-- **Uyarlamalı bit hızı:** tıkanıklıkta %30 düşer, 6 sn sorunsuz kalınca %15 artar (kodlayıcı
-  yeniden kurulmadan).
-- **Kalite ön ayarları:** Hızlı / Dengeli / Net (tarayıcıdan canlı).
-- Debug derlemede de bağımlılıklar optimize derlenir (`cargo run` ile de akıcı).
+- **Single-pass conversion:** the raw frame (BGRx/RGBA) is converted straight to I420; downscaling happens in the same pass
+  (box filter) on 4 threads. The old pipeline's RGBA copy → resize → RGB copy →
+  YUV steps are gone (~1 ms at 1080p).
+- **Damage-based streaming:** on Wayland, PipeWire delivers a frame only when the screen changes (30 fps preferred,
+  up to 60); on X11/Windows/macOS unchanged frames are not encoded. Bandwidth on a static screen is ~0.
+- **On-demand keyframes:** no forced IDR every second (more bits left for P-frames);
+  an IDR is sent only for a new viewer, frame loss or a client request. On a static screen the last frame is re-encoded
+  and sent to a new viewer (no black screen).
+- **Latency cap:** the client acks every frame (`ack`); if more than 8 frames or anything older than 700 ms is
+  unacknowledged, new frames are skipped at the source and a clean keyframe is requested. Seconds of latency
+  no longer build up in network buffers.
+- **Adaptive bitrate:** drops 30% on congestion and rises 15% after 6 s without problems (without
+  recreating the encoder).
+- **Quality presets:** Fast / Balanced / Sharp (switchable live from the browser).
+- Dependencies are built optimized even in debug builds (smooth with `cargo run` too).
 
-## Darboğazı terminalden ölçme
+## Measuring the bottleneck from the terminal
 
-Aktif bir izleyici varken host her 10 saniyede şu satırı yazar:
+While a viewer is active, the host prints this line every 10 seconds:
 
 ```text
-video: 29.6 fps, 2400 kbit/s, dönüşüm 1.1 ms, kodlama 13.9 ms, 1920x1080, izleyici 1
+video: 29.6 fps, 2400 kbit/s, convert 1.1 ms, encode 13.9 ms, 1920x1080, viewers 1
 ```
 
-- `kodlama` 33 ms'nin belirgin biçimde üstündeyse 30 FPS'i yazılımsal OpenH264 sınırlıyor; tarayıcıda
-  ⚙ → **Hızlı** seç ya da `RF_QUALITY=fast`.
-- fps düşük ama kodlama hızlıysa ekran az değişiyordur (normal) ya da Wayland'da izin verilmemiştir.
-- Host ölçümü yüksek, istemci FPS'i düşükse istemci decode/GPU texture yüklemesi veya ağ gecikmesi sınırlıyor.
-- Tarayıcı meta satırında `JPEG` yazıyorsa HTTPS/WebCodecs yerine fallback kullanılıyordur.
+- If `encode` is well above 33 ms, software OpenH264 is limiting you to below 30 FPS; in the browser choose
+  ⚙ → **Fast**, or set `RF_QUALITY=fast`.
+- If fps is low but encoding is fast, the screen is changing little (normal), or permission was not granted on Wayland.
+- If the host numbers are high but the client FPS is low, client decoding/GPU texture upload or network latency is the limit.
+- If the browser info panel shows `JPEG`, the fallback is in use instead of HTTPS/WebCodecs.
 
-## Profil seçimi
+## Choosing a profile
 
-### Dengeli
+### Balanced
 
 ```text
 RF_FPS=30
@@ -65,7 +65,7 @@ RF_MAX_WIDTH=1600
 RF_BITRATE_BPS=6000000
 ```
 
-### Daha düşük CPU ve internet kullanımı
+### Lower CPU and bandwidth usage
 
 ```text
 RF_FPS=20
@@ -73,7 +73,7 @@ RF_MAX_WIDTH=1280
 RF_BITRATE_BPS=4000000
 ```
 
-### 1080p netlik
+### 1080p sharpness
 
 ```text
 RF_FPS=30
@@ -81,9 +81,9 @@ RF_MAX_WIDTH=1920
 RF_BITRATE_BPS=8000000
 ```
 
-Bu profil güçlü CPU ister. Video oynatımı gibi tüm ekranın sürekli değiştiği sahneler, statik masaüstünden çok daha ağırdır.
+This profile needs a strong CPU. Scenes where the whole screen changes constantly, such as video playback, are much heavier than a static desktop.
 
-### Düz HTTP tarayıcı/JPEG
+### Plain HTTP browser/JPEG
 
 ```text
 RF_MAX_WIDTH=1280
@@ -91,23 +91,23 @@ RF_JPEG_FPS=8
 RF_JPEG_Q=62
 ```
 
-JPEG modunda 30 FPS bekleme. Akıcılık için native client veya geçerli HTTPS/WSS altında WebCodecs H.264 kullan.
+Don't expect 30 FPS in JPEG mode. For smooth video, use the native client or WebCodecs H.264 over valid HTTPS/WSS.
 
-## Derleme ayarları
+## Build settings
 
-- Release build kullan: `cargo build --release`.
-- `nasm` kuruluysa OpenH264 SIMD/assembly yolu kullanılabilir.
-- Aynı bilgisayar/CPU ailesi için yerel derlemede `RUSTFLAGS="-C target-cpu=native"` denenebilir.
-- Genel dağıtım binary'sinde `target-cpu=native` kullanma; başka CPU'larda açılmayabilir.
+- Use a release build: `cargo build --release`.
+- If `nasm` is installed, OpenH264 can use its SIMD/assembly path.
+- For local builds targeting the same computer/CPU family, you can try `RUSTFLAGS="-C target-cpu=native"`.
+- Don't use `target-cpu=native` for general distribution binaries; they may not run on other CPUs.
 
-## Bir sonraki büyük performans adımı
+## The next big performance step
 
-Bu hotfix yazılımsal H.264 mimarisini iyileştirir; fakat gerçek 1080p60/1440p60 hedefi için sıfır-kopyaya yakın bir yol gerekir:
+This hotfix improves the software H.264 architecture, but real 1080p60/1440p60 targets need a near-zero-copy path:
 
-1. Windows Graphics Capture veya DXGI Desktop Duplication.
-2. GPU yüzeyini doğrudan NVENC/QSV/AMF'ye verme.
-3. Linux'ta PipeWire DMA-BUF + VAAPI/NVENC.
-4. WebRTC ile congestion control, jitter buffer, DTLS-SRTP ve donanımsal tarayıcı decode.
-5. Input için ayrı düşük gecikmeli data channel; dosya için kontrollü backpressure.
+1. Windows Graphics Capture or DXGI Desktop Duplication.
+2. Passing the GPU surface directly to NVENC/QSV/AMF.
+3. PipeWire DMA-BUF + VAAPI/NVENC on Linux.
+4. WebRTC for congestion control, jitter buffer, DTLS-SRTP and hardware browser decoding.
+5. A separate low-latency data channel for input; controlled backpressure for files.
 
-NVIDIA GPU bulunan bir hostta NVENC, CPU OpenH264'a göre genellikle en büyük performans kazancını sağlayan adımdır. Bu, küçük bir ayar değil; capture yüzeyi, renk formatı, encoder ve transport katmanının birlikte değiştirilmesini gerektirir.
+On a host with an NVIDIA GPU, NVENC is usually the single biggest performance gain over CPU OpenH264. This is not a small tweak; it requires changing the capture surface, color format, encoder and transport layer together.

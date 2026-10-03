@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RemoteFriend
+GenericName=Remote Desktop
+Comment=Share this computer or control another one
+Exec=remotefriend
+Icon=remotefriend
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;control;screen;share;vnc;
+StartupNotify=true
+StartupWMClass=remotefriend

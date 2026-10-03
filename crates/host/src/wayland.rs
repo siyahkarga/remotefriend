@@ -1,14 +1,14 @@
 //! Wayland (GNOME/KDE): Portal RemoteDesktop + ScreenCast + PipeWire.
 //!
-//! Neden var: Wayland'da uygulamalar ekranı doğrudan okuyamaz ve başka pencerelere
-//! fare/klavye olayı basamaz. `xcap` her kare için ekran görüntüsü API'sini çağırır
-//! (deklanşör sesi), `enigo` X11 olaylarını yalnızca XWayland pencerelerine iletir:
-//! gerçek masaüstü kontrol edilemez. Burada masaüstüne BİR kez sorulur
-//! ("uzaktan kontrol + ekran paylaşımı"), izin kalıcı belirteçle hatırlanır;
-//! görüntü PipeWire'dan sessizce akar, girdi portal üzerinden gerçek masaüstüne gider.
+//! Why this exists: on Wayland, apps cannot read the screen directly or inject mouse/keyboard
+//! events into other windows. `xcap` calls the screenshot API for every frame
+//! (shutter sound), and `enigo` delivers X11 events only to XWayland windows:
+//! the real desktop cannot be controlled. Here the desktop is asked ONCE
+//! ("remote control + screen sharing") and the permission is remembered with a persistent token;
+//! video flows silently from PipeWire and input goes through the portal to the real desktop.
 //!
-//! RemoteDesktop portalı yoksa (ör. wlroots) yalnızca ScreenCast denenir; girdi o
-//! durumda enigo'ya düşer. Sadece Linux.
+//! Without the RemoteDesktop portal (e.g. wlroots) only ScreenCast is tried; input then
+//! falls back to enigo. Linux only.
 
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -26,7 +26,7 @@ use remote_friend_common::{InputEvent, MouseButton};
 
 use crate::convert::{PixFmt, RawFrame};
 
-/// En yeni kare + nesil sayacı. Birden fazla tüketici (H.264, JPEG) aynı kareyi paylaşır.
+/// Latest frame + generation counter. Multiple consumers (H.264, JPEG) share the same frame.
 struct Latest {
     gen: u64,
     frame: Option<Arc<RawFrame>>,
@@ -34,27 +34,27 @@ struct Latest {
 static LATEST: Mutex<Latest> = Mutex::new(Latest { gen: 0, frame: None });
 static NEW_FRAME: Condvar = Condvar::new();
 
-/// PipeWire kare akıyor mu?
+/// Are PipeWire frames flowing?
 static READY: AtomicBool = AtomicBool::new(false);
-/// Portal turu sürüyor mu? (izin penceresi açık olabilir)
+/// Is a portal round in progress? (the permission dialog may be open)
 static STARTING: AtomicBool = AtomicBool::new(false);
-/// Son başlatma denemesi (ms, süreç başından); başarısız denemeler 30 sn'de bir tekrarlanır.
+/// Last start attempt (ms since process start); failed attempts are retried every 30 s.
 static LAST_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 static EVER_TRIED: AtomicBool = AtomicBool::new(false);
-/// Portal girdisi hazır mı? (RemoteDesktop oturumu açık)
+/// Is portal input ready? (RemoteDesktop session open)
 static INPUT_READY: AtomicBool = AtomicBool::new(false);
 static INPUT_TX: Mutex<Option<tokio::sync::mpsc::Sender<InputEvent>>> = Mutex::new(None);
-/// Portal akışının mantıksal boyutu (fare koordinatları bu uzayda verilir).
+/// Logical size of the portal stream (mouse coordinates are given in this space).
 static LOGICAL_W: AtomicI64 = AtomicI64::new(0);
 static LOGICAL_H: AtomicI64 = AtomicI64::new(0);
-/// Son PipeWire kare boyutu (fiziksel piksel).
+/// Last PipeWire frame size (physical pixels).
 static FRAME_W: AtomicU32 = AtomicU32::new(0);
 static FRAME_H: AtomicU32 = AtomicU32::new(0);
 
-/// Portal görevleri tokio'da çalışır; çağrı video thread'inden de gelebilir.
+/// Portal tasks run on tokio; calls may also come from the video thread.
 static RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
 
-/// main() içinden bir kez çağır.
+/// Call once from main().
 pub fn init_runtime(handle: tokio::runtime::Handle) {
     let _ = RUNTIME.set(handle);
 }
@@ -64,15 +64,15 @@ fn process_start() -> Instant {
     *T0.get_or_init(Instant::now)
 }
 
-/// Wayland mı? (Xorg/Windows/macOS'ta xcap + enigo yeterli.)
+/// Is this Wayland? (On Xorg/Windows/macOS, xcap + enigo are enough.)
 pub fn is_wayland() -> bool {
     let t = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
     let d = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
     t.eq_ignore_ascii_case("wayland") || !d.is_empty()
 }
 
-/// Portal oturumunu başlat (tokio runtime içinden). Zaten açıksa/açılıyorsa bir şey yapmaz.
-/// Başarısız olduysa en erken 30 sn sonra tekrar dener (yeni izleyici bağlandığında).
+/// Start the portal session (from a tokio runtime). Does nothing if it is already open or opening.
+/// After a failure it retries no sooner than 30 s later (when a new viewer connects).
 pub fn ensure_started() {
     if !is_wayland() || READY.load(Ordering::Relaxed) {
         return;
@@ -84,7 +84,7 @@ pub fn ensure_started() {
         return;
     }
     let Some(rt) = tokio::runtime::Handle::try_current().ok().or_else(|| RUNTIME.get().cloned()) else {
-        tracing::warn!("wayland: tokio çalışma zamanı yok; portal başlatılamadı");
+        tracing::warn!("wayland: no tokio runtime; cannot start the portal");
         return;
     };
     if STARTING.swap(true, Ordering::AcqRel) {
@@ -92,31 +92,48 @@ pub fn ensure_started() {
     }
     EVER_TRIED.store(true, Ordering::Relaxed);
     LAST_ATTEMPT_MS.store(now, Ordering::Relaxed);
-    tracing::info!("wayland: portal oturumu açılıyor (ilk seferde masaüstü izin sorar)");
-    println!(">>> Wayland: masaüstünde 'Uzak masaüstü / ekran paylaşımı' izni çıkarsa ONAYLA (bir kez sorulur).");
+    tracing::info!("wayland: opening portal session (the desktop asks for permission the first time)");
+    crate::status::update(|s| s.screen = crate::status::ScreenState::WaitingPermission);
+    crate::status::notice(
+        "Screen sharing: if your desktop asks for permission, turn ON 'Allow Remote Interaction' and click Share (asked once).",
+    );
     rt.spawn(async move {
         let result = portal_task().await;
         STARTING.store(false, Ordering::Release);
         if let Err(e) = result {
-            tracing::warn!("wayland portal açılamadı: {e:#}");
-            println!("!!! Wayland ekran/kontrol izni alınamadı: {e:#}");
+            tracing::warn!("wayland portal failed: {e:#}");
+            crate::status::update(|s| s.screen = crate::status::ScreenState::Denied);
+            crate::status::notice(format!("Screen sharing permission was not granted: {e:#}"));
         }
     });
 }
 
-/// Portal hâlâ izin turundaysa ya da ilk kare bekleniyorsa true.
+/// Ask again right away (desktop app button), ignoring the retry back-off.
+/// Returns false when a session is still running (e.g. shared without remote control):
+/// the saved permission is discarded and the app must restart to ask again.
+pub fn retry() -> bool {
+    let _ = std::fs::remove_file(token_path("rd_restore_token"));
+    if PW_ALIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    EVER_TRIED.store(false, Ordering::Relaxed);
+    ensure_started();
+    true
+}
+
+/// True while the portal is still in its permission round or the first frame is pending.
 pub fn portal_pending() -> bool {
     is_wayland()
         && !READY.load(Ordering::Relaxed)
         && (STARTING.load(Ordering::Relaxed) || PW_ALIVE.load(Ordering::Relaxed))
 }
 
-/// PipeWire akışı hazır mı?
+/// Is the PipeWire stream ready?
 pub fn is_ready() -> bool {
     READY.load(Ordering::Relaxed)
 }
 
-/// `last_gen`'den yeni bir kare gelene kadar en çok `timeout` bekler.
+/// Waits at most `timeout` for a frame newer than `last_gen`.
 pub fn wait_frame(last_gen: &mut u64, timeout: Duration) -> Option<Arc<RawFrame>> {
     let deadline = Instant::now() + timeout;
     let mut g = LATEST.lock().ok()?;
@@ -128,7 +145,7 @@ pub fn wait_frame(last_gen: &mut u64, timeout: Duration) -> Option<Arc<RawFrame>
             }
         }
         let now = Instant::now();
-        // İzin/ilk kare beklenirken de süre dolana kadar uyu (boş döngü CPU yakmasın).
+        // Sleep until the deadline even while waiting for permission/the first frame (so an idle loop doesn't burn CPU).
         if now >= deadline {
             return None;
         }
@@ -136,12 +153,12 @@ pub fn wait_frame(last_gen: &mut u64, timeout: Duration) -> Option<Arc<RawFrame>
     }
 }
 
-/// Portal girdisi kullanılabilir mi?
+/// Is portal input available?
 pub fn input_ready() -> bool {
     INPUT_READY.load(Ordering::Relaxed)
 }
 
-/// Girdiyi portal görevine ilet. Kuyruk doluysa fare hareketi düşürülür.
+/// Forward input to the portal task. Mouse moves are dropped when the queue is full.
 pub fn send_input(ev: InputEvent) -> bool {
     let tx = INPUT_TX.lock().ok().and_then(|g| g.clone());
     match tx {
@@ -167,7 +184,7 @@ fn load_token(name: &str) -> Option<String> {
 
 fn save_token(name: &str, t: &str) {
     if let Err(e) = remote_friend_common::identity::write_private(&token_path(name), t.as_bytes()) {
-        tracing::warn!("portal restore token yazılamadı: {e}");
+        tracing::warn!("failed to write portal restore token: {e}");
     }
 }
 
@@ -178,13 +195,13 @@ async fn portal_task() -> anyhow::Result<()> {
     match remote_desktop_session().await {
         Ok(()) => Ok(()),
         Err(e) => {
-            tracing::warn!("RemoteDesktop portalı kullanılamadı ({e:#}); yalnız ekran paylaşımı deneniyor");
+            tracing::warn!("RemoteDesktop portal unavailable ({e:#}); trying screen sharing only");
             screencast_only().await
         }
     }
 }
 
-/// Görüntü + girdi tek oturumda. Fonksiyon oturum boyunca girdi kuyruğunu işler.
+/// Video + input in a single session. The input queue is processed for the lifetime of the session.
 async fn remote_desktop_session() -> anyhow::Result<()> {
     let rd = RemoteDesktop::new().await?;
     let sc = Screencast::new().await?;
@@ -210,13 +227,13 @@ async fn remote_desktop_session() -> anyhow::Result<()> {
     let devices = response.devices();
     let mut input_ok = devices.contains(DeviceType::Pointer) || devices.contains(DeviceType::Keyboard);
     if !input_ok {
-        // Bazı masaüstleri verilen cihazları yanıtta bildirmez. (0,0) göreli hareket
-        // imleci kıpırdatmaz; portal kabul ederse kontrol izni vardır.
+        // Some desktops don't list the granted devices in the response. A (0,0) relative motion
+        // doesn't move the cursor; if the portal accepts it, control is permitted.
         input_ok = rd.notify_pointer_motion(&session, 0.0, 0.0, Default::default()).await.is_ok();
-        tracing::info!("portal cihaz listesi boş; girdi yoklaması: {}", if input_ok { "izin var" } else { "izin yok" });
+        tracing::info!("portal device list empty; input probe: {}", if input_ok { "allowed" } else { "not allowed" });
     }
     match response.restore_token() {
-        // Girdi izni verilmediyse belirteci saklama: bir sonraki açılışta yeniden sorulsun.
+        // Don't keep the token if input was not allowed, so the next start asks again.
         Some(t) if input_ok => save_token("rd_restore_token", t),
         _ => {
             let _ = std::fs::remove_file(token_path("rd_restore_token"));
@@ -225,7 +242,7 @@ async fn remote_desktop_session() -> anyhow::Result<()> {
     let stream = response
         .streams()
         .first()
-        .ok_or_else(|| anyhow::anyhow!("portal ekran akışı vermedi (seçim yapılmadı?)"))?
+        .ok_or_else(|| anyhow::anyhow!("portal returned no screen stream (nothing selected?)"))?
         .to_owned();
     let node_id = stream.pipe_wire_node_id();
     if let Some((w, h)) = stream.size() {
@@ -234,16 +251,18 @@ async fn remote_desktop_session() -> anyhow::Result<()> {
     }
     let fd: OwnedFd = sc.open_pipe_wire_remote(&session, Default::default()).await?;
     tracing::info!(
-        "portal izni OK (uzaktan kontrol + ekran, node {node_id}, mantıksal {:?}, cihazlar {:?})",
+        "portal permission OK (remote control + screen, node {node_id}, logical {:?}, devices {:?})",
         stream.size(),
         response.devices()
     );
     spawn_pw_thread(node_id, fd)?;
     if !input_ok {
-        println!("!!! Wayland: ekran paylaşıldı ama UZAKTAN KONTROL izni verilmedi (fare/klavye çalışmaz).");
-        println!("!!! Host'u yeniden başlat; izin penceresinde 'Uzaktan etkileşime izin ver' seçeneğini AÇIK bırak.");
-        tracing::warn!("RemoteDesktop: girdi cihazı izni yok ({devices:?})");
-        // Oturum yine de görüntü için canlı kalmalı.
+        crate::status::update(|s| s.screen = crate::status::ScreenState::NoInput);
+        crate::status::notice(
+            "Screen is shared but REMOTE CONTROL was not allowed (mouse/keyboard won't work). Click 'Ask again' and turn ON 'Allow Remote Interaction'.",
+        );
+        tracing::warn!("RemoteDesktop: no input device permission ({devices:?})");
+        // The session must still stay alive for video.
         tokio::spawn(async move {
             while PW_ALIVE.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -253,12 +272,13 @@ async fn remote_desktop_session() -> anyhow::Result<()> {
         });
         return Ok(());
     }
-    println!(">>> Wayland izni alındı: ekran + fare/klavye kontrolü hazır.");
+    crate::status::update(|s| s.screen = crate::status::ScreenState::Ready);
+    crate::status::notice("Screen sharing and remote control are ready.");
 
     let (tx, rx) = tokio::sync::mpsc::channel::<InputEvent>(4096);
     *INPUT_TX.lock().unwrap() = Some(tx);
     INPUT_READY.store(true, Ordering::Release);
-    // Oturum nesneleri girdi görevinde yaşar; akış bitince görev de biter.
+    // The session objects live in the input task; the task ends when the stream ends.
     tokio::spawn(input_loop(rd, session, node_id, rx));
     Ok(())
 }
@@ -278,7 +298,7 @@ async fn input_loop(
                 if let Err(e) = inject(&rd, &session, node_id, ev).await {
                     errors += 1;
                     if errors <= 3 || errors % 100 == 0 {
-                        tracing::warn!("portal girdi hatası ({errors}): {e}");
+                        tracing::warn!("portal input error ({errors}): {e}");
                     }
                 }
             }
@@ -294,7 +314,7 @@ async fn input_loop(
     let _ = session.close().await;
 }
 
-/// Eski yol: sadece ekran paylaşımı (girdi enigo'ya kalır).
+/// Legacy path: screen sharing only (input is left to enigo).
 async fn screencast_only() -> anyhow::Result<()> {
     let proxy = Screencast::new().await?;
     let session = proxy.create_session(Default::default()).await?;
@@ -317,13 +337,13 @@ async fn screencast_only() -> anyhow::Result<()> {
     let stream = response
         .streams()
         .first()
-        .ok_or_else(|| anyhow::anyhow!("portal stream vermedi (seçim yapılmadı?)"))?
+        .ok_or_else(|| anyhow::anyhow!("portal returned no stream (nothing selected?)"))?
         .to_owned();
     let node_id = stream.pipe_wire_node_id();
     let fd: OwnedFd = proxy.open_pipe_wire_remote(&session, Default::default()).await?;
-    tracing::warn!("yalnız ekran paylaşımı açık: fare/klavye XWayland dışındaki pencerelere ulaşmayabilir");
+    tracing::warn!("screen sharing only: mouse/keyboard may not reach non-XWayland windows");
     spawn_pw_thread(node_id, fd)?;
-    // Oturum nesnesi düşerse portal akışı kapatır: akış bitene kadar canlı tut.
+    // If the session object is dropped the portal closes the stream: keep it alive until the stream ends.
     tokio::spawn(async move {
         while PW_ALIVE.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -333,7 +353,7 @@ async fn screencast_only() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// PipeWire thread'i çalışıyor mu? (oturum nesnelerini o sürece canlı tutar)
+/// Is the PipeWire thread running? (session objects are kept alive while it is)
 static PW_ALIVE: AtomicBool = AtomicBool::new(false);
 
 fn spawn_pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
@@ -342,18 +362,19 @@ fn spawn_pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
         .name("rf-pipewire".into())
         .spawn(move || {
             if let Err(e) = pw_thread(node_id, fd) {
-                tracing::warn!("pipewire thread kapandı: {e:#}");
+                tracing::warn!("pipewire thread exited: {e:#}");
             }
             PW_ALIVE.store(false, Ordering::Relaxed);
             READY.store(false, Ordering::Relaxed);
             INPUT_READY.store(false, Ordering::Relaxed);
             NEW_FRAME.notify_all();
-            tracing::warn!("ekran paylaşımı sona erdi; yeni izleyici bağlanınca tekrar istenecek");
+            crate::status::update(|s| s.screen = crate::status::ScreenState::Denied);
+            crate::status::notice("Screen sharing stopped; it will be requested again on the next connection.");
         })?;
     Ok(())
 }
 
-/// Linux evdev düğme kodları.
+/// Linux evdev button codes.
 fn evdev_button(b: MouseButton) -> i32 {
     match b {
         MouseButton::Left => 0x110,
@@ -370,7 +391,7 @@ async fn inject(
 ) -> ashpd::Result<()> {
     match ev {
         InputEvent::MouseMove { x, y } => {
-            // x,y yakalama (fiziksel piksel) uzayında; portal mantıksal koordinat ister.
+            // x,y are in capture (physical pixel) space; the portal expects logical coordinates.
             let (fw, fh) = (FRAME_W.load(Ordering::Relaxed), FRAME_H.load(Ordering::Relaxed));
             let (lw, lh) = (LOGICAL_W.load(Ordering::Relaxed), LOGICAL_H.load(Ordering::Relaxed));
             let (mut lx, mut ly) = (x as f64, y as f64);
@@ -437,7 +458,7 @@ fn publish(frame: RawFrame) {
     drop(g);
     NEW_FRAME.notify_all();
     if !READY.swap(true, Ordering::Relaxed) {
-        tracing::info!("ilk pipewire karesi alındı: sessiz yakalama aktif");
+        tracing::info!("first pipewire frame received: silent capture active");
     }
 }
 
@@ -461,7 +482,7 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
     let _listener = stream
         .add_local_listener_with_user_data(())
         .state_changed(move |_, _, old, new| {
-            tracing::info!("pipewire stream durumu: {old:?} -> {new:?}");
+            tracing::info!("pipewire stream state: {old:?} -> {new:?}");
             if matches!(new, pw::stream::StreamState::Error(_) | pw::stream::StreamState::Unconnected) {
                 READY.store(false, Ordering::Relaxed);
                 if let Some(ml) = weak_loop.upgrade() {
@@ -492,7 +513,7 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
                 V::BGRx | V::BGRA => PixFmt::Bgrx,
                 V::RGBx | V::RGBA => PixFmt::Rgbx,
                 other => {
-                    tracing::warn!("desteklenmeyen pipewire formatı: {other:?}");
+                    tracing::warn!("unsupported pipewire format: {other:?}");
                     return;
                 }
             };
@@ -517,7 +538,7 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
             let offset = data.chunk().offset() as usize;
             let need = stride * (h as usize - 1) + w as usize * 4;
             if chunk_size == 0 || stride < w as usize * 4 {
-                return; // boş (yalnız meta) buffer
+                return; // empty (metadata-only) buffer
             }
             let copy = |mem: &[u8]| -> Option<Vec<u8>> {
                 let end = offset.checked_add(need)?;
@@ -536,7 +557,7 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
         })
         .register()?;
 
-    // 32-bit paket formatlar; 30 fps tercih, 60'a kadar izin (mutter 0..max ister).
+    // 32-bit packed formats; 30 fps preferred, up to 60 allowed (mutter expects 0..max).
     let obj = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
         spa::param::ParamType::EnumFormat,
@@ -596,14 +617,14 @@ fn pw_thread(node_id: u32, fd: OwnedFd) -> anyhow::Result<()> {
         &mut params,
     )?;
     if let Err(e) = stream.set_active(true) {
-        tracing::warn!("pipewire activate başarısız: {e:#}");
+        tracing::warn!("pipewire activate failed: {e:#}");
     }
-    tracing::info!("pipewire stream bağlandı");
+    tracing::info!("pipewire stream connected");
     mainloop.run();
     Ok(())
 }
 
-/// MemFd'yi salt-okunur map'le (MAP_BUFFERS eşlemediyse). fd pool'a ait, dup'lanır.
+/// Map the MemFd read-only (if MAP_BUFFERS didn't map it). The fd belongs to the pool, so it is dup'ed.
 fn read_memfd(fd: std::os::fd::RawFd) -> Option<memmap2::Mmap> {
     use std::os::fd::FromRawFd;
     if fd < 0 {

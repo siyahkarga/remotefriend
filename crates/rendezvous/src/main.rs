@@ -1,17 +1,17 @@
-//! Rendezvous + relay sunucusu (VPS'te çalışır).
+//! Rendezvous + relay server (runs on the VPS).
 //!
-//! - Host'lar kalıcı uplink açar, ID ile kaydolur.
-//! - Client (native TLS/plain veya tarayıcı WS) ID ile host ister.
-//! - Host onaylarsa dial-back gelir, sunucu iki ucu BİRLEŞTİRİR (splice).
-//! - TLS VPS'te sonlanır: sunucu operatörü trafiği teknik olarak görebilir; güvenilir VPS kullan.
+//! - Hosts open a persistent uplink and register with their ID.
+//! - A client (native TLS/plain or browser WS) asks for a host by ID.
+//! - If the host approves, it dials back and the server SPLICES the two ends together.
+//! - TLS terminates on the VPS: the server operator can technically see the traffic; use a trusted VPS.
 //!
 //! Env:
-//!   RF_RV_PORT (33202) - native relay dinleyici
-//!   RF_WEB_PORT (33203, 127.0.0.1) - tarayıcı arayüzü (nginx arkası önerilir)
-//!   RF_TLS_CERT / RF_TLS_KEY - native TLS sertifikası. systemd `LoadCredential=`
-//!     ile verilirse ($CREDENTIALS_DIRECTORY/cert.pem, key.pem) dosya izinleri
-//!     sorun olmaz: systemd dosyayı root olarak okuyup servise verir.
-//!   RF_PLAIN_OK=1 olmadan düz modda çalışmayı reddeder (güvenlik).
+//!   RF_RV_PORT (33202) - native relay listener
+//!   RF_WEB_PORT (33203, 127.0.0.1) - browser UI (behind nginx recommended)
+//!   RF_TLS_CERT / RF_TLS_KEY - native TLS certificate. When provided via systemd
+//!     `LoadCredential=` ($CREDENTIALS_DIRECTORY/cert.pem, key.pem), file permissions
+//!     don't matter: systemd reads the file as root and hands it to the service.
+//!   Refuses to run in plaintext mode unless RF_PLAIN_OK=1 (security).
 
 use anyhow::{Context, Result};
 use remote_friend_common::io::{read_blob, read_rv, write_blob, write_rv};
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-// ---- tipler ----
+// ---- types ----
 
 type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
@@ -47,7 +47,7 @@ struct Pending {
     host_id: String,
     kind: PendingKind,
     created: std::time::Instant,
-    // Pending sayısını atomik olarak sınırlar; kayıt tablosundan çıkınca otomatik bırakılır.
+    // Atomically caps the number of pending entries; released automatically when removed from the table.
     _pending_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -58,8 +58,8 @@ struct State {
     registry_path: PathBuf,
     web_slots: Arc<tokio::sync::Semaphore>,
     pending_slots: Arc<tokio::sync::Semaphore>,
-    /// IP başına bağlantı isteği sınırı (parola deneme spam'ine karşı ilk hat;
-    /// asıl kilit host'ta).
+    /// Per-IP connection request limit (first line of defense against password-guessing spam;
+    /// the real lockout is on the host).
     hello_rate: std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
 }
 
@@ -83,7 +83,7 @@ impl State {
     }
 }
 
-// axum WS tipleri (splice için kutulanır)
+// axum WS types (boxed for splicing)
 type WsSink = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
 type WsStream = futures_util::stream::SplitStream<axum::extract::ws::WebSocket>;
 
@@ -102,11 +102,11 @@ fn load_registry(path: &Path) -> Result<HashMap<String, String>> {
         return Ok(HashMap::new());
     }
     let data = std::fs::read(path)
-        .with_context(|| format!("host kayıt dosyası okunamadı: {}", path.display()))?;
+        .with_context(|| format!("could not read host registry file: {}", path.display()))?;
     let map: HashMap<String, String> = serde_json::from_slice(&data)
-        .with_context(|| format!("host kayıt dosyası bozuk: {}", path.display()))?;
+        .with_context(|| format!("host registry file is corrupt: {}", path.display()))?;
     if map.iter().any(|(id, secret)| !valid_id(id) || !valid_secret(secret)) {
-        anyhow::bail!("host kayıt dosyasında geçersiz ID/secret var");
+        anyhow::bail!("host registry file contains an invalid ID/secret");
     }
     Ok(map)
 }
@@ -114,7 +114,7 @@ fn load_registry(path: &Path) -> Result<HashMap<String, String>> {
 fn save_registry(path: &Path, map: &HashMap<String, String>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("host kayıt dizini oluşturulamadı: {}", parent.display()))?;
+            .with_context(|| format!("could not create host registry directory: {}", parent.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(map)?;
@@ -172,7 +172,7 @@ fn origin_allowed(headers: &axum::http::HeaderMap) -> bool {
 
 // ---- splice ----
 
-/// İki framed bacağın ham baytlarını iki yönlü kopyala.
+/// Copy raw bytes between two framed legs in both directions.
 async fn splice_framed(mut a_rd: BoxRd, mut a_wr: BoxWr, mut b_rd: BoxRd, mut b_wr: BoxWr) {
     let a2b = async {
         loop {
@@ -190,15 +190,15 @@ async fn splice_framed(mut a_rd: BoxRd, mut a_wr: BoxWr, mut b_rd: BoxRd, mut b_
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
-    // Bir yön kapandığında diğer kopyalama gelecekte sonsuza kadar beklememeli.
-    // select! kaybeden future'ı düşürür; ilgili reader/writer handle'ları da kapanır.
+    // When one direction closes, the other copy must not wait forever.
+    // select! drops the losing future, which also closes its reader/writer handles.
     tokio::select! {
         _ = a2b => {},
         _ = b2a => {},
     }
 }
 
-/// WS bacağı <-> framed dial-back bacağı. Text<->kind1, Binary<->kind0.
+/// WS leg <-> framed dial-back leg. Text<->kind1, Binary<->kind0.
 async fn splice_ws(
     mut sink: WsSink,
     mut stream: WsStream,
@@ -251,15 +251,15 @@ async fn splice_ws(
             }
         }
     };
-    // Tarayıcı veya host tarafı kapandığında kalan yönü iptal ederek yarım-açık
-    // relay oturumlarının kaynak tüketmesini önle.
+    // When the browser or host side closes, cancel the remaining direction so
+    // half-open relay sessions don't keep consuming resources.
     tokio::select! {
         _ = c2h => {},
         _ = h2c => {},
     }
 }
 
-// ---- native dinleyici ----
+// ---- native listener ----
 
 async fn handle_native(
     tcp: tokio::net::TcpStream,
@@ -269,12 +269,12 @@ async fn handle_native(
 ) -> Result<()> {
     let peer = peer_addr.to_string();
     let _ = tcp.set_nodelay(true);
-    // TLS varsa sar, yoksa düz (kurulumda uyarıldı)
+    // Wrap in TLS if configured, otherwise plaintext (warned at startup)
     let (mut rd, mut wr): (BoxRd, BoxWr) = match tls {
         Some(acc) => {
             let s = tokio::time::timeout(std::time::Duration::from_secs(15), acc.accept(tcp))
                 .await
-                .context("TLS handshake zaman aşımı")??;
+                .context("TLS handshake timed out")??;
             let (r, w) = tokio::io::split(s);
             (Box::new(r), Box::new(w))
         }
@@ -288,9 +288,9 @@ async fn handle_native(
 
     match first {
         RvMsg::Register { id, name, secret } => {
-            // Host ID artık kalıcı 256-bit sır ile sahiplenilir. Aynı ID'yi başka biri kaydedemez.
+            // A host ID is owned via a persistent 256-bit secret. Nobody else can register the same ID.
             if !valid_id(&id) || !valid_secret(&secret) || !valid_name(&name) {
-                write_rv(&mut wr, &RvMsg::RegisterError("geçersiz ID veya host secret".into())).await?;
+                write_rv(&mut wr, &RvMsg::RegisterError("invalid ID or host secret".into())).await?;
                 return Ok(());
             }
             {
@@ -298,9 +298,9 @@ async fn handle_native(
                 match registry.get(&id) {
                     Some(known) if known != &secret => {
                         write_rv(&mut wr, &RvMsg::RegisterError(
-                            "bu ID başka bir host anahtarına kayıtlı".into(),
+                            "this ID is registered to a different host key".into(),
                         )).await?;
-                        tracing::warn!("{id}: yanlış host secret ile kayıt denemesi [{peer}]");
+                        tracing::warn!("{id}: registration attempt with wrong host secret [{peer}]");
                         return Ok(());
                     }
                     Some(_) => {}
@@ -309,7 +309,7 @@ async fn handle_native(
                         if let Err(e) = save_registry(&state.registry_path, &registry) {
                             registry.remove(&id);
                             write_rv(&mut wr, &RvMsg::RegisterError(
-                                "host registry yazılamadı; sunucu yöneticisine bildir".into(),
+                                "could not write host registry; tell the server administrator".into(),
                             )).await?;
                             return Err(e);
                         }
@@ -322,7 +322,7 @@ async fn handle_native(
             {
                 let mut hosts = state.hosts.lock().await;
                 if hosts.contains_key(&id) {
-                    tracing::warn!("{id}: aynı anahtarlı eski oturum değiştiriliyor");
+                    tracing::warn!("{id}: replacing previous session with the same key");
                 }
                 hosts.insert(id.clone(), HostEntry {
                     name: name.clone(),
@@ -333,9 +333,9 @@ async fn handle_native(
                 });
             }
             write_rv(&mut wr, &RvMsg::RegisteredOk).await?;
-            tracing::info!("host kaydoldu: {id} ({name}) [{peer}]");
-            // uplink döngüsü: komut yaz + heartbeat/cevap oku.
-            // 65 saniye heartbeat gelmezse yarım-açık oturumu temizle.
+            tracing::info!("host registered: {id} ({name}) [{peer}]");
+            // uplink loop: write commands + read heartbeats/answers.
+            // Clean up a half-open session if no heartbeat arrives for 65 seconds.
             let mut liveness = tokio::time::interval(std::time::Duration::from_secs(10));
             liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -350,7 +350,7 @@ async fn handle_native(
                         let stale = state.hosts.lock().await.get(&id)
                             .map_or(true, |h| h.session_id != session_id || h.last_beat.elapsed().as_secs() > 65);
                         if stale {
-                            tracing::warn!("{id}: heartbeat zaman aşımı");
+                            tracing::warn!("{id}: heartbeat timed out");
                             break;
                         }
                     }
@@ -365,7 +365,7 @@ async fn handle_native(
                             }
                             RvMsg::ApprovalAnswer { client, allow } => {
                                 if !allow {
-                                    reject_pending(&state, &client, "şifre hatalı, bağlantı reddedildi ya da çok fazla hatalı deneme yapıldı (1 dk bekle)").await;
+                                    reject_pending(&state, &client, "wrong password, connection denied, or too many failed attempts (wait 1 minute)").await;
                                 }
                             }
                             _ => {}
@@ -379,36 +379,36 @@ async fn handle_native(
                     hosts.remove(&id);
                 }
             }
-            tracing::info!("host ayrıldı: {id}");
+            tracing::info!("host disconnected: {id}");
             Ok(())
         }
         RvMsg::Hello { id, auth } => {
-            // client: host ara + onay bekle
+            // client: look up host + wait for approval
             if !state.hello_allowed(peer_addr.ip()) {
-                write_rv(&mut wr, &RvMsg::Rejected("çok fazla deneme; 1 dakika sonra tekrar dene".into())).await?;
+                write_rv(&mut wr, &RvMsg::Rejected("too many attempts; try again in 1 minute".into())).await?;
                 return Ok(());
             }
             if !valid_id(&id) {
-                write_rv(&mut wr, &RvMsg::Rejected("9 haneli ID gerekli".into())).await?;
+                write_rv(&mut wr, &RvMsg::Rejected("a 9-digit ID is required".into())).await?;
                 return Ok(());
             }
             let auth = match auth {
                 Some(value) if value.len() <= 256 => Some(value),
                 None => None,
                 Some(_) => {
-                    write_rv(&mut wr, &RvMsg::Rejected("kimlik doğrulama verisi çok büyük".into())).await?;
+                    write_rv(&mut wr, &RvMsg::Rejected("authentication data too large".into())).await?;
                     return Ok(());
                 }
             };
             let host = state.hosts.lock().await.get(&id).map(|h| (h.name.clone(), h.cmd_tx.clone()));
             let Some((hname, cmd_tx)) = host else {
-                write_rv(&mut wr, &RvMsg::Rejected("ID bulunamadı (host çevrimiçi değil)".into())).await?;
+                write_rv(&mut wr, &RvMsg::Rejected("ID not found (host is not online)".into())).await?;
                 return Ok(());
             };
             let pending_permit = match state.pending_slots.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
-                    write_rv(&mut wr, &RvMsg::Rejected("sunucuda çok fazla bekleyen bağlantı var".into())).await?;
+                    write_rv(&mut wr, &RvMsg::Rejected("too many pending connections on the server".into())).await?;
                     return Ok(());
                 }
             };
@@ -435,19 +435,19 @@ async fn handle_native(
                 token,
                 auth,
             }).is_err() {
-                reject_pending(&state, &client_tag, "host komut kuyruğu dolu veya kapalı").await;
+                reject_pending(&state, &client_tag, "host command queue is full or closed").await;
                 return Ok(());
             }
-            tracing::info!("{client_tag} -> {id} ({hname}) onay bekleniyor");
-            // bu task biter; dial-back / ret / timeout bekleyenleri halleder
+            tracing::info!("{client_tag} -> {id} ({hname}) awaiting approval");
+            // this task ends here; dial-back / reject / timeout handle the pending entry
             Ok(())
         }
         RvMsg::ConnectBack { token, id, secret } => {
-            // Dial-back ancak kayıtlı host kimliği + CSPRNG token birlikte doğruysa kabul edilir.
+            // A dial-back is accepted only if both the registered host identity and the CSPRNG token match.
             let registered = state.hosts.lock().await.get(&id)
                 .is_some_and(|h| h.secret.as_str() == secret.as_str());
             if !registered {
-                tracing::warn!("yetkisiz dial-back: host kimliği doğrulanamadı");
+                tracing::warn!("unauthorized dial-back: host identity could not be verified");
                 return Ok(());
             }
             let pend = {
@@ -465,12 +465,12 @@ async fn handle_native(
                     Ok(())
                 }
                 Some(Pending { kind: PendingKind::Web { sink: Some(sink), stream: Some(stream), permit: Some(_permit) }, .. }) => {
-                    // Hoş geldin mesajını host gönderir (codec/isim/kalite onda).
+                    // The host sends the welcome message (it knows the codec/name/quality).
                     splice_ws(sink, stream, rd, wr).await;
                     Ok(())
                 }
                 _ => {
-                    tracing::warn!("geçersiz/expired dial-back token");
+                    tracing::warn!("invalid/expired dial-back token");
                     Ok(())
                 }
             }
@@ -490,7 +490,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 async fn reject_pending(state: &Arc<State>, client_tag: &str, msg: &str) {
-    // token tara (tag c + 32 hex karakter)
+    // parse the token (tag is 'c' + 32 hex characters)
     let token: Option<u128> = client_tag
         .strip_prefix('c')
         .and_then(|s| u128::from_str_radix(s, 16).ok());
@@ -511,7 +511,7 @@ async fn reject_pending(state: &Arc<State>, client_tag: &str, msg: &str) {
     }
 }
 
-/// Sertifika yolları: önce systemd kimlik bilgisi dizini, sonra RF_TLS_CERT/RF_TLS_KEY.
+/// Certificate paths: systemd credentials directory first, then RF_TLS_CERT/RF_TLS_KEY.
 fn tls_paths() -> (Option<String>, Option<String>) {
     if let Ok(dir) = std::env::var("CREDENTIALS_DIRECTORY") {
         let c = Path::new(&dir).join("cert.pem");
@@ -523,17 +523,17 @@ fn tls_paths() -> (Option<String>, Option<String>) {
     (std::env::var("RF_TLS_CERT").ok(), std::env::var("RF_TLS_KEY").ok())
 }
 
-/// "Permission denied" gibi dosya hatalarında ne yapılacağını açıkça yaz.
+/// On file errors such as "Permission denied", print clear instructions for fixing them.
 fn explain_file_error(e: &anyhow::Error, paths: &[&str]) {
     let denied = e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
     });
     if denied {
         let user = std::env::var("USER").unwrap_or_else(|_| "remotefriend".into());
-        eprintln!("HATA: dosya okunamadı/yazılamadı (izin yok): {}", paths.join(", "));
-        eprintln!("Çözüm: güncel servis dosyası sertifikayı LoadCredential ile verir (izinden bağımsız).");
-        eprintln!("  Kurulum betiğini yeniden çalıştır ya da elle: sudo chown root:{user} <dosya> && sudo chmod 640 <dosya>");
-        eprintln!("  Kayıt dizini için: sudo chown -R {user}:{user} /var/lib/remotefriend && sudo chmod 700 /var/lib/remotefriend");
+        eprintln!("ERROR: could not read/write file (permission denied): {}", paths.join(", "));
+        eprintln!("Fix: the current service file passes the certificate via LoadCredential (independent of file permissions).");
+        eprintln!("  Re-run the setup script, or manually: sudo chown root:{user} <file> && sudo chmod 640 <file>");
+        eprintln!("  For the registry directory: sudo chown -R {user}:{user} /var/lib/remotefriend && sudo chmod 700 /var/lib/remotefriend");
     }
 }
 
@@ -546,7 +546,7 @@ async fn main() -> Result<()> {
 
     let tls = match tls_paths() {
         (Some(c), Some(k)) => {
-            tracing::info!("TLS açık: {c}");
+            tracing::info!("TLS enabled: {c}");
             match remote_friend_common::tls::tls_acceptor(&c, &k) {
                 Ok(acc) => Some(acc),
                 Err(e) => {
@@ -557,10 +557,10 @@ async fn main() -> Result<()> {
         }
         _ => {
             if std::env::var("RF_PLAIN_OK").map(|v| v == "1").unwrap_or(false) {
-                tracing::warn!("!!! DÜZ (şifresiz) mod: sadece test için!");
+                tracing::warn!("!!! PLAINTEXT (unencrypted) mode: for testing only!");
                 None
             } else {
-                anyhow::bail!("TLS sertifikası yok. RF_TLS_CERT/RF_TLS_KEY ver ya da test için RF_PLAIN_OK=1");
+                anyhow::bail!("No TLS certificate. Set RF_TLS_CERT/RF_TLS_KEY, or RF_PLAIN_OK=1 for testing");
             }
         }
     };
@@ -574,7 +574,7 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
-    tracing::info!("host registry: {} ({} kayıt)", registry_path.display(), registry.len());
+    tracing::info!("host registry: {} ({} entries)", registry_path.display(), registry.len());
     let web_limit = std::env::var("RF_MAX_WEB_SESSIONS")
         .ok().and_then(|s| s.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(64);
     let pending_limit = std::env::var("RF_MAX_PENDING")
@@ -589,7 +589,7 @@ async fn main() -> Result<()> {
         hello_rate: std::sync::Mutex::new(HashMap::new()),
     });
 
-    // zaman aşımı süpürücü (60 sn onaysız bekleyenler)
+    // timeout sweeper (entries waiting >60 s without approval)
     {
         let st = state.clone();
         tokio::spawn(async move {
@@ -603,26 +603,26 @@ async fn main() -> Result<()> {
                         .collect()
                 };
                 for t in expired {
-                    reject_pending(&st, &client_tag(t), "onay zaman aşımı").await;
+                    reject_pending(&st, &client_tag(t), "approval timed out").await;
                 }
                 st.sweep_rate();
-                // Ölü host bağlantısı read_rv ile kapanır; session_id eski oturumun yenisini silmesini engeller.
+                // A dead host connection closes via read_rv; session_id prevents an old session from removing a newer one.
             }
         });
     }
 
-    // web (tarayıcı) sunucusu: port önce bağlanır; doluysa sessizce devam etmek yerine dur.
+    // web (browser) server: bind the port first; if it's taken, stop instead of silently continuing.
     {
         let web_bind = std::env::var("RF_WEB_BIND").unwrap_or("127.0.0.1".into());
         let web_listener = tokio::net::TcpListener::bind(format!("{web_bind}:{web_port}"))
             .await
             .with_context(|| {
-                format!("web portu {web_bind}:{web_port} açılamadı (başka bir uygulama kullanıyor olabilir; RF_WEB_PORT ile değiştir)")
+                format!("could not open web port {web_bind}:{web_port} (another application may be using it; change it with RF_WEB_PORT)")
             })?;
         let st = state.clone();
         tokio::spawn(async move {
             if let Err(e) = web_serve(web_listener, st).await {
-                tracing::error!("web sunucusu durdu: {e:#}");
+                tracing::error!("web server stopped: {e:#}");
                 std::process::exit(1);
             }
         });
@@ -632,13 +632,13 @@ async fn main() -> Result<()> {
     let native_limit = std::env::var("RF_MAX_NATIVE_CONNECTIONS")
         .ok().and_then(|s| s.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(128);
     let native_slots = Arc::new(tokio::sync::Semaphore::new(native_limit));
-    tracing::info!("rendezvous dinliyor: 0.0.0.0:{port} (TLS: {}, limit: {native_limit})", tls.is_some());
+    tracing::info!("rendezvous listening: 0.0.0.0:{port} (TLS: {}, limit: {native_limit})", tls.is_some());
     loop {
         let (tcp, peer) = listener.accept().await?;
         let permit = match native_slots.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                tracing::warn!("native bağlantı limiti dolu; {peer} reddedildi");
+                tracing::warn!("native connection limit reached; rejected {peer}");
                 drop(tcp);
                 continue;
             }
@@ -648,13 +648,13 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(e) = handle_native(tcp, peer, st, tls).await {
-                tracing::warn!("bağlantı hatası {peer}: {e:#}");
+                tracing::warn!("connection error {peer}: {e:#}");
             }
         });
     }
 }
 
-// ---- web (tarayıcı clientlar): aynı sayfa, ID ile yönlendirme ----
+// ---- web (browser clients): one page, routed by ID ----
 
 async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Result<()> {
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -694,7 +694,7 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
         response
     }
 
-    /// nginx arkasında gerçek istemci IP'si (yalnızca yerel proxy'den gelen başlığa güvenilir).
+    /// Real client IP behind nginx (the header is trusted only from a local proxy).
     fn client_ip(peer: std::net::SocketAddr, headers: &HeaderMap) -> std::net::IpAddr {
         if peer.ip().is_loopback() {
             if let Some(ip) = headers
@@ -715,7 +715,7 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
         headers: HeaderMap,
     ) -> Response {
         if !origin_allowed(&headers) {
-            tracing::warn!("WebSocket Origin reddedildi");
+            tracing::warn!("WebSocket Origin rejected");
             return StatusCode::FORBIDDEN.into_response();
         }
         if !state.hello_allowed(client_ip(peer, &headers)) {
@@ -738,7 +738,7 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
         ip: std::net::IpAddr,
     ) {
         let (mut sink, mut stream) = socket.split();
-        // hello (15 sn): {t:"hello", id:"123456789", password:"...", jpeg:true?, resume?}
+        // hello (15 s): {t:"hello", id:"123456789", password:"...", jpeg:true?, resume?}
         let hello = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
         let (id, password, jpeg) = match hello {
             Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => {
@@ -747,8 +747,8 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
                     .map(|v| {
                         let pw: String = v.get("password").and_then(|x| x.as_str())
                             .unwrap_or("").chars().take(200).collect();
-                        // Yeniden bağlanma / güvenilir cihaz belirteçleri host'a parolayla birlikte
-                        // iletilir: [rf-resume:<32hex>:][rf-dev:<64hex>:]<parola>
+                        // Reconnect / trusted-device tokens are forwarded to the host together with
+                        // the password: [rf-resume:<32hex>:][rf-dev:<64hex>:]<password>
                         let hex = |k: &str, n: usize| {
                             v.get(k).and_then(|x| x.as_str())
                                 .filter(|t| t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -773,18 +773,18 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
             _ => (String::new(), String::new(), false),
         };
         if !valid_id(&id) {
-            let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"9 haneli ID gerekli"}"#.into())).await;
+            let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"a 9-digit ID is required"}"#.into())).await;
             return;
         }
         let host = state.hosts.lock().await.get(&id).map(|h| (h.name.clone(), h.cmd_tx.clone()));
         let Some((hname, cmd_tx)) = host else {
-            let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"ID bulunamadı (host çevrimiçi değil)"}"#.into())).await;
+            let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"ID not found (host is not online)"}"#.into())).await;
             return;
         };
         let pending_permit = match state.pending_slots.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"sunucuda çok fazla bekleyen bağlantı var"}"#.into())).await;
+                let _ = sink.send(Message::Text(r#"{"t":"reject","msg":"too many pending connections on the server"}"#.into())).await;
                 return;
             }
         };
@@ -811,16 +811,16 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
         let kind = if jpeg { "web-jpeg" } else { "web" };
         if cmd_tx.try_send(RvMsg::ApprovalRequest {
             client: tag.clone(),
-            addr: format!("tarayıcı {ip}"),
+            addr: format!("browser {ip}"),
             kind: kind.into(),
             token,
             auth: Some(password),
         }).is_err() {
-            reject_pending(&state, &tag, "host bağlantısı kapandı").await;
+            reject_pending(&state, &tag, "host connection closed").await;
             return;
         }
-        tracing::info!("{tag} (web) -> {id} ({hname}) kimlik doğrulama/onay bekleniyor");
-        // sonrası: host dial-back / ret / timeout halleder
+        tracing::info!("{tag} (web) -> {id} ({hname}) awaiting authentication/approval");
+        // from here on: host dial-back / reject / timeout take over
     }
 
     let app = axum::Router::new()
@@ -828,7 +828,7 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
         .route("/info", get(info))
         .route("/ws", get(ws_handler))
         .with_state(state);
-    tracing::info!("web arayüzü: {}", listener.local_addr()?);
+    tracing::info!("web UI: {}", listener.local_addr()?);
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# RemoteFriend tek komutla kurulum + başlatma (Linux x86_64: X11 ve Wayland).
-# Kullanım: ./start_remotefriend_linux.sh
-# Yeni sürüm çıktıysa programları günceller, sunucu ayarını bir kez sorar
-# (~/.config/remotefriend/local.env içinde kalır) ve host'u başlatır.
+# RemoteFriend terminal host (alternative to the desktop app; Linux x86_64, X11 and Wayland).
+# Most people should install the app instead: RemoteFriend-linux-amd64.deb from the releases page.
+# Usage: ./start_remotefriend_linux.sh
+# Updates the programs when a new release is out, asks for the server once
+# (saved in ~/.config/remotefriend/local.env) and starts the host.
 set -euo pipefail
 
 REPO_API="https://api.github.com/repos/siyahkarga/remotefriend/releases/latest"
@@ -14,16 +15,16 @@ VER_FILE="$BIN_DIR/.rf-version"
 latest="$(curl -s --max-time 8 "$REPO_API" | grep '"tag_name"' | cut -d'"' -f4 || true)"
 current="$(cat "$VER_FILE" 2>/dev/null || true)"
 updated_ok=1
-for bin in remote-friend-host remote-friend-client; do
+for bin in remote-friend-host; do
   if [ ! -x "$BIN_DIR/$bin" ] || { [ -n "$latest" ] && [ "$latest" != "$current" ]; }; then
-    echo "İndiriliyor: $bin ${latest:-}"
+    echo "Downloading: $bin ${latest:-}"
     if curl -fsSL "$BASE/$bin" -o "$BIN_DIR/$bin.new"; then
       chmod +x "$BIN_DIR/$bin.new"
       mv -f "$BIN_DIR/$bin.new" "$BIN_DIR/$bin"
     else
       rm -f "$BIN_DIR/$bin.new"
-      [ -x "$BIN_DIR/$bin" ] || { echo "İNDİRME HATASI: internet bağlantısını kontrol et." >&2; exit 1; }
-      echo "Uyarı: güncellenemedi, mevcut sürümle devam ediliyor."
+      [ -x "$BIN_DIR/$bin" ] || { echo "DOWNLOAD ERROR: check your internet connection." >&2; exit 1; }
+      echo "Warning: update failed, continuing with the current version."
       updated_ok=0
     fi
   fi
@@ -35,13 +36,13 @@ mkdir -p "$(dirname "$ENV_FILE")"
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 if [ -z "${RF_RV_SERVER+x}" ]; then
-  echo "İnternetten (telefondan) bağlanmak için VPS adresini yaz; sadece yerel ağ için boş bırak."
-  read -r -p "Sunucu [örnek 1.2.3.4:33202, boş = yerel ağ]: " RF_RV_SERVER || true
+  echo "To connect over the internet (e.g. from your phone), enter the VPS address; leave empty for local network only."
+  read -r -p "Server [e.g. 1.2.3.4:33202, empty = local network]: " RF_RV_SERVER || true
 fi
 
-# Değerler kabuk-güvenli tırnaklanır (şifrede boşluk, $, ; vb. olabilir).
+# Values are shell-quoted safely (the password may contain spaces, $, ; etc.).
 {
-  echo "# Otomatik oluşturuldu; tekrar sorması için bu dosyayı sil."
+  echo "# Generated automatically; delete this file to be asked again."
   printf 'RF_RV_SERVER=%q\n' "${RF_RV_SERVER:-}"
   [ -n "${RF_WEB_URL:-}" ] && printf 'RF_WEB_URL=%q\n' "$RF_WEB_URL"
   [ -n "${RF_RV_FP:-}" ] && printf 'RF_RV_FP=%q\n' "$RF_RV_FP"
@@ -52,7 +53,7 @@ chmod 600 "$ENV_FILE" 2>/dev/null || true
 
 export RF_RV_SERVER RF_WEB_URL RF_RV_FP REMOTE_FRIEND_PASS
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-  echo "Wayland: ekranda 'uzak masaüstü' izni çıkınca Paylaş/İzin ver de (bir kez sorulur)."
+  echo "Wayland: when the 'remote desktop' permission prompt appears, choose Share/Allow (asked once)."
 fi
 echo
 exec "$BIN_DIR/remote-friend-host"

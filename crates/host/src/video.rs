@@ -1,11 +1,11 @@
-//! Ekran yakalama + kodlama hatları. Her hat (H.264, JPEG) tek kez çalışır ve
-//! karelerini tüm izleyicilere yayınlar; yavaş izleyici kare biriktirmez.
+//! Screen capture + encoding pipelines. Each pipeline (H.264, JPEG) runs once and
+//! broadcasts its frames to all viewers; a slow viewer does not pile up frames.
 //!
-//! - Wayland: PipeWire yalnızca ekran değişince kare verir (hasar tabanlı).
-//! - X11/Windows/macOS: xcap her turda yakalar; değişmeyen kare kodlanmaz.
-//! - Anahtar kare (IDR) yalnızca gerektiğinde: yeni izleyici, kare kaybı, istek.
-//!   Ekran durağansa son kare yeniden kodlanır; yeni izleyici siyah ekran görmez.
-//! - Ağ tıkanınca bit hızı otomatik düşer, düzelince yavaşça geri çıkar.
+//! - Wayland: PipeWire delivers frames only when the screen changes (damage-based).
+//! - X11/Windows/macOS: xcap captures every round; unchanged frames are not encoded.
+//! - Keyframes (IDR) only when needed: new viewer, frame loss, explicit request.
+//!   On a static screen the last frame is re-encoded, so a new viewer never sees black.
+//! - On network congestion the bitrate drops automatically and slowly recovers afterwards.
 
 use crate::convert::{self, RawFrame};
 use anyhow::{Context, Result};
@@ -17,10 +17,10 @@ use tokio::sync::broadcast;
 #[derive(Debug)]
 pub(crate) struct EncodedFrame {
     pub seq: u64,
-    /// Gönderilen (küçültülmüş) kare boyutu.
+    /// Size of the sent (downscaled) frame.
     pub w: u32,
     pub h: u32,
-    /// Yakalama boyutu: istemci koordinatları buna çevrilir.
+    /// Capture size: client coordinates are mapped to this.
     pub src_w: u32,
     pub src_h: u32,
     pub key: bool,
@@ -29,7 +29,7 @@ pub(crate) struct EncodedFrame {
 }
 
 impl EncodedFrame {
-    /// Gönderilen kare uzayındaki noktayı yakalama uzayına çevir.
+    /// Map a point from sent-frame space to capture space.
     pub(crate) fn to_capture(&self, x: u32, y: u32) -> (u32, u32) {
         if self.w == 0 || self.h == 0 {
             return (x, y);
@@ -40,7 +40,7 @@ impl EncodedFrame {
     }
 }
 
-// ---- kalite ön ayarları ----
+// ---- quality presets ----
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Preset {
@@ -90,7 +90,7 @@ fn env_u32(name: &str, range: std::ops::RangeInclusive<u32>) -> Option<u32> {
     std::env::var(name).ok().and_then(|s| s.trim().parse().ok()).filter(|v| range.contains(v))
 }
 
-/// Ortam değişkenleri "Dengeli" profili ayarlar; diğerleri ona göre türetilir.
+/// Environment variables tune the "Balanced" profile; the others are derived from it.
 pub(crate) fn profile(p: Preset) -> Profile {
     let fps = env_u32("RF_FPS", 5..=60).unwrap_or(30);
     let max_w = env_u32("RF_MAX_WIDTH", 640..=7680).unwrap_or(1920) & !1;
@@ -135,28 +135,28 @@ pub(crate) fn preset() -> Preset {
 
 pub(crate) fn set_preset(p: Preset) {
     if preset() != p {
-        tracing::info!("görüntü kalitesi: {}", p.name());
+        tracing::info!("video quality: {}", p.name());
         PRESET.store(p as u8, Ordering::Relaxed);
     }
 }
 
-// ---- hat kontrolü ----
+// ---- pipeline control ----
 
 static FORCE_KEY: AtomicBool = AtomicBool::new(false);
 static FORCE_JPEG: AtomicBool = AtomicBool::new(false);
 static CONGESTION: AtomicU32 = AtomicU32::new(0);
 
-/// Bir sonraki H.264 karesi anahtar kare olsun (yeni izleyici / kayıp kare).
+/// Make the next H.264 frame a keyframe (new viewer / lost frame).
 pub(crate) fn request_keyframe() {
     FORCE_KEY.store(true, Ordering::Relaxed);
 }
 
-/// JPEG izleyicisi kare kaçırdı: ekran durağan olsa bile güncel kare gönderilsin.
+/// A JPEG viewer missed a frame: send a fresh frame even if the screen is static.
 pub(crate) fn request_jpeg_refresh() {
     FORCE_JPEG.store(true, Ordering::Relaxed);
 }
 
-/// Bir izleyici yetişemedi: bit hızı düşürülür.
+/// A viewer could not keep up: lower the bitrate.
 pub(crate) fn report_congestion() {
     CONGESTION.fetch_add(1, Ordering::Relaxed);
 }
@@ -171,7 +171,7 @@ pub(crate) fn h264() -> &'static broadcast::Sender<Arc<EncodedFrame>> {
         std::thread::Builder::new()
             .name("rf-h264".into())
             .spawn(move || h264_worker(worker))
-            .expect("h264 thread başlatılamadı");
+            .expect("failed to start h264 thread");
         tx
     })
 }
@@ -183,12 +183,12 @@ pub(crate) fn jpeg() -> &'static broadcast::Sender<Arc<EncodedFrame>> {
         std::thread::Builder::new()
             .name("rf-jpeg".into())
             .spawn(move || jpeg_worker(worker))
-            .expect("jpeg thread başlatılamadı");
+            .expect("failed to start jpeg thread");
         tx
     })
 }
 
-// ---- yakalama ----
+// ---- capture ----
 
 fn test_pattern() -> bool {
     std::env::var("RF_TEST_PATTERN").map(|v| v == "1").unwrap_or(false)
@@ -213,7 +213,7 @@ impl Capturer {
         }
     }
 
-    /// Yeni kare varsa döner; ekran değişmediyse `None`.
+    /// Returns a new frame if there is one; `None` if the screen has not changed.
     fn next(&mut self, timeout: Duration) -> Result<Option<Arc<RawFrame>>> {
         if test_pattern() {
             return Ok(Some(Arc::new(self.pattern())));
@@ -225,7 +225,7 @@ impl Capturer {
                 return Ok(crate::wayland::wait_frame(&mut self.last_gen, timeout));
             }
             std::thread::sleep(timeout);
-            anyhow::bail!("Wayland ekran paylaşım izni yok (host masaüstündeki izin penceresini onayla)");
+            anyhow::bail!("no Wayland screen sharing permission (approve the permission dialog on the host desktop)");
         }
         let _ = timeout;
         self.xcap()
@@ -233,19 +233,19 @@ impl Capturer {
 
     fn xcap(&mut self) -> Result<Option<Arc<RawFrame>>> {
         if self.monitor.is_none() {
-            let all = xcap::Monitor::all().context("monitör listesi alınamadı (macOS: Ekran Kaydı izni gerekli)")?;
+            let all = xcap::Monitor::all().context("failed to list monitors (macOS: Screen Recording permission required)")?;
             let primary = all.iter().position(|m| m.is_primary().unwrap_or(false)).unwrap_or(0);
             self.monitor = all.into_iter().nth(primary);
             if self.monitor.is_none() {
-                anyhow::bail!("monitör yok");
+                anyhow::bail!("no monitor");
             }
         }
-        let mon = self.monitor.as_ref().expect("monitör az önce seçildi");
+        let mon = self.monitor.as_ref().expect("monitor was just selected");
         let img = match mon.capture_image() {
             Ok(img) => img,
             Err(e) => {
                 self.monitor = None;
-                return Err(e).context("ekran yakalanamadı (macOS: Ekran Kaydı izni gerekli)");
+                return Err(e).context("screen capture failed (macOS: Screen Recording permission required)");
             }
         };
         let scale = mon.scale_factor().ok().filter(|s| *s > 0.0).unwrap_or(1.0);
@@ -264,7 +264,7 @@ impl Capturer {
         Ok(Some(Arc::new(RawFrame::from_rgba(w, h, data))))
     }
 
-    /// CI/test için sentetik kare: renk ve bir kutu zamanla kayar.
+    /// Synthetic frame for CI/tests: the colors and a box shift over time.
     fn pattern(&mut self) -> RawFrame {
         let (w, h) = (1280u32, 720u32);
         self.pattern_t = self.pattern_t.wrapping_add(1);
@@ -311,7 +311,7 @@ impl Enc {
         use openh264::encoder::{
             BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Level, Profile, UsageType, VuiConfig,
         };
-        // Level 4.1 1080p'ye kadar; üstü (1440p/4K) için 5.1.
+        // Level 4.1 up to 1080p; 5.1 above that (1440p/4K).
         let level = if (w as u64 * h as u64) <= 1920 * 1088 { Level::Level_4_1 } else { Level::Level_5_1 };
         let config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(bitrate))
@@ -320,25 +320,25 @@ impl Enc {
             .profile(Profile::Baseline)
             .level(level)
             .skip_frames(true)
-            // Ekran içeriği modunda desteklenmiyor (OpenH264 zaten kapatıp uyarı basıyor).
+            // Not supported in screen content mode (OpenH264 turns it off anyway and logs a warning).
             .adaptive_quantization(false)
             .background_detection(false)
             .num_threads(0)
             .vui(VuiConfig::bt709())
-            // Güvenlik ağı: 10 sn'de bir; asıl anahtar kareler istek üzerine.
+            // Safety net: every 10 s; real keyframes are sent on request.
             .intra_frame_period(IntraFramePeriod::from_num_frames(fps * 10));
         let enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
-            .context("h264 encoder açılamadı")?;
+            .context("failed to open h264 encoder")?;
         Ok(Self { enc, w, h, bitrate })
     }
 
-    /// Kodlayıcıyı yeniden kurmadan (IDR üretmeden) hedef bit hızını değiştir.
+    /// Change the target bitrate without recreating the encoder (no IDR).
     fn set_bitrate(&mut self, bps: u32) {
         let mut info = openh264_sys2::SBitrateInfo {
             iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
             iBitrate: bps as std::os::raw::c_int,
         };
-        // SAFETY: kodlayıcı başlatılmış; seçenek yapısı çağrı süresince geçerli.
+        // SAFETY: the encoder is initialized; the option struct is valid for the duration of the call.
         let rc = unsafe {
             self.enc.raw_api().set_option(
                 openh264_sys2::ENCODER_OPTION_BITRATE,
@@ -348,7 +348,7 @@ impl Enc {
         if rc == 0 {
             self.bitrate = bps;
         } else {
-            tracing::debug!("bit hızı değiştirilemedi (rc={rc})");
+            tracing::debug!("failed to change bitrate (rc={rc})");
         }
     }
 }
@@ -374,7 +374,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
         let receivers = tx.receiver_count();
         if receivers == 0 {
             if enc.is_some() {
-                tracing::info!("izleyici kalmadı; H.264 hattı beklemede");
+                tracing::info!("no viewers left; H.264 pipeline idle");
             }
             enc = None;
             last_receivers = 0;
@@ -395,7 +395,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
             reconvert = true;
             FORCE_KEY.store(true, Ordering::Relaxed);
         }
-        // Hız sınırı son yakalama denemesine göre: durağan ekranda da döngü CPU yakmaz.
+        // Rate limit is based on the last capture attempt, so the loop doesn't burn CPU on a static screen.
         let period = Duration::from_micros(1_000_000 / prof.fps.max(1) as u64);
         if let Some(t) = last_attempt {
             let el = t.elapsed();
@@ -425,7 +425,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
             Err(e) => {
                 errors += 1;
                 if errors <= 3 || errors % 50 == 0 {
-                    tracing::warn!("yakalama hatası ({errors}): {e:#}");
+                    tracing::warn!("capture error ({errors}): {e:#}");
                 }
                 if force {
                     FORCE_KEY.store(true, Ordering::Relaxed);
@@ -442,7 +442,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
         }
         st_conv += conv_t.elapsed();
 
-        // Uyarlamalı bit hızı: tıkanıklıkta %30 düş, 6 sn sorunsuzsa %15 çık.
+        // Adaptive bitrate: drop 30% on congestion, raise 15% after 6 s without trouble.
         if last_rate_check.elapsed() >= Duration::from_secs(1) {
             last_rate_check = Instant::now();
             if CONGESTION.swap(0, Ordering::Relaxed) > 0 {
@@ -458,7 +458,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
         if needs_new {
             match Enc::new(dw, dh, target_bps, prof.fps) {
                 Ok(e) => {
-                    tracing::info!("H.264 kodlayıcı: {dw}x{dh}, {} kbit/s, {} fps", target_bps / 1000, prof.fps);
+                    tracing::info!("H.264 encoder: {dw}x{dh}, {} kbit/s, {} fps", target_bps / 1000, prof.fps);
                     enc = Some(e);
                 }
                 Err(e) => {
@@ -468,9 +468,9 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
                 }
             }
         }
-        let e = enc.as_mut().expect("kodlayıcı az önce kuruldu");
+        let e = enc.as_mut().expect("encoder was just created");
         if (e.bitrate as i64 - target_bps as i64).unsigned_abs() > (e.bitrate / 20) as u64 {
-            tracing::debug!("bit hızı: {} -> {} kbit/s", e.bitrate / 1000, target_bps / 1000);
+            tracing::debug!("bitrate: {} -> {} kbit/s", e.bitrate / 1000, target_bps / 1000);
             e.set_bitrate(target_bps);
         }
         let force_key = force || reconvert || needs_new;
@@ -491,14 +491,14 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
                 (bs.to_vec(), key)
             }
             Err(err) => {
-                tracing::warn!("h264 kodlama hatası: {err}");
+                tracing::warn!("h264 encode error: {err}");
                 enc = None;
                 continue;
             }
         };
         st_enc += enc_t.elapsed();
         if force_key && !key {
-            // Hız kontrolü kareyi atladı: anahtar kare isteğini koru.
+            // Rate control skipped the frame: keep the keyframe request pending.
             FORCE_KEY.store(true, Ordering::Relaxed);
         }
         if data.is_empty() {
@@ -522,7 +522,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
         if el >= Duration::from_secs(10) {
             let n = st_frames.max(1) as f64;
             tracing::info!(
-                "video: {:.1} fps, {:.0} kbit/s, dönüşüm {:.1} ms, kodlama {:.1} ms, {}x{}, izleyici {}",
+                "video: {:.1} fps, {:.0} kbit/s, convert {:.1} ms, encode {:.1} ms, {}x{}, viewers {}",
                 st_frames as f64 / el.as_secs_f64(),
                 st_bytes as f64 * 8.0 / 1000.0 / el.as_secs_f64(),
                 st_conv.as_secs_f64() * 1000.0 / n,
@@ -536,7 +536,7 @@ fn h264_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
     }
 }
 
-// ---- JPEG (WebCodecs'siz tarayıcılar) ----
+// ---- JPEG (browsers without WebCodecs) ----
 
 fn jpeg_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
     use image::codecs::jpeg::JpegEncoder;
@@ -583,7 +583,7 @@ fn jpeg_worker(tx: broadcast::Sender<Arc<EncodedFrame>>) {
             Err(e) => {
                 errors += 1;
                 if errors <= 3 || errors % 50 == 0 {
-                    tracing::warn!("JPEG yakalama hatası ({errors}): {e:#}");
+                    tracing::warn!("JPEG capture error ({errors}): {e:#}");
                 }
                 std::thread::sleep(Duration::from_millis(200));
                 continue;

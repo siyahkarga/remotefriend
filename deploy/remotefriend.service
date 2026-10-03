@@ -11,18 +11,18 @@ WorkingDirectory=/opt/remotefriend
 UMask=0077
 
 Environment=RF_RV_PORT=33202
-# Yalnızca yerel; nginx HTTPS arkasından. Kurulum betiği port doluysa başka port seçer.
+# Local only; served through nginx HTTPS. The setup script picks another port if this one is taken.
 Environment=RF_WEB_PORT=33203
 Environment=RF_WEB_BIND=127.0.0.1
 Environment=RF_HOST_REGISTRY=/var/lib/remotefriend/hosts.json
 Environment=RF_MAX_PENDING=256
 Environment=RF_MAX_NATIVE_CONNECTIONS=128
 Environment=RF_MAX_WEB_SESSIONS=64
-# Sertifika/anahtarı systemd root olarak okuyup servise verir ($CREDENTIALS_DIRECTORY).
-# Böylece dosya sahipliği/izinleri yüzünden "Permission denied (os error 13)" olmaz.
+# systemd reads the certificate/key as root and hands them to the service ($CREDENTIALS_DIRECTORY),
+# so file ownership/permissions can't cause "Permission denied (os error 13)".
 LoadCredential=cert.pem:/opt/remotefriend/cert.pem
 LoadCredential=key.pem:/opt/remotefriend/key.pem
-# Eski systemd (LoadCredential yok) için yedek yol:
+# Fallback for older systemd (no LoadCredential):
 Environment=RF_TLS_CERT=/opt/remotefriend/cert.pem
 Environment=RF_TLS_KEY=/opt/remotefriend/key.pem
 ExecStart=/opt/remotefriend/remote-friend-rendezvous
@@ -31,7 +31,7 @@ Restart=always
 RestartSec=5
 LimitNOFILE=4096
 TasksMax=512
-# /var/lib/remotefriend'i systemd oluşturur ve servis kullanıcısına verir.
+# systemd creates /var/lib/remotefriend and gives it to the service user.
 StateDirectory=remotefriend
 StateDirectoryMode=0700
 

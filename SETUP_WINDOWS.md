@@ -1,36 +1,41 @@
-# Windows kurulumu
+# Windows setup
 
-## Hazır binary ile
+## Recommended: installer
 
-`remote-friend-host.exe`, `remote-friend-client.exe` ve gerekiyorsa `start_remotefriend_win64.bat` dosyalarını aynı klasöre koy.
+Download and run `RemoteFriend-Setup.exe` from the latest release. It installs RemoteFriend with a few clicks;
+this is the recommended way for most users.
 
-Firewall'u yalnızca gerekli ağ profillerinde aç. Yönetici PowerShell:
+## Alternative (advanced): prebuilt binaries + starter script
+
+Put `remote-friend-host.exe`, `remote-friend-client.exe` and, if needed, `start_remotefriend_win64.bat` in the same folder.
+
+Open the firewall only on the network profiles you need. In an administrator PowerShell:
 
 ```powershell
 netsh advfirewall firewall add rule name="RemoteFriend Native LAN" dir=in action=allow protocol=TCP localport=33200 profile=private
 netsh advfirewall firewall add rule name="RemoteFriend Web LAN" dir=in action=allow protocol=TCP localport=33201 profile=private
 ```
 
-`33200` ve `33201` portlarını modemde internete yönlendirme.
+Do not forward ports `33200` and `33201` to the internet on your router.
 
-`start_remotefriend_win64.bat` çalıştır (yeni sürüm çıkınca kendini günceller). `REMOTE_FRIEND_PASS` önceden ayarlanmamışsa host terminalde `abcde-23456` biçiminde bir şifre gösterir. İstemcide bu şifreyi kullan ve host terminalinde bağlantıyı `E` ile onayla.
+Run `start_remotefriend_win64.bat` (it updates itself when a new release is out). If `REMOTE_FRIEND_PASS` is not set beforehand, the host shows a password like `abcde-23456`. Use that password on the client, then approve the connection on the host (**Allow** or **Always allow**).
 
-Telefondan/tarayıcıdan en akıcı görüntü VPS'in HTTPS adresinden gelir (H.264). LAN tarayıcı sayfası (`http://IP:33201`) düz HTTP olduğu için JPEG moduna düşer; LAN'da akıcı görüntü için `remote-friend-client.exe` kullan.
+From a phone or browser, the smoothest video comes from the VPS's HTTPS address (H.264). The LAN browser page (`http://IP:33201`) is plain HTTP, so it falls back to JPEG mode; for smooth video on the LAN, use `remote-friend-client.exe`.
 
-## Kalite
+## Quality
 
-Bağlıyken tarayıcıda ⚙ → Hızlı / Dengeli / Net. Varsayılanı değiştirmek için:
+While connected, in the browser choose ⚙ → Fast / Balanced / Sharp. To change the default:
 
 ```bat
 set RF_QUALITY=fast
 start_remotefriend_win64.bat
 ```
 
-Kalıcı bir parola kullanılacaksa en az 16 rastgele karakter seç:
+If you use a fixed password, choose at least 16 random characters:
 
 ```bat
-set REMOTE_FRIEND_PASS=buraya_guclu_rastgele_sifre
+set REMOTE_FRIEND_PASS=your_strong_random_password_here
 start_remotefriend_win64.bat
 ```
 
-Komut geçmişi ve `.bat` dosyası içinde gerçek parolayı bırakmamaya dikkat et.
+Be careful not to leave the real password in your command history or in a `.bat` file.

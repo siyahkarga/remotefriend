@@ -1,2 +1,2 @@
-//! Tarayıcı arayüzü (host ve rendezvous aynı sayfayı sunar).
+//! Browser UI (served by both the host and the relay server).
 pub const WEBAPP: &str = include_str!("webapp.html");

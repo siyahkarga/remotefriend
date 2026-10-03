@@ -1,10 +1,10 @@
-//! Ham ekran karesi -> I420 (H.264) / RGB (JPEG) dönüşümü.
+//! Raw screen frame -> I420 (H.264) / RGB (JPEG) conversion.
 //!
-//! Tek geçişte: piksel sırası (BGRx/RGBx/...) + küçültme + renk uzayı.
-//! Eski hatta RGBA kopya -> resize -> RGB kopya -> YUV olmak üzere dört tam kare
-//! kopya vardı; burada kaynak bir kez okunur, satır çiftleri iş parçacıklarına bölünür.
+//! In a single pass: pixel order (BGRx/RGBx/...) + downscaling + color space.
+//! The old pipeline made four full-frame copies (RGBA copy -> resize -> RGB copy -> YUV);
+//! here the source is read once and row pairs are split across threads.
 
-/// Kaynak piksel düzeni (4 bayt/piksel).
+/// Source pixel layout (4 bytes/pixel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PixFmt {
     /// B, G, R, X (PipeWire BGRx/BGRA, Windows/macOS BGRA)
@@ -13,7 +13,7 @@ pub(crate) enum PixFmt {
     Rgbx,
 }
 
-/// Yakalanan ham kare. `stride` bayt cinsinden satır uzunluğudur.
+/// Captured raw frame. `stride` is the row length in bytes.
 pub(crate) struct RawFrame {
     pub w: u32,
     pub h: u32,
@@ -35,7 +35,7 @@ impl RawFrame {
     }
 }
 
-/// Hedef boyut: en-boy oranı korunur, genişlik `max_w`'yu aşmaz, ikisi de çift.
+/// Target size: aspect ratio is kept, width does not exceed `max_w`, both are even.
 pub(crate) fn target_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
     let (mut dw, mut dh) = (w, h);
     if w > max_w {
@@ -45,7 +45,7 @@ pub(crate) fn target_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
     ((dw & !1).max(2), (dh & !1).max(2))
 }
 
-/// Kaynak eksende hedef pikselin kapladığı aralık [a, b).
+/// Range [a, b) on the source axis covered by each target pixel.
 fn spans(src: u32, dst: u32) -> Vec<(u32, u32)> {
     (0..dst)
         .map(|i| {
@@ -56,7 +56,7 @@ fn spans(src: u32, dst: u32) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Bir hedef satırını RGB olarak üret (kutu filtresi ile ortalama).
+/// Produce one target row as RGB (averaged with a box filter).
 #[inline]
 fn sample_row(src: &RawFrame, xs: &[(u32, u32)], ys: (u32, u32), out: &mut [u8]) {
     let (ri, bi) = match src.fmt {
@@ -96,13 +96,13 @@ fn workers(rows: usize) -> usize {
     n.clamp(1, 4).min(rows.max(1))
 }
 
-/// BT.709 sınırlı aralık (encoder VUI'si bt709). Tamsayı, 8 bit ölçek.
+/// BT.709 limited range (the encoder VUI is bt709). Integer math, 8-bit scale.
 #[inline]
 fn y709(r: i32, g: i32, b: i32) -> u8 {
     ((47 * r + 157 * g + 16 * b + 128) >> 8).wrapping_add(16).clamp(16, 235) as u8
 }
 
-/// Ham kareyi `dw x dh` I420'ye çevirir. `out` yeniden kullanılır.
+/// Converts the raw frame to `dw x dh` I420. `out` is reused.
 pub(crate) fn to_i420(src: &RawFrame, dw: u32, dh: u32, out: &mut Vec<u8>) -> bool {
     if !src.valid() || dw < 2 || dh < 2 || dw % 2 != 0 || dh % 2 != 0 {
         return false;
@@ -156,7 +156,7 @@ pub(crate) fn to_i420(src: &RawFrame, dw: u32, dh: u32, out: &mut Vec<u8>) -> bo
     true
 }
 
-/// Ham kareyi `dw x dh` RGB'ye çevirir (JPEG yedek yolu için).
+/// Converts the raw frame to `dw x dh` RGB (for the JPEG fallback path).
 pub(crate) fn to_rgb(src: &RawFrame, dw: u32, dh: u32) -> Option<Vec<u8>> {
     if !src.valid() || dw == 0 || dh == 0 {
         return None;
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn channel_order_is_respected() {
-        // Saf kırmızı: BGRx'te [0,0,255,x]. V (Cr) yüksek, U (Cb) düşük olmalı.
+        // Pure red: [0,0,255,x] in BGRx. V (Cr) must be high, U (Cb) low.
         let mut out = Vec::new();
         assert!(to_i420(&solid(8, 8, PixFmt::Bgrx, [0, 0, 255, 255]), 8, 8, &mut out));
         let u = out[64];

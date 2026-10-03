@@ -1,4 +1,4 @@
-//! Kalıcı kimlik + ayar dosyaları (~/.config/remotefriend/).
+//! Persistent identity and settings files (~/.config/remotefriend/).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ pub fn config_dir() -> PathBuf {
     d
 }
 
-/// Hassas ayarları Unix'te 0600 izinle yazar.
+/// Writes sensitive settings with 0600 permissions on Unix.
 pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).write(true).truncate(true);
@@ -37,7 +37,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Kalıcı 9 haneli host ID'si (yoksa CSPRNG ile üretir + saklar).
+/// Persistent 9-digit host ID (generated with a CSPRNG and saved if missing).
 pub fn load_or_create_host_id() -> String {
     let p = config_dir().join("host_id");
     if let Ok(id) = std::fs::read_to_string(&p) {
@@ -51,8 +51,8 @@ pub fn load_or_create_host_id() -> String {
     id
 }
 
-/// Rendezvous'a host kimliğini kanıtlayan 256-bit kalıcı sır.
-/// Bu değer karşı tarafa verilmez; sadece TLS içindeki host<->VPS kayıtlarında kullanılır.
+/// Persistent 256-bit secret proving the host's identity to the relay.
+/// Never shown to clients; only used for host<->relay registration inside TLS.
 pub fn load_or_create_host_secret() -> String {
     let p = config_dir().join("host_secret");
     if let Ok(secret) = std::fs::read_to_string(&p) {
@@ -66,11 +66,14 @@ pub fn load_or_create_host_secret() -> String {
     secret
 }
 
-/// Rendezvous sunucu ayarı (adres + sertifika fingerprint).
+/// Relay server settings (address + pinned certificate fingerprint + public web URL).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct RvConfig {
     pub server: String,
     pub fp: String,
+    /// Address phones/browsers open (e.g. https://remote.example.com). Optional.
+    #[serde(default)]
+    pub web_url: String,
 }
 
 pub fn load_rv_config() -> RvConfig {
