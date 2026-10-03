@@ -62,6 +62,9 @@ pub(crate) struct App {
     settings_open: bool,
     settings_server: String,
     settings_web: String,
+    settings_key: String,
+    lan_enabled: bool,
+    lan_changed: bool,
     autostart: bool,
     last_prompt_seq: u64,
     flash: Option<(String, Instant)>,
@@ -133,7 +136,7 @@ fn main() -> Result<()> {
         }
     });
 
-    let (server, web) = remote_friend_host::server_settings();
+    let (server, web, key) = remote_friend_host::server_settings();
     let app = App {
         screen: Screen::Home,
         host_field: std::env::args().nth(1).unwrap_or_default(),
@@ -159,6 +162,9 @@ fn main() -> Result<()> {
         settings_open: false,
         settings_server: server,
         settings_web: web,
+        settings_key: key,
+        lan_enabled: remote_friend_host::lan_enabled(),
+        lan_changed: false,
         autostart: autostart::is_enabled(),
         last_prompt_seq: 0,
         flash: None,
@@ -380,9 +386,10 @@ impl App {
                 ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙ Settings").clicked() {
-                        let (server, web) = remote_friend_host::server_settings();
+                        let (server, web, key) = remote_friend_host::server_settings();
                         self.settings_server = server;
                         self.settings_web = web;
+                        self.settings_key = key;
                         self.autostart = autostart::is_enabled();
                         self.settings_open = true;
                     }
@@ -485,7 +492,10 @@ impl App {
         ui.add_space(10.0);
         // Online status
         match (&snap.server, snap.online, &snap.server_error) {
-            (None, _, _) => dot(ui, WARN, "Local network only — set a server in Settings to connect from anywhere"),
+            (None, _, _) if !snap.lan_url.is_empty() => {
+                dot(ui, WARN, "Local network only — set your server in Settings to connect from anywhere")
+            }
+            (None, _, _) => dot(ui, WARN, "Not reachable yet — set your server in Settings"),
             (Some(_), true, _) => dot(ui, OK, "Online — reachable from anywhere"),
             (Some(s), false, Some(e)) => dot(ui, ERR, format!("Cannot reach server {s}: {e}")),
             (Some(s), false, None) => dot(ui, WARN, format!("Connecting to {s}...")),
@@ -656,11 +666,40 @@ impl App {
                 ui.label(RichText::new("Server (to connect from anywhere)").strong());
                 ui.small("Address of your RemoteFriend relay, e.g. 203.0.113.10:33202. Leave empty for local network only.");
                 ui.add(egui::TextEdit::singleline(&mut self.settings_server).hint_text("server:33202").desired_width(f32::INFINITY));
+                ui.small("Server key (printed at the end of the server setup; only computers with it can use your server)");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_key)
+                        .password(true)
+                        .hint_text("server key")
+                        .desired_width(f32::INFINITY),
+                );
                 ui.small("Web address for phones (optional), e.g. https://remote.example.com");
                 ui.add(egui::TextEdit::singleline(&mut self.settings_web).hint_text("https://...").desired_width(f32::INFINITY));
                 if ui.button("Save and reconnect").clicked() {
-                    remote_friend_host::set_server(&self.settings_server, &self.settings_web);
+                    remote_friend_host::set_server(&self.settings_server, &self.settings_web, &self.settings_key);
                     self.flash("Server settings saved");
+                }
+                ui.separator();
+
+                ui.label(RichText::new("Local network").strong());
+                let mut lan = self.lan_enabled;
+                if ui
+                    .checkbox(&mut lan, "Allow direct connections from the local network")
+                    .on_hover_text("Off: this computer is reachable only through your server, end-to-end encrypted.")
+                    .changed()
+                {
+                    remote_friend_host::set_lan_enabled(lan);
+                    self.lan_enabled = lan;
+                    self.lan_changed = true;
+                }
+                ui.small("Off by default. When on, devices on your network can connect directly; the desktop app is encrypted, the plain-http browser page on the local network is not.");
+                if self.lan_changed {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(WARN, "Restart RemoteFriend to apply.");
+                        if ui.button("Restart now").clicked() {
+                            restart_app();
+                        }
+                    });
                 }
                 ui.separator();
 

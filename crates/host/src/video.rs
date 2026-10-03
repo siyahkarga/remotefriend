@@ -52,9 +52,9 @@ pub(crate) enum Preset {
 impl Preset {
     pub(crate) fn from_name(s: &str) -> Option<Self> {
         match s {
-            "fast" | "hizli" | "low" => Some(Self::Fast),
-            "balanced" | "dengeli" | "medium" => Some(Self::Balanced),
-            "sharp" | "net" | "high" => Some(Self::Sharp),
+            "fast" | "low" => Some(Self::Fast),
+            "balanced" | "medium" => Some(Self::Balanced),
+            "sharp" | "high" => Some(Self::Sharp),
             _ => None,
         }
     }

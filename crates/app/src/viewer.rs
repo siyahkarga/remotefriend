@@ -65,7 +65,7 @@ impl App {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(format!("Sunucu: {srv}"));
+                    ui.label(format!("Server: {srv}"));
                     ui.add_space(4.0);
                     ui.monospace(&fp);
                     ui.add_space(4.0);

@@ -6,14 +6,15 @@ RemoteFriend gives a client that knows the password, and that the host approves,
 
 ## Which links are encrypted?
 
-| Path | Encryption | Use |
+| Path | Encryption | Notes |
 |---|---|---|
-| LAN native `33200` | None | Trusted LAN or VPN only |
-| LAN web `33201` | HTTP/WS in the default setup | Trusted LAN only; an HTTPS reverse proxy is preferred |
-| Native internet `33202` | Client/host → VPS TLS + fingerprint pinning | Requires a trusted VPS; not E2E |
-| VPS web | The setup script installs Let's Encrypt HTTPS; host dial-back TLS terminates on the VPS | Requires a trusted VPS; not E2E |
+| Browser → VPS → computer (`https://your-domain`) | End-to-end (AES-256-GCM) inside HTTPS/TLS | The relay only forwards ciphertext |
+| App → VPS → computer (`33202`) | End-to-end (AES-256-GCM) inside TLS with fingerprint pinning | The relay only forwards ciphertext |
+| App → computer on the local network (`33200`) | End-to-end (AES-256-GCM) | Off by default |
+| Browser → computer on the local network (`33201`) | Plain HTTP/WebSocket (browsers block WebCrypto on plain http) | Off by default; trusted networks only |
 
-The VPS relay terminates TLS before forwarding traffic. The relay server can therefore see the password, screen, input and files. If the server is compromised, confidentiality is lost. True end-to-end confidentiality is out of scope for this release.
+Since v0.7.0 the relay never sees the password, the screen, the input or the files. It still sees
+metadata: which computer IDs are used, when, from which IP addresses and how much data flows.
 
 ## High-risk issues fixed in v0.5.6
 
@@ -47,9 +48,37 @@ The VPS relay terminates TLS before forwarding traffic. The relay server can the
   `--forget-devices` revokes all of them.
 - A single-use reconnect token, valid for 10 minutes, for dropped sessions (the password is still required).
 
+## v0.7.0: end-to-end encryption and a locked-down server
+
+- **End-to-end encryption** between the viewer (browser or app) and the shared computer:
+  ECDH P-256 key exchange, keys derived with HKDF-SHA256 from the shared secret salted with
+  PBKDF2-SHA256(password, random salt, 300,000 iterations); both sides prove the password with
+  HMAC-SHA256 over the handshake transcript; then AES-256-GCM with per-direction counter nonces
+  (replayed, reordered or modified messages are rejected). Implementation:
+  `crates/common/src/e2e.rs` (Rust) and `crates/common/src/webapp.html` (WebCrypto).
+- The password is **never sent to the relay**. A relay that tampers with the handshake cannot read
+  or inject anything; at most it can try to guess the password offline at PBKDF2 cost
+  (~2^50 guesses x 300k iterations for a generated password).
+- **Server key**: the relay only lets computers that know its registration key register new IDs, so
+  strangers cannot use your VPS. Computers that were already registered keep working with their
+  host secret.
+- Per-IP limits on the relay (open connections, requests per minute) and in nginx (requests/s,
+  concurrent connections).
+- **Local network access is off by default** (listeners bind to 127.0.0.1); it can be enabled in
+  the app. The native protocol is end-to-end encrypted on the local network as well.
+- Releases publish `SHA256SUMS.txt`; `setup-vps.sh` refuses a server binary that does not match.
+- `deploy/harden-vps.sh`: unattended security updates, fail2ban for SSH, and key-only SSH when a key
+  is installed.
+
+Remaining limits: the relay still learns metadata (which IDs connect, when, from which IP, and how
+much data); the local-network browser page over plain http (only if you enable local network
+access) is not encrypted; there has been no independent security audit.
+
 ## Secure deployment
 
-- Do not forward ports `33200` and `33201` to the WAN.
+- Keep local network access off unless you need it; never forward ports `33200` and `33201` to the WAN.
+- Keep the server key (`/opt/remotefriend/register.key` is read via systemd `LoadCredential`) private.
+- Run `deploy/harden-vps.sh` (automatic security updates, fail2ban, key-only SSH).
 - Keep the VPS web UI on `127.0.0.1:33203` and publish it behind Nginx/HTTPS.
 - Pin the SHA-256 fingerprint of the `33202` TLS certificate on the host and the native client.
 - On the VPS, use a dedicated `remotefriend` system user, `UMask=0077` and systemd hardening.
@@ -58,8 +87,10 @@ The VPS relay terminates TLS before forwarding traffic. The relay server can the
 
 ## Known remaining risks
 
-- The relay is not end-to-end encrypted.
-- LAN native and default LAN web traffic are not encrypted.
+- The relay sees connection metadata (IDs, times, IP addresses, traffic volume).
+- The local-network browser page (plain http, only when local network access is enabled) is not encrypted.
+- A malicious relay can try passwords offline against one recorded handshake; the generated password
+  (~50 bits) and PBKDF2 with 300,000 iterations make that expensive, but a weak custom password would not.
 - The lockout applies to the whole host: someone who knows the ID can deliberately make failed attempts and briefly lock out
   the legitimate user (denial of service). This is a deliberate trade-off against guessing attacks.
 - Screen capture, input injection and file transfer run with the privileges of the OS user.

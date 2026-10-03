@@ -132,110 +132,294 @@ fn reject_json(msg: &str) -> String {
     serde_json::json!({"t": "reject", "msg": msg}).to_string()
 }
 
-async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit, peer_ip: String) {
-    let (mut sink, mut stream) = socket.split();
+// ---- browser transports ----
 
-    // 1. hello (15 s): {t:"hello", password, jpeg?, resume?}
-    let hello = tokio::time::timeout(Duration::from_secs(15), stream.next()).await;
-    let (password, want_jpeg, resume, device) = match hello {
-        Ok(Some(Ok(Message::Text(t)))) if t.len() <= 4096 => match serde_json::from_str::<serde_json::Value>(&t) {
-            Ok(v) => {
-                let field = |k: &str, n: usize| v.get(k).and_then(|x| x.as_str()).unwrap_or("").chars().take(n).collect::<String>();
-                (field("password", 256), v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false), field("resume", 64), field("device", 64))
-            }
-            Err(_) => Default::default(),
-        },
-        _ => Default::default(),
-    };
-    match crate::auth::check_password(&password, &peer_ip) {
-        crate::auth::Auth::Ok => {}
-        crate::auth::Auth::Bad => {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            let _ = sink.send(Message::Text(reject_json("wrong password"))).await;
-            return;
-        }
-        crate::auth::Auth::Locked(secs) => {
-            let _ = sink
-                .send(Message::Text(reject_json(&format!("too many wrong attempts; try again in {secs} s"))))
-                .await;
-            return;
-        }
+/// Text messages before encryption is set up (hello / handshake).
+trait TextIo {
+    async fn send_text(&mut self, s: String) -> Result<()>;
+    /// None when the connection closed or the timeout passed.
+    async fn recv_text(&mut self, timeout: Duration) -> Option<String>;
+}
+
+struct WsIo {
+    sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    stream: futures_util::stream::SplitStream<WebSocket>,
+}
+
+impl TextIo for WsIo {
+    async fn send_text(&mut self, s: String) -> Result<()> {
+        self.sink.send(Message::Text(s)).await?;
+        Ok(())
     }
 
-    // 2. operator approval: not needed for a session resuming after a brief drop or for a trusted device.
-    use crate::approval::Decision;
-    let who = format!("browser {peer_ip} (local network)");
-    let decision = if crate::approval::consume_resume(&resume) {
-        crate::status::notice(format!("{who}: session resumed"));
-        Decision::Once
-    } else if crate::approval::is_trusted(&device) {
-        crate::status::notice(format!("{who}: trusted device connected"));
-        Decision::Once
-    } else {
-        let _ = sink.send(Message::Text(r#"{"t":"wait"}"#.into())).await;
-        let w = who.clone();
-        tokio::task::spawn_blocking(move || crate::approval::ask(&w, true)).await.unwrap_or(Decision::Deny)
-    };
-    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
-    if decision == Decision::Deny {
-        let _ = sink.send(Message::Text(reject_json("the remote computer denied the connection"))).await;
-        return;
-    }
-    tracing::info!("browser (LAN) accepted (jpeg={want_jpeg})");
-
-    // 3. transport tasks
-    let (inbox_tx, inbox) = mpsc::channel::<String>(256);
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
-    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
-    let writer = tokio::spawn(async move {
+    async fn recv_text(&mut self, timeout: Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let msg = tokio::select! {
+            match tokio::time::timeout_at(deadline, self.stream.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) if t.len() <= 64 * 1024 => return Some(t),
+                Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => continue,
+                _ => return None,
+            }
+        }
+    }
+}
+
+struct KmsgIo<R, W> {
+    rd: R,
+    wr: W,
+}
+
+impl<R, W> TextIo for KmsgIo<R, W>
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send,
+    W: tokio::io::AsyncWriteExt + Unpin + Send,
+{
+    async fn send_text(&mut self, s: String) -> Result<()> {
+        remote_friend_common::io::write_kmsg(&mut self.wr, 1, s.as_bytes()).await?;
+        self.wr.flush().await?;
+        Ok(())
+    }
+
+    async fn recv_text(&mut self, timeout: Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match tokio::time::timeout_at(deadline, remote_friend_common::io::read_kmsg(&mut self.rd)).await {
+                Ok(Ok((1, payload))) if payload.len() <= 64 * 1024 => return String::from_utf8(payload).ok(),
+                Ok(Ok((1, _))) => return None,
+                Ok(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+}
+
+fn b64(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn unb64(v: &serde_json::Value, key: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let s = v.get(key)?.as_str()?;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
+}
+
+/// Encrypted handshake with a browser. Ok(None): refused (the browser was told why).
+async fn web_e2e_handshake(io: &mut impl TextIo, source: &str) -> Result<Option<remote_friend_common::e2e::Channel>> {
+    use remote_friend_common::e2e;
+    let (password, normalize) = crate::auth::e2e_secret().context("password not initialized")?;
+    let hs = e2e::HostHandshake::new(normalize);
+    let hello = serde_json::json!({
+        "t": "e2e1",
+        "v": e2e::VERSION,
+        "salt": b64(&hs.salt),
+        "pub": b64(&hs.host_pub),
+        "norm": hs.normalize,
+        "iter": hs.iterations,
+    });
+    io.send_text(hello.to_string()).await?;
+    let Some(text) = io.recv_text(Duration::from_secs(90)).await else { return Ok(None) };
+    let v: serde_json::Value = serde_json::from_str(&text).context("bad handshake message")?;
+    if v.get("t").and_then(|t| t.as_str()) != Some("e2e2") {
+        anyhow::bail!("unexpected handshake message");
+    }
+    let reply = e2e::ViewerReply {
+        viewer_pub: unb64(&v, "pub").context("missing key")?,
+        mac: unb64(&v, "mac").context("missing proof")?,
+    };
+    if let Some(secs) = crate::auth::locked(source) {
+        io.send_text(reject_json(&format!("too many wrong attempts; try again in {secs} s"))).await?;
+        return Ok(None);
+    }
+    match tokio::task::spawn_blocking(move || hs.finish(&password, &reply)).await? {
+        Ok((channel, mac_h)) => {
+            crate::auth::record(source, true);
+            io.send_text(serde_json::json!({"t": "e2e3", "mac": b64(&mac_h)}).to_string()).await?;
+            Ok(Some(channel))
+        }
+        Err(_) => {
+            crate::auth::record(source, false);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            io.send_text(reject_json("wrong password")).await?;
+            Ok(None)
+        }
+    }
+}
+
+/// Plaintext of an encrypted browser message: [kind] + payload (0 = video, 1 = JSON).
+fn seal(tx: &mut remote_friend_common::e2e::Cipher, kind: u8, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut p = Vec::with_capacity(1 + payload.len());
+    p.push(kind);
+    p.extend_from_slice(payload);
+    tx.encrypt(&p)
+}
+
+fn open_json(rx: &mut remote_friend_common::e2e::Cipher, data: &[u8]) -> Result<Option<String>> {
+    let p = rx.decrypt(data)?;
+    match p.split_first() {
+        Some((1, json)) if json.len() <= MAX_TEXT => Ok(Some(String::from_utf8(json.to_vec())?)),
+        Some((1, _)) => anyhow::bail!("message too large"),
+        _ => Ok(None),
+    }
+}
+
+/// WebSocket writer: control messages first, then video; encrypted when `tx` is set.
+fn spawn_ws_writer(
+    mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut ctrl_rx: mpsc::Receiver<String>,
+    mut video_rx: mpsc::Receiver<Vec<u8>>,
+    mut tx: Option<remote_friend_common::e2e::Cipher>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (kind, data) = tokio::select! {
                 biased;
-                m = ctrl_rx.recv() => match m { Some(t) => Message::Text(t), None => break },
-                m = video_rx.recv() => match m { Some(b) => Message::Binary(b), None => break },
+                m = ctrl_rx.recv() => match m { Some(t) => (1u8, t.into_bytes()), None => break },
+                m = video_rx.recv() => match m { Some(b) => (0u8, b), None => break },
+            };
+            let msg = match tx.as_mut() {
+                Some(c) => match seal(c, kind, &data) {
+                    Ok(ct) => Message::Binary(ct),
+                    Err(_) => break,
+                },
+                None if kind == 1 => Message::Text(String::from_utf8(data).unwrap_or_default()),
+                None => Message::Binary(data),
             };
             if sink.send(msg).await.is_err() {
                 break;
             }
         }
         let _ = sink.close().await;
-    });
-    let reader = tokio::spawn(async move {
+    })
+}
+
+fn spawn_ws_reader(
+    mut stream: futures_util::stream::SplitStream<WebSocket>,
+    inbox_tx: mpsc::Sender<String>,
+    mut rx: Option<remote_friend_common::e2e::Cipher>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
-            match msg {
-                Ok(Message::Text(t)) => {
-                    if t.len() > MAX_TEXT || inbox_tx.send(t).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                Ok(Message::Close(_)) | Err(_) => break,
+            let text = match (msg, rx.as_mut()) {
+                (Ok(Message::Binary(b)), Some(c)) => match open_json(c, &b) {
+                    Ok(Some(t)) => t,
+                    Ok(None) => continue,
+                    Err(_) => break, // tampered / out of order: drop the session
+                },
+                (Ok(Message::Text(t)), None) if t.len() <= MAX_TEXT => t,
+                (Ok(Message::Close(_)), _) | (Err(_), _) => break,
+                _ => continue,
+            };
+            if inbox_tx.send(text).await.is_err() {
+                break;
             }
         }
-    });
-    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "browser (LAN)", issued).await;
+    })
+}
+
+async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit, peer_ip: String) {
+    let (sink, stream) = socket.split();
+    let mut io = WsIo { sink, stream };
+
+    // 1. hello (15 s): {t:"hello", e2e:true, jpeg?}  (legacy plaintext pages send the password)
+    let Some(hello) = io.recv_text(Duration::from_secs(15)).await else { return };
+    let v: serde_json::Value = serde_json::from_str(&hello).unwrap_or_default();
+    let want_jpeg = v.get("jpeg").and_then(|j| j.as_bool()).unwrap_or(false);
+    let who = format!("browser {peer_ip} (local network)");
+
+    if v.get("e2e").and_then(|x| x.as_bool()).unwrap_or(false) {
+        let channel = match web_e2e_handshake(&mut io, &peer_ip).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!("{who}: handshake failed: {e:#}");
+                return;
+            }
+        };
+        let remote_friend_common::e2e::Channel { tx, rx } = channel;
+        let (inbox_tx, inbox) = mpsc::channel::<String>(256);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<String>(64);
+        let (video_tx, video_rx) = mpsc::channel::<Vec<u8>>(2);
+        let writer = spawn_ws_writer(io.sink, ctrl_rx, video_rx, Some(tx));
+        let reader = spawn_ws_reader(io.stream, inbox_tx, Some(rx));
+        secure_session(inbox, ctrl_tx, video_tx, want_jpeg, &who).await;
+        reader.abort();
+        let _ = writer.await;
+        return;
+    }
+
+    // Legacy, unencrypted page (plain http on the local network, no WebCrypto).
+    let field = |k: &str, n: usize| v.get(k).and_then(|x| x.as_str()).unwrap_or("").chars().take(n).collect::<String>();
+    let (password, resume, device) = (field("password", 256), field("resume", 64), field("device", 64));
+    match crate::auth::check_password(&password, &peer_ip) {
+        crate::auth::Auth::Ok => {}
+        crate::auth::Auth::Bad => {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = io.send_text(reject_json("wrong password")).await;
+            return;
+        }
+        crate::auth::Auth::Locked(secs) => {
+            let _ = io.send_text(reject_json(&format!("too many wrong attempts; try again in {secs} s"))).await;
+            return;
+        }
+    }
+    use crate::approval::Decision;
+    let decision = if crate::approval::consume_resume(&resume) {
+        Decision::Once
+    } else if crate::approval::is_trusted(&device) {
+        crate::status::notice(format!("{who}: trusted device connected"));
+        Decision::Once
+    } else {
+        let _ = io.send_text(r#"{"t":"wait"}"#.into()).await;
+        let w = who.clone();
+        tokio::task::spawn_blocking(move || crate::approval::ask(&w, true)).await.unwrap_or(Decision::Deny)
+    };
+    if decision == Decision::Deny {
+        let _ = io.send_text(reject_json("the remote computer denied the connection")).await;
+        return;
+    }
+    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
+    let (inbox_tx, inbox) = mpsc::channel::<String>(256);
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<String>(64);
+    let (video_tx, video_rx) = mpsc::channel::<Vec<u8>>(2);
+    let writer = spawn_ws_writer(io.sink, ctrl_rx, video_rx, None);
+    let reader = spawn_ws_reader(io.stream, inbox_tx, None);
+    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "browser (LAN, unencrypted)", issued).await;
     reader.abort();
     let _ = writer.await;
 }
 
-/// Browser session over the VPS dial-back link. kmsg type 0 = video, 1 = JSON.
-pub(crate) async fn session_kmsg<R, W>(mut rd: R, mut wr: W, jpeg: bool, issued_device: Option<String>)
+/// Browser session over the relay dial-back link (always end-to-end encrypted).
+/// kmsg type 1 = handshake JSON, type 0 = encrypted messages.
+pub(crate) async fn session_kmsg<R, W>(rd: R, wr: W, jpeg: bool, peer: String, source: String)
 where
     R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
     W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
 {
     use remote_friend_common::io::{read_kmsg, write_kmsg};
+    let mut io = KmsgIo { rd, wr };
+    let channel = match web_e2e_handshake(&mut io, &source).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::debug!("{peer}: handshake failed: {e:#}");
+            return;
+        }
+    };
+    let remote_friend_common::e2e::Channel { mut tx, mut rx } = channel;
+    let KmsgIo { mut rd, mut wr } = io;
     let (inbox_tx, inbox) = mpsc::channel::<String>(256);
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
     let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
     let writer = tokio::spawn(async move {
         loop {
-            let res = tokio::select! {
+            let (kind, data) = tokio::select! {
                 biased;
-                m = ctrl_rx.recv() => match m { Some(t) => write_kmsg(&mut wr, 1, t.as_bytes()).await, None => break },
-                m = video_rx.recv() => match m { Some(b) => write_kmsg(&mut wr, 0, &b).await, None => break },
+                m = ctrl_rx.recv() => match m { Some(t) => (1u8, t.into_bytes()), None => break },
+                m = video_rx.recv() => match m { Some(b) => (0u8, b), None => break },
             };
-            if res.is_err() {
+            let Ok(ct) = seal(&mut tx, kind, &data) else { break };
+            if write_kmsg(&mut wr, 0, &ct).await.is_err() {
                 break;
             }
             let _ = wr.flush().await;
@@ -245,24 +429,59 @@ where
     let reader = tokio::spawn(async move {
         loop {
             match read_kmsg(&mut rd).await {
-                Ok((1, payload)) if payload.len() <= MAX_TEXT => {
-                    let Ok(t) = String::from_utf8(payload) else { break };
-                    if inbox_tx.send(t).await.is_err() {
-                        break;
+                Ok((0, data)) => match open_json(&mut rx, &data) {
+                    Ok(Some(t)) => {
+                        if inbox_tx.send(t).await.is_err() {
+                            break;
+                        }
                     }
-                }
-                Ok((1, _)) => {
-                    tracing::warn!("relay: browser message too large; closing session");
-                    break;
-                }
+                    Ok(None) => {}
+                    Err(_) => break,
+                },
                 Ok(_) => {}
                 Err(_) => break,
             }
         }
     });
-    run_session(inbox, ctrl_tx, video_tx, jpeg, "browser (internet)", issued_device).await;
+    secure_session(inbox, ctrl_tx, video_tx, jpeg, &peer).await;
     reader.abort();
     let _ = writer.await;
+}
+
+/// After the encrypted handshake: the browser sends {t:"auth", device?, resume?};
+/// decide about approval, then run the session.
+async fn secure_session(
+    mut inbox: mpsc::Receiver<String>,
+    ctrl: mpsc::Sender<String>,
+    video_out: mpsc::Sender<Vec<u8>>,
+    jpeg: bool,
+    peer: &str,
+) {
+    use crate::approval::Decision;
+    let Ok(Some(first)) = tokio::time::timeout(Duration::from_secs(30), inbox.recv()).await else { return };
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
+    if v.get("t").and_then(|t| t.as_str()) != Some("auth") {
+        return;
+    }
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let decision = if crate::approval::consume_resume(&field("resume")) {
+        crate::status::notice(format!("{peer}: session resumed"));
+        Decision::Once
+    } else if crate::approval::is_trusted(&field("device")) {
+        crate::status::notice(format!("{peer}: trusted device connected"));
+        Decision::Once
+    } else {
+        let _ = ctrl.send(r#"{"t":"wait"}"#.into()).await;
+        let p = peer.to_string();
+        tokio::task::spawn_blocking(move || crate::approval::ask(&p, true)).await.unwrap_or(Decision::Deny)
+    };
+    if decision == Decision::Deny {
+        let _ = ctrl.send(reject_json("the remote computer denied the connection")).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return;
+    }
+    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(peer));
+    run_session(inbox, ctrl, video_out, jpeg, peer, issued).await;
 }
 
 /// Flow control: the number/age of frames not yet acked by the client is capped, so

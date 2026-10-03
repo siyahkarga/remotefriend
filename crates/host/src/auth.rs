@@ -136,38 +136,47 @@ pub(crate) fn source_key(peer: &str) -> String {
         .unwrap_or_else(|_| peer.chars().take(80).collect())
 }
 
-pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
+/// The secret for the encrypted handshake: (password, compare normalized).
+pub(crate) fn e2e_secret() -> Option<(String, bool)> {
+    let guard = SECRET.read().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map(|s| (s.value.clone(), s.generated))
+}
+
+/// Remaining lock time for this source (or globally), if locked.
+pub(crate) fn locked(source: &str) -> Option<u64> {
     let now = Instant::now();
     let key = source_key(source);
     let mut lim = limiter().lock().unwrap_or_else(|e| e.into_inner());
-
     if let Some(until) = lim.global_until {
         if until > now {
-            return Auth::Locked((until - now).as_secs().max(1));
+            return Some((until - now).as_secs().max(1));
         }
         lim.global_until = None;
     }
-    {
-        let src = lim.sources.entry(key.clone()).or_default();
-        if src.last_fail.is_some_and(|t| now.duration_since(t) > DECAY) {
-            *src = Source::default();
-        }
-        if let Some(until) = src.locked_until {
-            if until > now {
-                return Auth::Locked((until - now).as_secs().max(1));
-            }
+    let src = lim.sources.entry(key).or_default();
+    if src.last_fail.is_some_and(|t| now.duration_since(t) > DECAY) {
+        *src = Source::default();
+    }
+    match src.locked_until {
+        Some(until) if until > now => Some((until - now).as_secs().max(1)),
+        _ => {
             src.locked_until = None;
+            None
         }
     }
+}
 
-    if matches(candidate) {
+/// Record the outcome of a password proof from `source`.
+pub(crate) fn record(source: &str, ok: bool) {
+    let now = Instant::now();
+    let key = source_key(source);
+    let mut lim = limiter().lock().unwrap_or_else(|e| e.into_inner());
+    if ok {
         if let Some(src) = lim.sources.get_mut(&key) {
             src.fails.clear();
         }
-        return Auth::Ok;
+        return;
     }
-
-    // Failed attempt: per-source and global counters.
     let src = lim.sources.entry(key.clone()).or_default();
     while src.fails.front().is_some_and(|t| now.duration_since(*t) > WINDOW) {
         src.fails.pop_front();
@@ -194,7 +203,16 @@ pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
     if lim.sources.len() > 1024 {
         lim.sources.retain(|_, s| s.locked_until.is_some_and(|u| u > now) || s.last_fail.is_some_and(|t| now.duration_since(t) < WINDOW));
     }
-    Auth::Bad
+}
+
+/// Plain password check (legacy, unencrypted local-network browser page).
+pub(crate) fn check_password(candidate: &str, source: &str) -> Auth {
+    if let Some(secs) = locked(source) {
+        return Auth::Locked(secs);
+    }
+    let ok = matches(candidate);
+    record(source, ok);
+    if ok { Auth::Ok } else { Auth::Bad }
 }
 
 #[cfg(test)]

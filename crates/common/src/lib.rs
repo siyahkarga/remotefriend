@@ -3,13 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod e2e;
 pub mod identity;
 pub mod io;
 pub mod tls;
 pub mod webapp;
 // Note: `discovery` is defined inline in this file (below).
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Browser video frame header version (must match webapp.html).
 pub const WEB_FRAME_VERSION: u8 = 3;
 /// Browser frame header length: [ver][flags][0][0][w u32][h u32][seq u32]
@@ -285,6 +286,8 @@ pub enum RvMsg {
     Rejected(String),
     Accepted,
     FromHost { payload: Vec<u8> },
+    /// host -> server: registration with the server's registration key (may be empty).
+    RegisterV2 { id: String, name: String, secret: String, key: String },
 }
 
 pub fn rv_encode(m: &RvMsg) -> anyhow::Result<Vec<u8>> {

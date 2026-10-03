@@ -222,7 +222,7 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const FRAME_VER = 3, HDR = 16, FLAG_KEY = 1, FLAG_JPEG = 2;
+const FRAME_VER = 3, PROTO_VER = 4, HDR = 16, FLAG_KEY = 1, FLAG_JPEG = 2;
 const canvas = $('screen'), ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
 const stage = $('stage');
 const hasWebCodecs = window.isSecureContext && typeof VideoDecoder !== 'undefined';
@@ -240,7 +240,88 @@ function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); retur
 function showMsg(text, kind) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (kind || 'err'); m.hidden = !text; }
 let toastT = 0;
 function toast(text, ms) { const t = $('toast'); t.textContent = text; t.hidden = false; clearTimeout(toastT); if (ms !== 0) toastT = setTimeout(() => t.hidden = true, ms || 2600); }
-function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function send(o) {
+  if (!ws || ws.readyState !== 1) return;
+  if (sec && sec.ready) sendSecure(o);
+  else if (!sec) ws.send(JSON.stringify(o)); // legacy (unencrypted local page)
+}
+
+// ---------------- end-to-end encryption ----------------
+// Same handshake as the computer (crates/common/src/e2e.rs): ECDH P-256, PBKDF2-SHA256,
+// HKDF-SHA256, HMAC proofs both ways, then AES-256-GCM with counter nonces. The server only
+// forwards ciphertext and never sees the password.
+const hasSubtle = !!(window.isSecureContext && window.crypto && crypto.subtle);
+const te = new TextEncoder(), td = new TextDecoder();
+let sec = null; // { ready, txKey, rxKey, txCtr, rxCtr, outChain, inChain, pending, outQueued }
+function b64e(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+function b64d(s) { const b = atob(s); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+function cat(...parts) { let n = 0; for (const p of parts) n += p.length; const o = new Uint8Array(n); let i = 0; for (const p of parts) { o.set(p, i); i += p.length; } return o; }
+function preparePw(pw, norm) { return norm ? pw.replace(/[\s-]/g, '').toLowerCase() : pw.trim(); }
+async function hmac(key, data) {
+  const k = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', k, data));
+}
+function nonce(ctr) { const iv = new Uint8Array(12); const dv = new DataView(iv.buffer); dv.setUint32(4, Math.floor(ctr / 4294967296)); dv.setUint32(8, ctr >>> 0); return iv; }
+function secFail(msg) { if (ws) { ws._reason = msg; ws.close(); } }
+
+async function e2eStart(m) {
+  try {
+    const salt = b64d(m.salt), hostPub = b64d(m.pub), iter = m.iter;
+    if (m.v !== 1 || !(iter >= 10000 && iter <= 5000000) || hostPub.length !== 65 || salt.length !== 16) throw new Error('bad handshake');
+    setBusy(true, 'Checking password…');
+    const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+    const myPub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+    const hostKey = await crypto.subtle.importKey('raw', hostPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: hostKey }, kp.privateKey, 256));
+    const pwBase = await crypto.subtle.importKey('raw', te.encode(preparePw(savedPw, !!m.norm)), 'PBKDF2', false, ['deriveBits']);
+    const pwKey = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, pwBase, 256));
+    const transcript = cat(te.encode('rf-e2e-v1'), salt, hostPub, myPub);
+    const th = new Uint8Array(await crypto.subtle.digest('SHA-256', transcript));
+    const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+    const okm = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: pwKey, info: cat(te.encode('rf-e2e-v1 keys'), th) }, ikm, 1024));
+    const macC = await hmac(okm.slice(0, 32), cat(te.encode('client'), transcript));
+    sec = { ready: false, pending: { macHKey: okm.slice(32, 64), transcript, kC2H: okm.slice(64, 96), kH2C: okm.slice(96, 128) } };
+    ws.send(JSON.stringify({ t: 'e2e2', pub: b64e(myPub), mac: b64e(macC) }));
+  } catch (e) { secFail('Secure connection failed: ' + (e && e.message || e)); }
+}
+
+async function e2eFinish(m) {
+  try {
+    const p = sec && sec.pending;
+    if (!p) throw new Error('unexpected handshake');
+    const expect = await hmac(p.macHKey, cat(te.encode('host'), p.transcript));
+    const got = b64d(m.mac || '');
+    let diff = got.length ^ expect.length;
+    for (let i = 0; i < Math.min(got.length, expect.length); i++) diff |= got[i] ^ expect[i];
+    if (diff) { secFail('The remote computer could not prove it knows the password (connection refused for your safety).'); return; }
+    sec.txKey = await crypto.subtle.importKey('raw', p.kC2H, 'AES-GCM', false, ['encrypt']);
+    sec.rxKey = await crypto.subtle.importKey('raw', p.kH2C, 'AES-GCM', false, ['decrypt']);
+    sec.txCtr = 0; sec.rxCtr = 0; sec.outChain = Promise.resolve(); sec.inChain = Promise.resolve(); sec.outQueued = 0;
+    sec.pending = null; sec.ready = true;
+    sendSecure({ t: 'auth', device: deviceToken(), resume: (autoReconnecting && resumeToken) || undefined });
+  } catch (e) { secFail('Secure connection failed: ' + (e && e.message || e)); }
+}
+
+function sendSecure(o) {
+  const s = sec, sock = ws;
+  const pt = cat([1], te.encode(JSON.stringify(o)));
+  const iv = nonce(s.txCtr++); // counter fixed in call order; the chain keeps the wire order
+  s.outQueued++;
+  s.outChain = s.outChain.then(async () => {
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, s.txKey, pt);
+    if (sock.readyState === 1) sock.send(ct);
+  }).catch(() => secFail('Encryption failed')).finally(() => { s.outQueued--; });
+}
+
+function receiveSecure(buf) {
+  const s = sec;
+  const iv = nonce(s.rxCtr++);
+  s.inChain = s.inChain.then(async () => {
+    const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, s.rxKey, buf));
+    if (pt[0] === 1) handleJson(JSON.parse(td.decode(pt.subarray(1))));
+    else if (pt[0] === 0) onFrame(pt.slice(1).buffer);
+  }).catch(() => secFail('A message could not be decrypted (connection closed for safety).'));
+}
 
 // ---------------- login screen ----------------
 const idInput = $('idInput');
@@ -326,7 +407,13 @@ function connect(retry, auto) {
   const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   sock.binaryType = 'arraybuffer';
   ws = sock;
-  sock.onopen = () => sock.send(JSON.stringify({
+  sec = null;
+  // Encrypted (normal): the password never leaves this device. Legacy plaintext only on
+  // an http page in the local network, where browsers disable WebCrypto.
+  sock.onopen = () => sock.send(JSON.stringify(hasSubtle ? {
+    t: 'hello', id: role === 'host' ? undefined : id, e2e: true,
+    jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined
+  } : {
     t: 'hello', id: role === 'host' ? undefined : id, password: pw,
     jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined,
     resume: (auto && resumeToken) || undefined,
@@ -362,11 +449,23 @@ function onClosed(sock) {
 
 function onMessage(ev) {
   if (typeof ev.data !== 'string') {
-    if (!connected) { ws._reason = 'RemoteFriend on the remote computer is outdated. Update the host app.'; ws.close(); return; }
+    if (sec && sec.ready) { receiveSecure(ev.data); return; }
+    if (!connected) { ws._reason = 'RemoteFriend on the remote computer is outdated. Update it.'; ws.close(); return; }
     onFrame(ev.data);
     return;
   }
   let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+  // Before encryption only these plain messages are accepted.
+  if (hasSubtle) {
+    if (m.t === 'e2e1') { e2eStart(m); return; }
+    if (m.t === 'e2e3') { e2eFinish(m); return; }
+    if (m.t === 'welcome' && !(sec && sec.ready)) { secFail('RemoteFriend on the remote computer is outdated (no encryption). Update it.'); return; }
+    if (m.t !== 'wait' && m.t !== 'reject') return;
+  }
+  handleJson(m);
+}
+
+function handleJson(m) {
   switch (m.t) {
     case 'wait': if (autoReconnecting) toast('Waiting for approval on the remote computer…', 0);
       setBusy(true, 'Waiting for approval…');
@@ -388,7 +487,7 @@ function onWelcome(m) {
   autoTries = 0; autoReconnecting = false;
   jpegMode = !!m.jpeg || m.codec === 'jpeg';
   if (m.name) hostName = m.name;
-  if (m.v && m.v !== FRAME_VER) toast('Warning: host version differs (' + m.v + '). Update the host and the server.', 6000);
+  if (m.v && m.v !== PROTO_VER) toast('Warning: the remote computer runs a different version (' + m.v + '). Update both.', 6000);
   if (role !== 'host') rememberRecent(savedId, hostName);
   setQualityUi(m.preset || 'balanced');
   showMsg('');
@@ -964,7 +1063,7 @@ $('ovClose').onclick = () => { $('overlay').hidden = true; showLogin(); };
 $('fileBtn').onclick = () => { closeSheets(); $('filePick').click(); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function drain() {
-  while (ws && ws.readyState === 1 && ws.bufferedAmount > 1024 * 1024) await sleep(20);
+  while (ws && ws.readyState === 1 && (ws.bufferedAmount > 1024 * 1024 || (sec && sec.outQueued > 4))) await sleep(20);
   if (!ws || ws.readyState !== 1) throw new Error('connection closed');
 }
 $('filePick').addEventListener('change', async () => {

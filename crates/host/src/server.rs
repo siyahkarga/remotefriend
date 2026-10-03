@@ -5,7 +5,6 @@
 //! Platforms: Linux Wayland (portal + PipeWire), Linux X11, Windows, macOS (xcap + enigo).
 
 use anyhow::{Context, Result};
-use remote_friend_common::io::{read_packet_limited, write_packet};
 use remote_friend_common::{Packet, VideoCodec, VideoFrame};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,6 +55,15 @@ pub(crate) fn relay_web_url(server: &str) -> String {
     }
 }
 
+/// Accept direct connections from the local network? (settings file or RF_LAN=1)
+pub fn lan_enabled() -> bool {
+    match std::env::var("RF_LAN").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => remote_friend_common::identity::load_host_settings().lan,
+    }
+}
+
 /// Options for [`run`].
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
@@ -86,7 +94,10 @@ pub async fn run(opts: RunOptions) -> Result<()> {
         }
     }
 
-    let native_bind = std::env::var("RF_NATIVE_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    // Local-network access is off by default: only the encrypted internet path is open.
+    let lan = lan_enabled();
+    let default_bind = if lan { "0.0.0.0" } else { "127.0.0.1" };
+    let native_bind = std::env::var("RF_NATIVE_BIND").unwrap_or_else(|_| default_bind.into());
     let native_port = env_port("RF_NATIVE_PORT", remote_friend_common::DEFAULT_PORT);
     let addr = format!("{native_bind}:{native_port}");
     let listener = TcpListener::bind(&addr).await.with_context(|| {
@@ -97,7 +108,7 @@ pub async fn run(opts: RunOptions) -> Result<()> {
     let host_secret = remote_friend_common::identity::load_or_create_host_secret();
     let http_port = env_port("RF_HTTP_PORT", 33201);
     let lan_ip = local_ip_address::local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "127.0.0.1".into());
-    let web_bind = std::env::var("RF_WEB_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    let web_bind = std::env::var("RF_WEB_BIND").unwrap_or_else(|_| default_bind.into());
     let rv = rv_target();
     let auto_accept = std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false);
 
@@ -108,7 +119,7 @@ pub async fn run(opts: RunOptions) -> Result<()> {
         s.password_from_env = from_env;
         s.server = rv.as_ref().map(|t| t.addr.clone());
         s.web_url = rv.as_ref().map(|t| relay_web_url(&t.addr));
-        s.lan_url = format!("http://{lan_ip}:{http_port}");
+        s.lan_url = if lan { format!("http://{lan_ip}:{http_port}") } else { String::new() };
         s.auto_accept = auto_accept;
     });
 
@@ -130,10 +141,12 @@ pub async fn run(opts: RunOptions) -> Result<()> {
         }
     });
 
-    std::thread::spawn({
-        let pc_name = pc_name.clone();
-        move || remote_friend_common::discovery::broadcast_loop(pc_name, native_port)
-    });
+    if lan {
+        std::thread::spawn({
+            let pc_name = pc_name.clone();
+            move || remote_friend_common::discovery::broadcast_loop(pc_name, native_port)
+        });
+    }
 
     let native_limit = std::env::var("RF_MAX_NATIVE_SESSIONS")
         .ok()
@@ -152,16 +165,8 @@ pub async fn run(opts: RunOptions) -> Result<()> {
         };
         tokio::spawn(async move {
             let _permit = permit;
-            // A browser/bot hitting the native port by mistake: turn it away.
-            let mut peek = [0u8; 4];
-            match tokio::time::timeout(Duration::from_secs(5), socket.peek(&mut peek)).await {
-                Ok(Ok(4)) if matches!(&peek, b"GET " | b"POST" | b"HEAD" | b"PUT ") => {
-                    tracing::warn!("{peer}: HTTP on the native port (browsers should open port {http_port})");
-                    return;
-                }
-                Ok(Ok(n)) if n > 0 => {}
-                _ => return,
-            }
+            // The computer speaks first (encrypted handshake); anything else (e.g. a browser
+            // hitting this port) fails the handshake and is closed.
             let _ = socket.set_nodelay(true);
             tracing::info!("native client: {peer}");
             if let Err(e) = handle_client(socket, peer.to_string()).await {
@@ -197,7 +202,11 @@ fn print_banner(
         Some(t) => status::say(&format!("    From anywhere: {}", relay_web_url(&t.addr))),
         None => status::say("    From anywhere: off (no relay server configured)"),
     }
-    status::say(&format!("    Local network: http://{lan_ip}:{http_port}"));
+    if native_bind == "127.0.0.1" || native_bind == "::1" {
+        status::say("    Local network: off (enable in the app settings or with RF_LAN=1)");
+    } else {
+        status::say(&format!("    Local network: http://{lan_ip}:{http_port}"));
+    }
     status::say(&format!("  └────────────────────────────────────────────────────────┘"));
     if auto_accept {
         status::say(&format!("  Approval is OFF (REMOTE_FRIEND_AUTO_ACCEPT=1): anyone with the password can connect."));
@@ -242,58 +251,86 @@ pub fn reconnect_server() {
 
 async fn handle_client(socket: TcpStream, peer: String) -> Result<()> {
     let (rd, wr) = socket.into_split();
-    session_native(rd, wr, peer, true).await
+    let source = peer.clone();
+    session_native(rd, wr, peer, source).await
 }
 
-/// Native session over LAN TCP or a relay dial-back (TLS).
-/// need_approval=false: accept right after the password check (already approved).
-async fn session_native<R, W>(mut rd: R, mut wr: W, peer: String, need_approval: bool) -> Result<()>
+/// Encrypted handshake (host side) over framed blobs. Returns the channel, or None after
+/// telling the viewer why it was refused (wrong password / locked).
+pub(crate) async fn native_e2e_handshake<R, W>(
+    rd: &mut R,
+    wr: &mut W,
+    source: &str,
+) -> Result<Option<remote_friend_common::e2e::Channel>>
+where
+    R: tokio::io::AsyncReadExt + Unpin,
+    W: tokio::io::AsyncWriteExt + Unpin,
+{
+    use remote_friend_common::e2e;
+    use remote_friend_common::io::{read_blob_limited, write_blob};
+    let (password, normalize) = auth::e2e_secret().context("password not initialized")?;
+    let hs = e2e::HostHandshake::new(normalize);
+    write_blob(wr, &hs.hello_bytes()).await?;
+    let reply = tokio::time::timeout(Duration::from_secs(60), read_blob_limited(rd, 1024))
+        .await
+        .context("handshake timed out")??;
+    let reply = e2e::ViewerReply::from_bytes(&reply)?;
+    if let Some(secs) = auth::locked(source) {
+        write_blob(wr, &e2e::host_result_err(2, &format!("too many wrong attempts; try again in {secs} s"))).await?;
+        return Ok(None);
+    }
+    match tokio::task::spawn_blocking(move || hs.finish(&password, &reply)).await? {
+        Ok((channel, mac_h)) => {
+            auth::record(source, true);
+            write_blob(wr, &e2e::host_result_ok(&mac_h)).await?;
+            Ok(Some(channel))
+        }
+        Err(_) => {
+            auth::record(source, false);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            write_blob(wr, &e2e::host_result_err(1, "wrong password")).await?;
+            Ok(None)
+        }
+    }
+}
+
+/// Native (desktop app) session over LAN TCP or a relay dial-back. Everything after the
+/// handshake is end-to-end encrypted; the relay only sees ciphertext.
+async fn session_native<R, W>(mut rd: R, mut wr: W, peer: String, source: String) -> Result<()>
 where
     R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
     W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
 {
-    let pkt = tokio::time::timeout(Duration::from_secs(15), read_packet_limited(&mut rd, 64 * 1024))
+    use remote_friend_common::io::{read_packet_secure, write_packet_secure};
+    let Some(channel) = native_e2e_handshake(&mut rd, &mut wr, &source).await? else {
+        anyhow::bail!("authentication failed");
+    };
+    let remote_friend_common::e2e::Channel { mut tx, mut rx } = channel;
+    let pkt = tokio::time::timeout(Duration::from_secs(15), read_packet_secure(&mut rd, &mut rx, 64 * 1024))
         .await
         .context("handshake timed out")??;
     let Packet::Handshake(h) = pkt else {
         anyhow::bail!("unexpected first packet");
     };
     if h.version != remote_friend_common::PROTOCOL_VERSION {
-        write_packet(
-            &mut wr,
-            &Packet::Reject(format!(
-                "version mismatch (host {}, client {}): update both",
-                remote_friend_common::PROTOCOL_VERSION,
-                h.version
-            )),
-        )
-        .await?;
+        let msg = format!(
+            "version mismatch (computer {}, app {}): update both",
+            remote_friend_common::PROTOCOL_VERSION,
+            h.version
+        );
+        write_packet_secure(&mut wr, &mut tx, &Packet::Reject(msg)).await?;
         anyhow::bail!("protocol version mismatch");
     }
-    match auth::check_password(&h.password, &peer) {
-        auth::Auth::Ok => {}
-        auth::Auth::Bad => {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            write_packet(&mut wr, &Packet::Reject("wrong password".into())).await?;
-            anyhow::bail!("authentication failed");
-        }
-        auth::Auth::Locked(secs) => {
-            write_packet(&mut wr, &Packet::Reject(format!("too many wrong attempts; wait {secs} s"))).await?;
-            anyhow::bail!("authentication locked");
-        }
+    write_packet_secure(&mut wr, &mut tx, &Packet::WaitingForApproval).await?;
+    let prompt_peer = peer.clone();
+    let decision = tokio::task::spawn_blocking(move || approval::ask(&prompt_peer, false))
+        .await
+        .unwrap_or(approval::Decision::Deny);
+    if decision == approval::Decision::Deny {
+        write_packet_secure(&mut wr, &mut tx, &Packet::Reject("the remote computer denied the connection".into())).await?;
+        anyhow::bail!("denied by operator");
     }
-    if need_approval {
-        write_packet(&mut wr, &Packet::WaitingForApproval).await?;
-        let prompt_peer = peer.clone();
-        let decision = tokio::task::spawn_blocking(move || approval::ask(&prompt_peer, false))
-            .await
-            .unwrap_or(approval::Decision::Deny);
-        if decision == approval::Decision::Deny {
-            write_packet(&mut wr, &Packet::Reject("the remote computer denied the connection".into())).await?;
-            anyhow::bail!("denied by operator");
-        }
-    }
-    write_packet(&mut wr, &Packet::Accept).await?;
+    write_packet_secure(&mut wr, &mut tx, &Packet::Accept).await?;
     tracing::info!("{peer}: session started");
     let _session = status::SessionGuard::new();
     #[cfg(target_os = "linux")]
@@ -302,14 +339,9 @@ where
     // Reader: forwards packets to a channel (partial reads must not be lost inside select!).
     let (in_tx, mut in_rx) = mpsc::channel::<Packet>(256);
     let reader = tokio::spawn(async move {
-        loop {
-            match read_packet_limited(&mut rd, 1_000_000).await {
-                Ok(p) => {
-                    if in_tx.send(p).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(p) = read_packet_secure(&mut rd, &mut rx, 1_000_000).await {
+            if in_tx.send(p).await.is_err() {
+                break;
             }
         }
     });
@@ -317,7 +349,7 @@ where
     let (video_tx, mut video_rx) = mpsc::channel::<Packet>(2);
     let writer = tokio::spawn(async move {
         while let Some(p) = video_rx.recv().await {
-            if write_packet(&mut wr, &p).await.is_err() {
+            if write_packet_secure(&mut wr, &mut tx, &p).await.is_err() {
                 break;
             }
         }
@@ -390,6 +422,8 @@ struct RvTarget {
     addr: String,
     fp: Option<String>,
     sni: String,
+    /// The server's registration key (empty if none).
+    register_key: String,
 }
 
 /// None when no relay is configured (the host keeps working on the local network).
@@ -406,7 +440,13 @@ fn rv_target() -> Option<RvTarget> {
         .filter(|s| !s.trim().is_empty())
         .or_else(|| if cfg.fp.trim().is_empty() || cfg.server != addr { None } else { Some(cfg.fp.clone()) });
     let sni = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("rv").to_string();
-    Some(RvTarget { addr, fp, sni })
+    let register_key = std::env::var("RF_REGISTER_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| cfg.register_key.clone())
+        .trim()
+        .to_string();
+    Some(RvTarget { addr, fp, sni, register_key })
 }
 
 async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
@@ -532,7 +572,15 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
     let wr = Arc::new(Mutex::new(wr));
     {
         let mut g = wr.lock().await;
-        write_rv(&mut *g, &RvMsg::Register { id: id.to_string(), name: pc_name.to_string(), secret: secret.to_string() })
+        write_rv(
+            &mut *g,
+            &RvMsg::RegisterV2 {
+                id: id.to_string(),
+                name: pc_name.to_string(),
+                secret: secret.to_string(),
+                key: target.register_key.clone(),
+            },
+        )
             .await?;
         match tokio::time::timeout(Duration::from_secs(15), read_rv(&mut rd)).await.context("registration timed out")?? {
             RvMsg::RegisteredOk => {
@@ -576,41 +624,23 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
             } else {
                 format!("app {addr} (via internet)")
             };
-            let relay_auth = approval::split_relay_auth(candidate.as_deref().unwrap_or(""));
-            let verdict = auth::check_password(relay_auth.password, &addr);
-            let password_ok = matches!(verdict, auth::Auth::Ok);
-            let resumed = password_ok && relay_auth.resume.is_some_and(approval::consume_resume);
-            let trusted = password_ok && relay_auth.device.is_some_and(approval::is_trusted);
-            let can_remember = kind.starts_with("web");
-            if !matches!(verdict, auth::Auth::Ok) {
-                tracing::warn!("{peer}: wrong password or locked; not asking for approval");
+            // Only end-to-end encrypted requests are accepted: the password is never sent to
+            // the relay; it is proven inside the encrypted handshake after the dial-back.
+            if candidate.as_deref() != Some(remote_friend_common::e2e::RELAY_AUTH_MARKER) {
+                tracing::warn!("{peer}: unencrypted request refused (outdated page or app)");
                 let _ = out_tx.try_send(RvMsg::ApprovalAnswer { client, allow: false });
                 continue;
             }
-            let out_tx2 = out_tx.clone();
+            if let Some(secs) = auth::locked(&addr) {
+                tracing::warn!("{peer}: locked for {secs} s after wrong passwords");
+                let _ = out_tx.try_send(RvMsg::ApprovalAnswer { client, allow: false });
+                continue;
+            }
             let target2 = target.clone();
             let id = id.to_string();
             let secret = secret.to_string();
             tokio::spawn(async move {
-                use approval::Decision;
-                let decision = if resumed {
-                    status::notice(format!("{peer}: session resumed"));
-                    Decision::Once
-                } else if trusted {
-                    status::notice(format!("{peer}: trusted device connected"));
-                    Decision::Once
-                } else {
-                    let prompt_peer = peer.clone();
-                    tokio::task::spawn_blocking(move || approval::ask(&prompt_peer, can_remember))
-                        .await
-                        .unwrap_or(Decision::Deny)
-                };
-                if decision != Decision::Deny {
-                    let issued = (decision == Decision::Always).then(|| approval::trust_device(&peer));
-                    dial_back(&target2, token, &kind, &id, &secret, issued).await;
-                } else {
-                    let _ = out_tx2.try_send(RvMsg::ApprovalAnswer { client, allow: false });
-                }
+                dial_back(&target2, token, &kind, &id, &secret, peer, addr).await;
             });
         }
     };
@@ -618,11 +648,11 @@ async fn uplink_once(target: &RvTarget, id: &str, secret: &str, pc_name: &str, w
     result
 }
 
-/// Connect back to the relay for an approved client and run the session over that link.
-async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret: &str, issued: Option<String>) {
+/// Connect back to the relay for a client and run the (encrypted) session over that link.
+/// The password check and the approval happen inside the session.
+async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret: &str, peer: String, source: String) {
     use remote_friend_common::io::write_rv;
     use remote_friend_common::RvMsg;
-    let peer = format!("internet:{:08x}", token as u32);
     match rv_connect(target).await {
         Ok((rd, mut wr)) => {
             if write_rv(&mut wr, &RvMsg::ConnectBack { token, id: id.to_string(), secret: secret.to_string() })
@@ -634,10 +664,10 @@ async fn dial_back(target: &RvTarget, token: u128, kind: &str, id: &str, secret:
             }
             tracing::info!("{peer}: dial-back established ({kind})");
             match kind {
-                "web-jpeg" => web::session_kmsg(rd, wr, true, issued).await,
-                "web" => web::session_kmsg(rd, wr, false, issued).await,
+                "web-jpeg" => web::session_kmsg(rd, wr, true, peer, source).await,
+                "web" => web::session_kmsg(rd, wr, false, peer, source).await,
                 _ => {
-                    if let Err(e) = session_native(rd, wr, peer.clone(), false).await {
+                    if let Err(e) = session_native(rd, wr, peer.clone(), source).await {
                         tracing::warn!("{peer}: {e:#}");
                     }
                 }

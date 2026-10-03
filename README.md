@@ -61,7 +61,8 @@ curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/s
 The script installs the relay, gets a free HTTPS certificate and prints the **web address** and a
 **fingerprint**. Without a domain it uses `<your-ip>.sslip.io`, a public DNS name that points to
 your server's IP. Then in the app: **Settings → Server** = `<VPS IP>:33202`, **Web address** = the
-printed address. The first connection asks you to confirm the fingerprint. Details:
+printed address, **Server key** = the printed key. The first connection asks you to confirm the
+fingerprint. Details:
 [deploy/SETUP_VPS.md](deploy/SETUP_VPS.md).
 
 ## Phone controls
@@ -77,17 +78,26 @@ Sharp), file upload and full screen. If the connection drops briefly, the page r
 
 ## Security
 
-- Every connection needs the **password**. New devices also need **approval on the shared
-  computer**, unless they were allowed with *Always allow* (the computer stores only a hash of
-  that device token).
+- **End-to-end encrypted.** The phone/app and the shared computer agree on keys with an ECDH
+  exchange bound to the password (PBKDF2-SHA256, 300k iterations), both sides prove they know the
+  password, and everything after that is AES-256-GCM. **The password never goes to the server**, and
+  the server only forwards ciphertext: whoever runs it cannot see the screen, the input or the files.
+- **Server key.** Only computers that know your server's key can register on it, so nobody else can
+  use your VPS as a relay. The setup script prints the key; enter it once in *Settings → Server key*.
+- Every connection needs the **password**; new devices also need **approval on the shared computer**
+  unless they were allowed with *Always allow* (the computer stores only a hash of that device token).
 - The password is created once and kept (format `abcde-23456`, ~50 bits; case and dashes don't
-  matter). Settings → **New password** replaces it.
-- Wrong passwords are rate limited per source (5 per minute, then 1/2/4/8/16-minute lockouts)
-  plus a global cap; the relay also limits requests per IP.
-- Internet traffic is encrypted (browser ↔ server HTTPS, computer ↔ server TLS with a pinned
-  certificate). The relay is **not end-to-end encrypted**: whoever runs the server can technically
-  see the traffic — use your own server.
-- The local network path (ports 33200/33201) is not encrypted; don't forward these ports to the internet.
+  matter). *Settings → New password* replaces it.
+- Wrong passwords are rate limited per source (5 per minute, then 1/2/4/8/16-minute lockouts) plus a
+  global cap; the server limits requests and open connections per IP (relay and nginx).
+- **Local network access is off by default**: the computer is only reachable through your server.
+  *Settings → Allow direct connections from the local network* turns it on (the desktop app is
+  encrypted there too; the plain-http browser page on the local network is not).
+- Releases include `SHA256SUMS.txt`; the VPS setup script verifies the server program against it.
+- VPS hardening (automatic security updates, fail2ban, key-only SSH):
+  ```bash
+  curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/harden-vps.sh | sudo bash
+  ```
 
 More: [SECURITY.md](SECURITY.md).
 
@@ -96,6 +106,7 @@ More: [SECURITY.md](SECURITY.md).
 | Problem | Fix |
 |---|---|
 | “Cannot reach server” in the app | Check Settings → Server (`IP:33202`) and that port 33202/TCP is open on the VPS. |
+| “only accepts computers with its server key” | Enter the key printed by the VPS setup in Settings → Server key. |
 | Phone shows “ID not found” | The shared computer must be running RemoteFriend and show “Online”. |
 | Black screen on Wayland | Click **Ask again** in the app and allow screen sharing. |
 | Mouse/keyboard do nothing on Wayland | “Allow Remote Interaction” was off: click **Ask again** and turn it on. wlroots desktops (Sway, Hyprland) can only control XWayland windows. |
@@ -128,4 +139,4 @@ cargo test -p remote-friend-common -p remote-friend-host
 For development: `RF_TEST_PATTERN=1` (synthetic screen, no permissions needed), `RF_INPUT_DRY=1`
 (log input instead of applying it), `RF_NATIVE_PORT` / `RF_HTTP_PORT` (run a second instance).
 
-Protocol version 3: the app, terminal host and relay server must be updated together.
+Protocol version 4 (end-to-end encrypted): the app, terminal host and relay server must be updated together.

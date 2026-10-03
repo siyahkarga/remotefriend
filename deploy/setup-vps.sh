@@ -69,6 +69,20 @@ if [ "$(stat -c%s "$TMP_BIN")" -lt 1000000 ]; then
   echo "DOWNLOAD ERROR: file is too small (corrupt download)." >&2
   exit 1
 fi
+# Verify against the release checksums (SHA256SUMS.txt is published with every release).
+SUMS="$(curl -fsSL --retry 3 --max-time 60 "$REPO/releases/download/$VERSION/SHA256SUMS.txt" 2>/dev/null || true)"
+if [ -n "$SUMS" ]; then
+  WANT="$(printf '%s\n' "$SUMS" | awk '$2=="remote-friend-rendezvous"{print $1}')"
+  GOT="$(sha256sum "$TMP_BIN" | awk '{print $1}')"
+  if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+    rm -f "$TMP_BIN"
+    echo "CHECKSUM ERROR: the downloaded server program does not match SHA256SUMS.txt; not installed." >&2
+    exit 1
+  fi
+  echo "Checksum verified."
+else
+  echo "WARNING: this release has no SHA256SUMS.txt; checksum not verified."
+fi
 chmod 0755 "$TMP_BIN"
 chown root:remotefriend "$TMP_BIN"
 systemctl stop remotefriend 2>/dev/null || true
@@ -86,6 +100,15 @@ fi
 chown root:remotefriend "$INSTALL_DIR/key.pem" "$INSTALL_DIR/cert.pem"
 chmod 0640 "$INSTALL_DIR/key.pem"
 chmod 0644 "$INSTALL_DIR/cert.pem"
+
+# Server key: only computers that know it can register on this server (kept if present).
+if [ ! -s "$INSTALL_DIR/register.key" ]; then
+  openssl rand -hex 16 > "$INSTALL_DIR/register.key"
+  echo "New server key generated."
+fi
+chown root:remotefriend "$INSTALL_DIR/register.key"
+chmod 0640 "$INSTALL_DIR/register.key"
+SERVER_KEY="$(tr -d '[:space:]' < "$INSTALL_DIR/register.key")"
 
 echo "=== 5/7 service ==="
 # Internal web port (127.0.0.1 only, behind nginx). If another application uses it
@@ -125,9 +148,16 @@ proxy_block() {
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
     proxy_buffering off;
+    limit_req zone=rf_req burst=40 nodelay;
+    limit_conn rf_conn 20;
   }
 EOF
 }
+# Request/connection limits per client IP (protects the server from floods).
+cat > /etc/nginx/conf.d/remotefriend-limits.conf <<'EOF'
+limit_req_zone $binary_remote_addr zone=rf_req:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=rf_conn:10m;
+EOF
 write_http_site() {
   { echo "server {"; echo "  listen 80;"; echo "  server_name $DOMAIN $SERVER_IP;"; proxy_block; echo "}"; } > "$NGINX_SITE"
 }
@@ -211,10 +241,14 @@ cat <<EOF
  From your phone or browser:   $WEB_URL
    (sign in with computer ID + password)
 
- On the computer to share (host):
-   RF_RV_SERVER=$SERVER_IP:33202
-   RF_WEB_URL=$WEB_URL
- On first connection the host asks for this fingerprint; it must match:
+ In the RemoteFriend app on the computer to share
+ (Settings -> Server):
+   Server       : $SERVER_IP:33202
+   Server key   : $SERVER_KEY
+   Web address  : $WEB_URL
+ Only computers with this server key can use your server.
+
+ On first connection the app asks to trust this fingerprint; it must match:
    $FP
 =============================================================
 EOF

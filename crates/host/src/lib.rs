@@ -17,7 +17,7 @@ mod wayland;
 mod web;
 
 pub use approval::Decision;
-pub use server::{reconnect_server, run, RunOptions};
+pub use server::{lan_enabled, reconnect_server, run, RunOptions};
 pub use status::{
     answer, enable_ui_prompts, notice, pending_prompts, prompt_sequence, snapshot, Answer, Notice, Prompt, PromptKind,
     ScreenState, Snapshot,
@@ -47,14 +47,21 @@ pub fn renew_password() -> Option<String> {
     auth::renew_password()
 }
 
-/// Saved relay settings: (server "host:port", web address for phones).
-pub fn server_settings() -> (String, String) {
+/// Saved relay settings: (server "host:port", web address for phones, server key).
+pub fn server_settings() -> (String, String, String) {
     let cfg = remote_friend_common::identity::load_rv_config();
-    (cfg.server, cfg.web_url)
+    (cfg.server, cfg.web_url, cfg.register_key)
+}
+
+/// Accept direct connections from the local network (takes effect after a restart).
+pub fn set_lan_enabled(enabled: bool) {
+    let mut s = remote_friend_common::identity::load_host_settings();
+    s.lan = enabled;
+    remote_friend_common::identity::save_host_settings(&s);
 }
 
 /// Save relay settings and reconnect. An empty server disables internet access.
-pub fn set_server(server: &str, web_url: &str) {
+pub fn set_server(server: &str, web_url: &str, register_key: &str) {
     let mut cfg = remote_friend_common::identity::load_rv_config();
     let mut server = server.trim().to_string();
     if !server.is_empty() && !server.contains(':') {
@@ -65,6 +72,7 @@ pub fn set_server(server: &str, web_url: &str) {
     }
     cfg.server = server;
     cfg.web_url = web_url.trim().trim_end_matches('/').to_string();
+    cfg.register_key = register_key.trim().to_string();
     remote_friend_common::identity::save_rv_config(&cfg);
     reconnect_server();
 }

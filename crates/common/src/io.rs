@@ -131,3 +131,36 @@ where
     let (kind, payload) = tagged.split_first().context("empty kmsg")?;
     write_kmsg(w, *kind, payload).await
 }
+
+/// Read one framed blob of at most `max_len` bytes (handshake messages).
+pub async fn read_blob_limited<R>(r: &mut R, max_len: usize) -> Result<Vec<u8>>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let len = r.read_u32().await? as usize;
+    if len > max_len {
+        anyhow::bail!("message too large: {len}");
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Encrypted packet: framed blob of AES-GCM(bincode packet).
+pub async fn read_packet_secure<R>(r: &mut R, rx: &mut crate::e2e::Cipher, max_len: usize) -> Result<Packet>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let blob = read_blob_limited(r, max_len.min(MAX_MSG) + 64).await?;
+    let plain = rx.decrypt(&blob)?;
+    decode(&plain)
+}
+
+pub async fn write_packet_secure<W>(w: &mut W, tx: &mut crate::e2e::Cipher, p: &Packet) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let plain = encode(p)?;
+    let ct = tx.encrypt(&plain)?;
+    write_blob(w, &ct).await
+}

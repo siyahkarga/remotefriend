@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver};
 
-/// LAN'da bulunan bilgisayar
+/// A computer found on the local network
 #[derive(Clone)]
 pub(crate) struct LanEntry {
     pub ip: String,
@@ -139,7 +139,12 @@ pub(crate) async fn net_loop_rv(
     let _ = mode;
     let mut rd = rd;
     let mut wr = wr;
-    write_rv(&mut wr, &RvMsg::Hello { id: id.to_string(), auth: Some(password.to_string()) }).await?;
+    // The password never goes to the server: it is proven end to end after the link is up.
+    write_rv(
+        &mut wr,
+        &RvMsg::Hello { id: id.to_string(), auth: Some(remote_friend_common::e2e::RELAY_AUTH_MARKER.into()) },
+    )
+    .await?;
     loop {
         match read_rv(&mut rd).await? {
             RvMsg::Accepted => break,
@@ -175,16 +180,38 @@ where
     R: tokio::io::AsyncReadExt + Unpin + Send + 'static,
     W: tokio::io::AsyncWriteExt + Unpin + Send + 'static,
 {
+    use remote_friend_common::e2e;
+    use remote_friend_common::io::{read_blob_limited, read_packet_secure, write_blob, write_packet_secure};
+    // 1. End-to-end encrypted handshake: both sides prove they know the password.
+    shared.lock().unwrap().status = "Checking the password (encrypted)...".into();
+    let hello = tokio::time::timeout(std::time::Duration::from_secs(30), read_blob_limited(&mut rd, 1024))
+        .await
+        .context("the remote computer did not answer")??;
+    let pw = password.to_string();
+    let (reply, pending) = tokio::task::spawn_blocking(move || e2e::viewer_respond(&hello, &pw)).await??;
+    write_blob(&mut wr, &reply.to_bytes()).await?;
+    let result = read_blob_limited(&mut rd, 1024).await?;
+    let secure = match e2e::viewer_result(&result).and_then(|mac| pending.finish(mac)) {
+        Ok(c) => c,
+        Err(e) => {
+            let mut sh = shared.lock().unwrap();
+            sh.status = format!("Rejected: {e}");
+            sh.failed = true;
+            drop(sh);
+            anyhow::bail!("rejected: {e}");
+        }
+    };
+    let e2e::Channel { mut tx, mut rx } = secure;
     let hs = Packet::Handshake(Handshake {
         version: PROTOCOL_VERSION,
-        password: password.to_string(),
+        password: String::new(),
         want_video: true,
         want_input: true,
     });
-    write_packet(&mut wr, &hs).await?;
+    write_packet_secure(&mut wr, &mut tx, &hs).await?;
     // Accept / Reject / WaitingForApproval
     loop {
-        let resp = read_packet(&mut rd).await?;
+        let resp = read_packet_secure(&mut rd, &mut rx, 64 * 1024).await?;
         match resp {
             Packet::Accept => {
                 shared.lock().unwrap().status = "Connected".into();
@@ -215,7 +242,7 @@ where
                 p = rx_out.recv() => match p { Some(p) => p, None => break },
                 s = ack_rx.recv() => match s { Some(seq) => Packet::Ack { seq }, None => break },
             };
-            if remote_friend_common::io::write_packet(&mut wr, &p).await.is_err() {
+            if write_packet_secure(&mut wr, &mut tx, &p).await.is_err() {
                 break;
             }
         }
@@ -234,7 +261,7 @@ where
                 shared.lock().unwrap().status = "Disconnected".into();
                 break;
             }
-            res = read_packet_split(&mut rd) => {
+            res = read_packet_secure(&mut rd, &mut rx, remote_friend_common::io::MAX_MSG) => {
                 let pkt = match res {
                     Ok(p) => p,
                     Err(e) => {
@@ -330,13 +357,3 @@ impl H264Dec {
         Ok(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
     }
 }
-
-// Framed packet IO from the common crate.
-use remote_friend_common::io::{read_packet, write_packet};
-async fn read_packet_split<R>(r: &mut R) -> anyhow::Result<Packet>
-where
-    R: tokio::io::AsyncReadExt + Unpin,
-{
-    read_packet(r).await
-}
-

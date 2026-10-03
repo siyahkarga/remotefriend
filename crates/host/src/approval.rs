@@ -38,7 +38,7 @@ fn lines() -> &'static Mutex<Receiver<String>> {
 }
 
 fn yes(s: &str) -> bool {
-    matches!(s.to_lowercase().as_str(), "y" | "yes" | "a" | "allow" | "e" | "evet")
+    matches!(s.to_lowercase().as_str(), "y" | "yes" | "a" | "allow")
 }
 
 fn notify_desktop(peer: &str) {
@@ -99,8 +99,8 @@ pub(crate) fn ask(peer: &str, can_remember: bool) -> Decision {
             ASK_TIMEOUT,
         );
         match answer.as_deref().map(|s| s.to_lowercase()) {
-            Some(a) if can_remember && matches!(a.as_str(), "p" | "permanent" | "always" | "k") => Decision::Always,
-            Some(a) if yes(&a) || matches!(a.as_str(), "p" | "k") => Decision::Once,
+            Some(a) if can_remember && matches!(a.as_str(), "p" | "permanent" | "always") => Decision::Always,
+            Some(a) if yes(&a) || a == "p" => Decision::Once,
             _ => Decision::Deny,
         }
     };
@@ -231,9 +231,6 @@ pub(crate) fn forget_devices() -> usize {
 
 static RESUME: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
 const RESUME_TTL: Duration = Duration::from_secs(600);
-/// On the relay path the token is prefixed to the password: "rf-resume:<32 hex>:<password>".
-const RESUME_PREFIX: &str = "rf-resume:";
-const DEVICE_PREFIX: &str = "rf-dev:";
 
 pub(crate) fn grant_resume() -> String {
     let token = remote_friend_common::new_secret_hex()[..32].to_string();
@@ -265,40 +262,6 @@ pub(crate) fn consume_resume(token: &str) -> bool {
     }
 }
 
-/// Relay auth data: [rf-resume:<32hex>:][rf-dev:<64hex>:]<password>
-pub(crate) struct RelayAuth<'a> {
-    pub password: &'a str,
-    pub resume: Option<&'a str>,
-    pub device: Option<&'a str>,
-}
-
-pub(crate) fn split_relay_auth(auth: &str) -> RelayAuth<'_> {
-    let mut out = RelayAuth { password: auth, resume: None, device: None };
-    loop {
-        let rest = out.password;
-        let hex_ok = |t: &str, n: usize| t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit());
-        if let Some(r) = rest.strip_prefix(RESUME_PREFIX) {
-            if let Some((t, p)) = r.split_once(':') {
-                if hex_ok(t, 32) && out.resume.is_none() {
-                    out.resume = Some(t);
-                    out.password = p;
-                    continue;
-                }
-            }
-        }
-        if let Some(r) = rest.strip_prefix(DEVICE_PREFIX) {
-            if let Some((t, p)) = r.split_once(':') {
-                if hex_ok(t, 64) && out.device.is_none() {
-                    out.device = Some(t);
-                    out.password = p;
-                    continue;
-                }
-            }
-        }
-        return out;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,18 +272,5 @@ mod tests {
         assert!(consume_resume(&t));
         assert!(!consume_resume(&t));
         assert!(!consume_resume("00000000000000000000000000000000"));
-    }
-
-    #[test]
-    fn relay_auth_split() {
-        let tok = "0123456789abcdef0123456789abcdef";
-        let dev = "ab".repeat(32);
-        let raw = format!("rf-resume:{tok}:rf-dev:{dev}:gizli:sifre");
-        let a = split_relay_auth(&raw);
-        assert_eq!((a.password, a.resume, a.device), ("gizli:sifre", Some(tok), Some(dev.as_str())));
-        let b = split_relay_auth("normal-sifre");
-        assert_eq!((b.password, b.resume, b.device), ("normal-sifre", None, None));
-        let c = split_relay_auth("rf-resume:kisa:x");
-        assert_eq!((c.password, c.resume), ("rf-resume:kisa:x", None));
     }
 }

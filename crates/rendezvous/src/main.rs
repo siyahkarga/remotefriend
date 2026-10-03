@@ -61,6 +61,40 @@ struct State {
     /// Per-IP connection request limit (first line of defense against password-guessing spam;
     /// the real lockout is on the host).
     hello_rate: std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+    /// Registration key; when set, only computers that know it can register new IDs.
+    register_key: Option<String>,
+    /// Open native connections per IP (caps how many one address can hold open).
+    conns_per_ip: std::sync::Mutex<HashMap<std::net::IpAddr, u32>>,
+}
+
+const MAX_CONNS_PER_IP: u32 = 16;
+
+/// Releases a per-IP connection slot when dropped.
+struct IpSlot {
+    state: Arc<State>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut map = self.state.conns_per_ip.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
+fn take_ip_slot(state: &Arc<State>, ip: std::net::IpAddr) -> Option<IpSlot> {
+    let mut map = state.conns_per_ip.lock().unwrap();
+    let n = map.entry(ip).or_insert(0);
+    if *n >= MAX_CONNS_PER_IP {
+        return None;
+    }
+    *n += 1;
+    Some(IpSlot { state: state.clone(), ip })
 }
 
 const HELLO_PER_MINUTE: u32 = 12;
@@ -286,8 +320,13 @@ async fn handle_native(
 
     let first = tokio::time::timeout(std::time::Duration::from_secs(15), read_rv(&mut rd)).await??;
 
+    // Older hosts send Register without a key.
+    let first = match first {
+        RvMsg::Register { id, name, secret } => RvMsg::RegisterV2 { id, name, secret, key: String::new() },
+        other => other,
+    };
     match first {
-        RvMsg::Register { id, name, secret } => {
+        RvMsg::RegisterV2 { id, name, secret, key } => {
             // A host ID is owned via a persistent 256-bit secret. Nobody else can register the same ID.
             if !valid_id(&id) || !valid_secret(&secret) || !valid_name(&name) {
                 write_rv(&mut wr, &RvMsg::RegisterError("invalid ID or host secret".into())).await?;
@@ -295,6 +334,18 @@ async fn handle_native(
             }
             {
                 let mut registry = state.registry.lock().await;
+                // With a registration key, only computers that know it can register NEW IDs
+                // (already registered computers keep working with their host secret).
+                let key_ok = state.register_key.as_deref().is_none_or(|k| {
+                    remote_friend_common::constant_time_eq(k.as_bytes(), key.trim().as_bytes())
+                });
+                if !key_ok && registry.get(&id).is_none_or(|known| known != &secret) {
+                    write_rv(&mut wr, &RvMsg::RegisterError(
+                        "this server only accepts computers with its server key (RemoteFriend: Settings -> Server key)".into(),
+                    )).await?;
+                    tracing::warn!("{id}: registration refused (missing or wrong server key) [{peer}]");
+                    return Ok(());
+                }
                 match registry.get(&id) {
                     Some(known) if known != &secret => {
                         write_rv(&mut wr, &RvMsg::RegisterError(
@@ -511,6 +562,18 @@ async fn reject_pending(state: &Arc<State>, client_tag: &str, msg: &str) {
     }
 }
 
+/// Registration key: systemd credential "register.key", RF_REGISTER_KEY_FILE or RF_REGISTER_KEY.
+fn load_register_key() -> Option<String> {
+    let from_file = |p: std::path::PathBuf| std::fs::read_to_string(p).ok();
+    let key = std::env::var("CREDENTIALS_DIRECTORY")
+        .ok()
+        .and_then(|d| from_file(Path::new(&d).join("register.key")))
+        .or_else(|| std::env::var("RF_REGISTER_KEY_FILE").ok().and_then(|p| from_file(p.into())))
+        .or_else(|| std::env::var("RF_REGISTER_KEY").ok())?;
+    let key = key.trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
 /// Certificate paths: systemd credentials directory first, then RF_TLS_CERT/RF_TLS_KEY.
 fn tls_paths() -> (Option<String>, Option<String>) {
     if let Ok(dir) = std::env::var("CREDENTIALS_DIRECTORY") {
@@ -587,7 +650,13 @@ async fn main() -> Result<()> {
         web_slots: Arc::new(tokio::sync::Semaphore::new(web_limit)),
         pending_slots: Arc::new(tokio::sync::Semaphore::new(pending_limit)),
         hello_rate: std::sync::Mutex::new(HashMap::new()),
+        register_key: load_register_key(),
+        conns_per_ip: std::sync::Mutex::new(HashMap::new()),
     });
+    match &state.register_key {
+        Some(_) => tracing::info!("server key set: only computers with the key can register"),
+        None => tracing::warn!("no server key: ANY computer can register (set one with the setup script)"),
+    }
 
     // timeout sweeper (entries waiting >60 s without approval)
     {
@@ -643,10 +712,15 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        let Some(ip_slot) = take_ip_slot(&state, peer.ip()) else {
+            tracing::warn!("too many open connections from {}; refused", peer.ip());
+            continue;
+        };
         let st = state.clone();
         let tls = tls.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let _ip_slot = ip_slot;
             if let Err(e) = handle_native(tcp, peer, st, tls).await {
                 tracing::warn!("connection error {peer}: {e:#}");
             }
@@ -754,13 +828,14 @@ async fn web_serve(listener: tokio::net::TcpListener, state: Arc<State>) -> Resu
                                 .filter(|t| t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit()))
                                 .map(str::to_string)
                         };
-                        let mut auth = pw;
-                        if let Some(d) = hex("device", 64) {
-                            auth = format!("rf-dev:{d}:{auth}");
-                        }
-                        if let Some(r) = hex("resume", 32) {
-                            auth = format!("rf-resume:{r}:{auth}");
-                        }
+                        // Encrypted pages never send the password to the server; the computer
+                        // checks it inside the end-to-end encrypted handshake.
+                        let auth = if v.get("e2e").and_then(|x| x.as_bool()).unwrap_or(false) {
+                            remote_friend_common::e2e::RELAY_AUTH_MARKER.to_string()
+                        } else {
+                            let _ = (hex("device", 64), hex("resume", 32));
+                            pw
+                        };
                         (
                             v.get("id").and_then(|x| x.as_str())
                                 .map(|s| s.replace(' ', "")).unwrap_or_default(),

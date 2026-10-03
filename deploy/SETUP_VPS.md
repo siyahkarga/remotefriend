@@ -1,7 +1,8 @@
 # VPS setup (Ubuntu/Debian)
 
-> Security boundary: the relay is not end-to-end encrypted. Anyone who runs or compromises the VPS can
-> technically see the video, input, password and file contents. Only use a server you own or trust.
+> Since v0.7.0 connections are end-to-end encrypted: the relay only forwards ciphertext and never sees
+> the password, screen, input or files. It does see metadata (IDs, times, IP addresses, data volume).
+> App, computers and relay must all be v0.7.0 or newer (protocol 4).
 
 ## One command (install and update)
 
@@ -12,14 +13,19 @@ curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/s
 The script does the following (it is safe to re-run):
 
 1. Installs `nginx`, `certbot` and `ufw`; creates the `remotefriend` system user.
-2. Downloads the latest `remote-friend-rendezvous` binary (stops the service first, replaces it atomically).
+2. Downloads the latest `remote-friend-rendezvous` binary, **checks it against the release's
+   `SHA256SUMS.txt`** (refuses a mismatch), then stops the service and replaces it atomically.
 3. **Keeps** the relay TLS certificate (`/opt/remotefriend/cert.pem`, port 33202); generates one if missing.
 4. Repairs file permissions on every run.
 5. Installs the systemd service. The service receives the certificate via `LoadCredential=`: systemd
    reads the file as root and hands it to the service, so file permissions can't take the service down.
 6. Sets up nginx and obtains **Let's Encrypt HTTPS**. If you have no domain, `<ip-with-dashes>.sslip.io`
    is used (e.g. `169-58-37-61.sslip.io`, no setup needed). The certificate renews automatically.
-7. Opens 80, 443 and 33202 in the firewall; at the end it prints the web address and the fingerprint.
+7. Creates the **server key** (`/opt/remotefriend/register.key`, kept on re-runs): only computers that
+   know it can register on this server, so strangers cannot use your VPS as a relay.
+8. Adds nginx request and connection limits per IP (the relay itself also limits connections per IP).
+9. Opens 80, 443 and 33202 in the firewall; at the end it prints the **Server**, **Server key**,
+   **Web address** and the certificate fingerprint.
 
 Options:
 
@@ -29,16 +35,30 @@ curl -sL .../setup-vps.sh | sudo DOMAIN=remote.example.com EMAIL=you@example.com
 # if the IP can't be detected automatically
 curl -sL .../setup-vps.sh | sudo SERVER_IP=1.2.3.4 bash
 # specific release
-curl -sL .../setup-vps.sh | sudo VERSION=v0.6.2 bash
+curl -sL .../setup-vps.sh | sudo VERSION=v0.7.0 bash
 ```
 
 Your cloud provider's security group must also allow **80, 443 and 33202/TCP** (80 is needed to obtain the certificate).
 
-## Host setup
+## Hardening (recommended)
 
-The host starter asks for the server once: `VPS_IP:33202`. On first connection the host asks you to
-confirm the relay fingerprint; accept it only if it matches the fingerprint printed at the end of setup.
+```bash
+curl -sL https://raw.githubusercontent.com/siyahkarga/remotefriend/main/deploy/harden-vps.sh | sudo bash
+```
+
+Turns on automatic security updates and fail2ban for SSH, and switches SSH to key-only login if an SSH
+key is already installed (otherwise it prints how to install one and leaves password login on, so you
+cannot lock yourself out). It does not touch the firewall rules of other sites on the VPS.
+
+## Computer setup
+
+In the RemoteFriend app open **Settings** and enter **Server** (`VPS_IP:33202`), **Server key** and
+**Web address** exactly as printed at the end of the setup, then *Save and reconnect*. On the first
+connection the app asks you to confirm the relay fingerprint; accept it only if it matches the one
+printed by the setup. The terminal host uses the key saved by the app, or `RF_REGISTER_KEY=...` in its environment.
 On your phone, open the `https://…` address printed by the setup script.
+
+Show the key again later: `sudo cat /opt/remotefriend/register.key`.
 
 ## Troubleshooting
 
@@ -69,6 +89,11 @@ To see which file can't be read, look at the **whole** log (`-n 30`); above the 
 Check `/tmp/rf-certbot.log`. The most common cause: port 80 is closed in the cloud security group,
 or another web server is using port 80. Fix it and re-run the script.
 
+### "this server only accepts computers with its server key"
+
+The computer is new to this server and has no (or a wrong) server key. Enter the key from
+`sudo cat /opt/remotefriend/register.key` in Settings → Server key.
+
 ### "this ID is registered to a different host key"
 
 The host's `~/.config/remotefriend/host_secret` file changed or was deleted. Remove the old entry:
@@ -82,5 +107,7 @@ sudo systemctl start remotefriend
 ## Maintenance
 
 - Keep `/var/lib/remotefriend/hosts.json` private and back it up (it contains host identity secrets).
+- To revoke the server key: write a new one to `/opt/remotefriend/register.key` (`openssl rand -hex 16`),
+  `sudo systemctl restart remotefriend`, and remove unwanted IDs from `hosts.json`.
 - If the relay certificate changes, hosts will ask for the fingerprint again; verify the new fingerprint over a trusted channel.
 - Do not use `RF_PLAIN_OK=1` on a production server.

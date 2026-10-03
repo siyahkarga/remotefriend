@@ -74,6 +74,29 @@ pub struct RvConfig {
     /// Address phones/browsers open (e.g. https://remote.example.com). Optional.
     #[serde(default)]
     pub web_url: String,
+    /// Registration key of the server (printed by the server setup). Optional.
+    #[serde(default)]
+    pub register_key: String,
+}
+
+/// Host settings (~/.config/remotefriend/settings.json).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct HostSettings {
+    /// Accept direct connections from the local network (off: only via the server).
+    #[serde(default)]
+    pub lan: bool,
+}
+
+pub fn load_host_settings() -> HostSettings {
+    std::fs::read_to_string(config_dir().join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_host_settings(s: &HostSettings) {
+    let data = serde_json::to_vec_pretty(s).unwrap_or_default();
+    let _ = write_private(&config_dir().join("settings.json"), &data);
 }
 
 pub fn load_rv_config() -> RvConfig {
