@@ -50,6 +50,12 @@ impl App {
                     return;
                 }
                 ui.label(format!("{status}  ·  {hw}×{hh}  ·  {fps:.0} fps"));
+                let sound_label = if self.sound_on { "🔊 Sound on" } else { "🔇 Sound off" };
+                if ui.button(sound_label).on_hover_text("Play the remote computer's sound here").clicked() {
+                    self.sound_on = !self.sound_on;
+                    shared.lock().unwrap().sound = self.sound_on;
+                    let _ = tx.try_send(Packet::AudioOn(self.sound_on));
+                }
                 if ui.button("📁 Send file").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.send_file(path);

@@ -1,6 +1,6 @@
 [package]
 name = "remotefriend"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Remote desktop: share this computer and control other computers"
 homepage = "https://github.com/siyahkarga/remotefriend"
@@ -25,6 +25,9 @@ openh264 = "0.9"
 eframe = "0.32"
 egui = "0.32"
 rfd = "0.15"
+# Remote sound playback
+opus = "0.4"
+cpal = "0.18"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

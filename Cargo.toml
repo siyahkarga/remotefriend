@@ -23,8 +23,8 @@ rand = "0.9"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 
-# Debug derlemede de akici goruntu: bagimliliklar (OpenH264 C kodu dahil) optimize
-# derlenir, kendi kodumuz hafif optimize edilir.
+# Smooth video in debug builds too: dependencies (including the OpenH264 C code) are
+# optimized, our own code lightly.
 [profile.dev]
 opt-level = 1
 

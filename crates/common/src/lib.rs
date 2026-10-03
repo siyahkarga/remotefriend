@@ -10,7 +10,7 @@ pub mod tls;
 pub mod webapp;
 // Note: `discovery` is defined inline in this file (below).
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Browser video frame header version (must match webapp.html).
 pub const WEB_FRAME_VERSION: u8 = 3;
 /// Browser frame header length: [ver][flags][0][0][w u32][h u32][seq u32]
@@ -144,6 +144,17 @@ pub enum Packet {
     /// The client decoded the frame with this sequence number (host uses it for latency/flow control).
     /// Older clients don't send it; in that case the host applies no window.
     Ack { seq: u64 },
+    /// Host -> Client: 20 ms of the computer's sound (protocol 5+).
+    Audio(AudioChunk),
+    /// Client -> Host: start (true) or stop (false) sending sound (protocol 5+).
+    AudioOn(bool),
+}
+
+/// Opus, 48 kHz stereo, one 20 ms frame. `seq` counts frames, so gaps show skipped silence.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AudioChunk {
+    pub seq: u64,
+    pub data: Vec<u8>,
 }
 
 pub fn encode(packet: &Packet) -> anyhow::Result<Vec<u8>> {
@@ -179,7 +190,7 @@ pub struct Beacon {
     pub v: u32,          // must be TRANSPORT_GEN
     pub name: String,    // computer name
     pub port: u16,       // native TCP port
-    pub fp: String,      // TLS sertifika SHA256 fingerprint (TOFU)
+    pub fp: String,      // TLS certificate SHA-256 fingerprint (trust on first use)
     pub proto: u32,      // PROTOCOL_VERSION
 }
 

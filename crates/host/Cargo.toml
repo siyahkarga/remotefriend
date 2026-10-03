@@ -13,7 +13,7 @@ serde = { workspace = true }
 serde_json = "1"
 xcap = "0.4"
 openh264 = "0.9"
-# Calisirken bit hizini degistirmek icin ham secenek API.
+# Raw option API to change the bitrate while encoding.
 openh264-sys2 = "0.9"
 hostname = { workspace = true }
 image = { version = "0.25", features = ["jpeg"] }
@@ -22,12 +22,15 @@ axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
 local-ip-address = "0.6"
 base64 = { workspace = true }
+# System sound: Opus encoder (libopus built from source) and capture on Windows/macOS.
+opus = "0.4"
+cpal = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_HiDpi"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Wayland: Portal RemoteDesktop (gercek fare/klavye) + ScreenCast + PipeWire. Xorg'da xcap + enigo.
+# Wayland: portal RemoteDesktop (real mouse/keyboard) + ScreenCast + PipeWire. On Xorg: xcap + enigo.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop", "pipewire"] }
 pipewire = "0.9"
 memmap2 = "0.9"

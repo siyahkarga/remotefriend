@@ -194,6 +194,22 @@ fn test_pattern() -> bool {
     std::env::var("RF_TEST_PATTERN").map(|v| v == "1").unwrap_or(false)
 }
 
+/// Wayland: the screen comes from the desktop portal (PipeWire), not from screenshots.
+#[cfg(target_os = "linux")]
+fn portal_capture() -> bool {
+    crate::wayland::is_wayland() && std::env::var("RF_WAYLAND_XCAP").map(|v| v != "1").unwrap_or(true)
+}
+
+/// Is the mouse pointer drawn into the picture? The portal embeds it; the screenshot APIs used
+/// on X11, Windows and macOS don't, so clients then draw a pointer of their own.
+pub(crate) fn cursor_in_video() -> bool {
+    #[cfg(target_os = "linux")]
+    if portal_capture() && !test_pattern() {
+        return true;
+    }
+    false
+}
+
 struct Capturer {
     #[cfg(target_os = "linux")]
     last_gen: u64,
@@ -219,7 +235,7 @@ impl Capturer {
             return Ok(Some(Arc::new(self.pattern())));
         }
         #[cfg(target_os = "linux")]
-        if crate::wayland::is_wayland() && std::env::var("RF_WAYLAND_XCAP").map(|v| v != "1").unwrap_or(true) {
+        if portal_capture() {
             crate::wayland::ensure_started();
             if crate::wayland::is_ready() || crate::wayland::portal_pending() {
                 return Ok(crate::wayland::wait_frame(&mut self.last_gen, timeout));

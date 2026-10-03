@@ -346,9 +346,17 @@ where
         }
     });
     // Writer: small video channel; on a slow network frames are skipped at the source, not queued.
+    // Sound has its own small queue and goes first (late sound is dropped, not queued).
     let (video_tx, mut video_rx) = mpsc::channel::<Packet>(2);
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Packet>(16);
     let writer = tokio::spawn(async move {
-        while let Some(p) = video_rx.recv().await {
+        loop {
+            let p = tokio::select! {
+                biased;
+                p = audio_rx.recv() => p,
+                p = video_rx.recv() => p,
+            };
+            let Some(p) = p else { break };
             if write_packet_secure(&mut wr, &mut tx, &p).await.is_err() {
                 break;
             }
@@ -357,8 +365,22 @@ where
 
     let mut frames = video::h264().subscribe();
     let mut flow = web::Flow::new(false);
+    let mut sound: Option<tokio::sync::broadcast::Receiver<std::sync::Arc<crate::audio::AudioPacket>>> = None;
     let result: Result<()> = loop {
         tokio::select! {
+            p = async {
+                match sound.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match p {
+                Ok(p) => {
+                    let chunk = remote_friend_common::AudioChunk { seq: p.seq, data: p.opus.clone() };
+                    let _ = audio_tx.try_send(Packet::Audio(chunk));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => sound = None,
+            },
             frame = frames.recv() => match frame {
                 Ok(f) => {
                     if !flow.admit(&f) {
@@ -384,6 +406,13 @@ where
             pkt = in_rx.recv() => match pkt {
                 None => break Ok(()),
                 Some(Packet::Ack { seq }) => flow.on_ack(seq),
+                Some(Packet::AudioOn(on)) => {
+                    if !on {
+                        sound = None;
+                    } else if sound.is_none() {
+                        sound = Some(crate::audio::subscribe());
+                    }
+                }
                 Some(Packet::Input(ev)) => {
                     let ev = match ev {
                         remote_friend_common::InputEvent::MouseMove { x, y } => match flow.map_point(x, y) {

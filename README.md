@@ -2,12 +2,13 @@
 
 Remote desktop for your own computers. Share a computer with one click and control it from
 another computer or **any phone browser** — no app needed on the phone. Video is H.264,
-mouse, keyboard, touch and file transfer are supported, and you can run your own relay server.
+the computer's **sound** is streamed too (Opus), mouse, keyboard, touch and file transfer are
+supported, and you can run your own relay server.
 
 | Shared computer | Status |
 |---|---|
 | **Windows** 10/11 | ✔ screen + mouse/keyboard (high-DPI displays included) |
-| **macOS** 11+ (Apple Silicon and Intel) | ✔ needs Screen Recording + Accessibility permission |
+| **macOS** 11+ (Apple Silicon and Intel) | ✔ needs Screen Recording + Accessibility permission (sound: macOS 14.6+) |
 | **Linux Wayland** (GNOME, KDE) | ✔ via the desktop's screen-sharing portal (asked once) |
 | **Linux X11** | ✔ |
 
@@ -74,7 +75,13 @@ fingerprint. Details:
 
 Pinch to zoom in both modes. The toolbar has the phone keyboard, special keys (Ctrl, Alt, Win,
 Esc, arrows, F-keys, copy/paste shortcuts, type the clipboard), quality (Fast / Balanced /
-Sharp), file upload and full screen. If the connection drops briefly, the page reconnects by itself.
+Sharp), **sound on/off** (🔊), file upload and full screen. If the connection drops briefly, the
+page reconnects by itself.
+
+**Sound:** what the shared computer plays is sent to the viewer (Opus, 96 kbit/s, about 0.1 s
+delay), end-to-end encrypted like the picture. It is only recorded while someone is connected
+with sound on, and nothing is sent while the computer is silent. The desktop app has a
+**Sound on / off** button in its toolbar.
 
 ## Security
 
@@ -114,6 +121,8 @@ More: [SECURITY.md](SECURITY.md).
 | Browser video is slow (“JPEG mode”) | Open the page over **HTTPS** (your server's address) in a current Chrome, Edge or Safari. |
 | VPS service fails with `Permission denied (os error 13)` | Run the VPS setup command again. See [SETUP_VPS.md](deploy/SETUP_VPS.md#troubleshooting). |
 | “version mismatch” | Update the app on both computers and run the VPS setup again. |
+| No sound on the phone | Tap the 🔊 button (it shows 🔇 when off) and turn up the phone volume; on iPhone, also turn off silent mode. The VPS must run v0.8.0 or newer. |
+| No sound from a Mac | Sound needs macOS 14.6 or newer; allow **System Audio Recording** for RemoteFriend in System Settings → Privacy & Security. |
 
 ## Advanced
 

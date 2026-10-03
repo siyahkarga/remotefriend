@@ -2,7 +2,7 @@
 
 > Since v0.7.0 connections are end-to-end encrypted: the relay only forwards ciphertext and never sees
 > the password, screen, input or files. It does see metadata (IDs, times, IP addresses, data volume).
-> App, computers and relay must all be v0.7.0 or newer (protocol 4).
+> Keep the app, the computers and the relay on the same version (v0.8.0 = protocol 5; the phone page with sound comes from the relay).
 
 ## One command (install and update)
 
@@ -35,7 +35,7 @@ curl -sL .../setup-vps.sh | sudo DOMAIN=remote.example.com EMAIL=you@example.com
 # if the IP can't be detected automatically
 curl -sL .../setup-vps.sh | sudo SERVER_IP=1.2.3.4 bash
 # specific release
-curl -sL .../setup-vps.sh | sudo VERSION=v0.7.0 bash
+curl -sL .../setup-vps.sh | sudo VERSION=v0.8.0 bash
 ```
 
 Your cloud provider's security group must also allow **80, 443 and 33202/TCP** (80 is needed to obtain the certificate).

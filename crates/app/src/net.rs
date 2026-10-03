@@ -27,6 +27,8 @@ pub(crate) struct Shared {
     pub tofu_answer: Option<bool>,
     /// Connection failed or was rejected (viewer shows an error screen).
     pub failed: bool,
+    /// Play the remote computer's sound (sent to the host when the session starts).
+    pub sound: bool,
 }
 
 
@@ -231,6 +233,8 @@ where
             _ => anyhow::bail!("unexpected reply"),
         }
     }
+    let want_sound = shared.lock().unwrap().sound;
+    write_packet_secure(&mut wr, &mut tx, &Packet::AudioOn(want_sound)).await?;
 
     // Writer: user input and frame acks (the host uses acks to bound latency).
     let (ack_tx, mut ack_rx) = channel::<u64>(64);
@@ -254,6 +258,8 @@ where
     let mut total = 0u64;
     let mut h264 = H264Dec::new()?;
     let mut first_frame = false;
+    let mut player: Option<crate::audio::Player> = None;
+    let mut player_failed = false;
     loop {
         tokio::select! {
             _ = disconnect.changed() => {
@@ -273,6 +279,16 @@ where
                         break;
                     }
                 };
+        if let Packet::Audio(a) = &pkt {
+            if player.is_none() && !player_failed {
+                player = crate::audio::Player::start();
+                player_failed = player.is_none();
+            }
+            if let Some(p) = player.as_mut() {
+                p.push_opus(&a.data);
+            }
+            continue;
+        }
         if let Packet::Video(f) = pkt {
             n += 1;
             total += 1;
@@ -310,7 +326,7 @@ where
             }
             drop(s);
             if total % 50 == 0 {
-                tracing::info!("video akiyor: toplam {total} frame");
+                tracing::info!("video: {total} frames received");
             }
         }
             }
@@ -350,7 +366,7 @@ impl H264Dec {
                     last = Some((w, h, rgba));
                 }
                 Ok(None) => {}
-                Err(_) => {} // bozuk NAL atla, IDR'de toparlar
+                Err(_) => {} // skip a broken NAL; the next IDR frame recovers
             }
         }
         let (w, h, rgba) = last.context("no decodable frame yet (waiting for a keyframe)")?;

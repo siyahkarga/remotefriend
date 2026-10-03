@@ -6,6 +6,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod audio;
 mod autostart;
 mod history;
 mod net;
@@ -71,6 +72,8 @@ pub(crate) struct App {
     logo: Option<egui::TextureHandle>,
     /// Very narrow window: which panel is shown (0 = this computer, 1 = connect).
     narrow_tab: u8,
+    /// Play the remote computer's sound in the viewer.
+    sound_on: bool,
 }
 
 fn load_icon() -> egui::IconData {
@@ -170,6 +173,7 @@ fn main() -> Result<()> {
         flash: None,
         logo: None,
         narrow_tab: 0,
+        sound_on: true,
     };
 
     let opts = eframe::NativeOptions {
@@ -243,6 +247,7 @@ impl App {
             tofu_pending: None,
             tofu_answer: None,
             failed: false,
+            sound: self.sound_on,
         }));
         let (tx_out, rx_out) = channel::<Packet>(256);
         let (dc_tx, dc_rx) = tokio::sync::watch::channel(false);

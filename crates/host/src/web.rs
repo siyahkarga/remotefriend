@@ -246,7 +246,7 @@ async fn web_e2e_handshake(io: &mut impl TextIo, source: &str) -> Result<Option<
     }
 }
 
-/// Plaintext of an encrypted browser message: [kind] + payload (0 = video, 1 = JSON).
+/// Plaintext of an encrypted browser message: [kind] + payload (0 = video, 1 = JSON, 2 = sound).
 fn seal(tx: &mut remote_friend_common::e2e::Cipher, kind: u8, payload: &[u8]) -> Result<Vec<u8>> {
     let mut p = Vec::with_capacity(1 + payload.len());
     p.push(kind);
@@ -263,26 +263,55 @@ fn open_json(rx: &mut remote_friend_common::e2e::Cipher, data: &[u8]) -> Result<
     }
 }
 
-/// WebSocket writer: control messages first, then video; encrypted when `tx` is set.
+/// Outgoing queues of a browser session; the writer encrypts and sends them.
+struct Outbox {
+    ctrl: mpsc::Sender<String>,
+    video: mpsc::Sender<Vec<u8>>,
+    audio: mpsc::Sender<Vec<u8>>,
+}
+
+struct OutboxRx {
+    ctrl: mpsc::Receiver<String>,
+    video: mpsc::Receiver<Vec<u8>>,
+    audio: mpsc::Receiver<Vec<u8>>,
+}
+
+fn outbox() -> (Outbox, OutboxRx) {
+    let (ctrl, ctrl_rx) = mpsc::channel(64);
+    // Small video queue: on a slow network frames are skipped at the source, not queued.
+    let (video, video_rx) = mpsc::channel(2);
+    let (audio, audio_rx) = mpsc::channel(16);
+    (Outbox { ctrl, video, audio }, OutboxRx { ctrl: ctrl_rx, video: video_rx, audio: audio_rx })
+}
+
+impl OutboxRx {
+    /// Next message as (kind, payload): control first, then sound, then video.
+    /// Kinds: 0 = video, 1 = JSON, 2 = sound. None when the session ended.
+    async fn next(&mut self) -> Option<(u8, Vec<u8>)> {
+        tokio::select! {
+            biased;
+            m = self.ctrl.recv() => m.map(|t| (1u8, t.into_bytes())),
+            m = self.audio.recv() => m.map(|b| (2u8, b)),
+            m = self.video.recv() => m.map(|b| (0u8, b)),
+        }
+    }
+}
+
+/// WebSocket writer; encrypted when `tx` is set.
 fn spawn_ws_writer(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut ctrl_rx: mpsc::Receiver<String>,
-    mut video_rx: mpsc::Receiver<Vec<u8>>,
+    mut out: OutboxRx,
     mut tx: Option<remote_friend_common::e2e::Cipher>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            let (kind, data) = tokio::select! {
-                biased;
-                m = ctrl_rx.recv() => match m { Some(t) => (1u8, t.into_bytes()), None => break },
-                m = video_rx.recv() => match m { Some(b) => (0u8, b), None => break },
-            };
+        while let Some((kind, data)) = out.next().await {
             let msg = match tx.as_mut() {
                 Some(c) => match seal(c, kind, &data) {
                     Ok(ct) => Message::Binary(ct),
                     Err(_) => break,
                 },
                 None if kind == 1 => Message::Text(String::from_utf8(data).unwrap_or_default()),
+                None if kind == 2 => continue, // no sound on the unencrypted page
                 None => Message::Binary(data),
             };
             if sink.send(msg).await.is_err() {
@@ -338,11 +367,10 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
         };
         let remote_friend_common::e2e::Channel { tx, rx } = channel;
         let (inbox_tx, inbox) = mpsc::channel::<String>(256);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<String>(64);
-        let (video_tx, video_rx) = mpsc::channel::<Vec<u8>>(2);
-        let writer = spawn_ws_writer(io.sink, ctrl_rx, video_rx, Some(tx));
+        let (out, out_rx) = outbox();
+        let writer = spawn_ws_writer(io.sink, out_rx, Some(tx));
         let reader = spawn_ws_reader(io.stream, inbox_tx, Some(rx));
-        secure_session(inbox, ctrl_tx, video_tx, want_jpeg, &who).await;
+        secure_session(inbox, out, want_jpeg, &who).await;
         reader.abort();
         let _ = writer.await;
         return;
@@ -380,11 +408,10 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
     }
     let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
     let (inbox_tx, inbox) = mpsc::channel::<String>(256);
-    let (ctrl_tx, ctrl_rx) = mpsc::channel::<String>(64);
-    let (video_tx, video_rx) = mpsc::channel::<Vec<u8>>(2);
-    let writer = spawn_ws_writer(io.sink, ctrl_rx, video_rx, None);
+    let (out, out_rx) = outbox();
+    let writer = spawn_ws_writer(io.sink, out_rx, None);
     let reader = spawn_ws_reader(io.stream, inbox_tx, None);
-    run_session(inbox, ctrl_tx, video_tx, want_jpeg, "browser (LAN, unencrypted)", issued).await;
+    run_session(inbox, out, want_jpeg, "browser (LAN, unencrypted)", issued).await;
     reader.abort();
     let _ = writer.await;
 }
@@ -409,15 +436,9 @@ where
     let remote_friend_common::e2e::Channel { mut tx, mut rx } = channel;
     let KmsgIo { mut rd, mut wr } = io;
     let (inbox_tx, inbox) = mpsc::channel::<String>(256);
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
-    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(2);
+    let (out, mut out_rx) = outbox();
     let writer = tokio::spawn(async move {
-        loop {
-            let (kind, data) = tokio::select! {
-                biased;
-                m = ctrl_rx.recv() => match m { Some(t) => (1u8, t.into_bytes()), None => break },
-                m = video_rx.recv() => match m { Some(b) => (0u8, b), None => break },
-            };
+        while let Some((kind, data)) = out_rx.next().await {
             let Ok(ct) = seal(&mut tx, kind, &data) else { break };
             if write_kmsg(&mut wr, 0, &ct).await.is_err() {
                 break;
@@ -443,20 +464,14 @@ where
             }
         }
     });
-    secure_session(inbox, ctrl_tx, video_tx, jpeg, &peer).await;
+    secure_session(inbox, out, jpeg, &peer).await;
     reader.abort();
     let _ = writer.await;
 }
 
 /// After the encrypted handshake: the browser sends {t:"auth", device?, resume?};
 /// decide about approval, then run the session.
-async fn secure_session(
-    mut inbox: mpsc::Receiver<String>,
-    ctrl: mpsc::Sender<String>,
-    video_out: mpsc::Sender<Vec<u8>>,
-    jpeg: bool,
-    peer: &str,
-) {
+async fn secure_session(mut inbox: mpsc::Receiver<String>, out: Outbox, jpeg: bool, peer: &str) {
     use crate::approval::Decision;
     let Ok(Some(first)) = tokio::time::timeout(Duration::from_secs(30), inbox.recv()).await else { return };
     let v: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
@@ -471,17 +486,17 @@ async fn secure_session(
         crate::status::notice(format!("{peer}: trusted device connected"));
         Decision::Once
     } else {
-        let _ = ctrl.send(r#"{"t":"wait"}"#.into()).await;
+        let _ = out.ctrl.send(r#"{"t":"wait"}"#.into()).await;
         let p = peer.to_string();
         tokio::task::spawn_blocking(move || crate::approval::ask(&p, true)).await.unwrap_or(Decision::Deny)
     };
     if decision == Decision::Deny {
-        let _ = ctrl.send(reject_json("the remote computer denied the connection")).await;
+        let _ = out.ctrl.send(reject_json("the remote computer denied the connection")).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         return;
     }
     let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(peer));
-    run_session(inbox, ctrl, video_out, jpeg, peer, issued).await;
+    run_session(inbox, out, jpeg, peer, issued).await;
 }
 
 /// Flow control: the number/age of frames not yet acked by the client is capped, so
@@ -603,14 +618,35 @@ fn subscribe(jpeg: bool) -> broadcast::Receiver<Arc<EncodedFrame>> {
     if jpeg { video::jpeg().subscribe() } else { video::h264().subscribe() }
 }
 
-async fn run_session(
-    mut inbox: mpsc::Receiver<String>,
-    ctrl: mpsc::Sender<String>,
-    video_out: mpsc::Sender<Vec<u8>>,
-    jpeg: bool,
-    peer: &str,
-    issued_device: Option<String>,
-) {
+/// The session's sound subscription; the client turns it on and off.
+#[derive(Default)]
+struct Sound {
+    rx: Option<broadcast::Receiver<Arc<crate::audio::AudioPacket>>>,
+    /// 24 kHz PCM instead of Opus (browsers without an Opus decoder).
+    pcm: bool,
+}
+
+impl Sound {
+    fn set(&mut self, on: bool, pcm: bool) {
+        self.pcm = pcm;
+        if !on {
+            self.rx = None;
+        } else if self.rx.is_none() {
+            self.rx = Some(crate::audio::subscribe());
+        }
+    }
+}
+
+async fn next_sound(
+    rx: &mut Option<broadcast::Receiver<Arc<crate::audio::AudioPacket>>>,
+) -> Result<Arc<crate::audio::AudioPacket>, broadcast::error::RecvError> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn run_session(mut inbox: mpsc::Receiver<String>, out: Outbox, jpeg: bool, peer: &str, issued_device: Option<String>) {
     #[cfg(target_os = "linux")]
     crate::wayland::ensure_started();
     let welcome = serde_json::json!({
@@ -625,14 +661,19 @@ async fn run_session(
         "resume": crate::approval::grant_resume(),
         // If the operator chose "always": the browser stores this and later connections skip approval.
         "device": issued_device,
+        // The computer can send its sound ({t:"audio", on, codec} turns it on).
+        "audio": true,
+        // The pointer is already part of the picture: the page doesn't draw its own.
+        "cursor": video::cursor_in_video(),
     });
-    if ctrl.send(welcome.to_string()).await.is_err() {
+    if out.ctrl.send(welcome.to_string()).await.is_err() {
         return;
     }
     let _session = crate::status::SessionGuard::new();
     let mut frames = subscribe(jpeg);
     let mut flow = Flow::new(jpeg);
     let mut files = FileTransfers::default();
+    let mut sound = Sound::default();
     // The client pings every 2 s; a long silence means a dead connection (half-open socket).
     let mut last_rx = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -651,7 +692,7 @@ async fn run_session(
                         continue;
                     }
                     let bytes = remote_friend_common::web_frame(f.w, f.h, f.seq, f.key, f.jpeg, &f.data);
-                    match video_out.try_send(bytes) {
+                    match out.video.try_send(bytes) {
                         Ok(()) => flow.sent(&f),
                         Err(mpsc::error::TrySendError::Full(_)) => flow.on_lagged(),
                         Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -660,10 +701,16 @@ async fn run_session(
                 Err(broadcast::error::RecvError::Lagged(_)) => flow.on_lagged(),
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            p = next_sound(&mut sound.rx) => match p {
+                // A full queue means a slow link: late sound is useless, so it is dropped.
+                Ok(p) => { let _ = out.audio.try_send(crate::audio::web_payload(&p, sound.pcm)); }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => sound.rx = None,
+            },
             msg = inbox.recv() => {
                 let Some(text) = msg else { break };
                 last_rx = Instant::now();
-                if let Err(e) = handle_message(&text, &mut flow, &ctrl, &mut files) {
+                if let Err(e) = handle_message(&text, &mut flow, &out.ctrl, &mut files, &mut sound) {
                     tracing::debug!("{peer}: message error: {e:#}");
                 }
             }
@@ -695,7 +742,13 @@ fn num_i32(v: &serde_json::Value, k: &str) -> i32 {
     v.get(k).and_then(|n| n.as_f64()).unwrap_or(0.0).clamp(-1000.0, 1000.0) as i32
 }
 
-fn handle_message(t: &str, flow: &mut Flow, ctrl: &mpsc::Sender<String>, files: &mut FileTransfers) -> Result<()> {
+fn handle_message(
+    t: &str,
+    flow: &mut Flow,
+    ctrl: &mpsc::Sender<String>,
+    files: &mut FileTransfers,
+    sound: &mut Sound,
+) -> Result<()> {
     let v: serde_json::Value = serde_json::from_str(t)?;
     let input = |ev: InputEvent| crate::input::apply(ev);
     match v.get("t").and_then(|x| x.as_str()) {
@@ -733,6 +786,11 @@ fn handle_message(t: &str, flow: &mut Flow, ctrl: &mpsc::Sender<String>, files: 
             }
         }
         Some("kf") => flow.want_key(),
+        Some("audio") => {
+            let on = v.get("on").and_then(|x| x.as_bool()).unwrap_or(false);
+            let pcm = v.get("codec").and_then(|x| x.as_str()) == Some("pcm");
+            sound.set(on, pcm);
+        }
         Some("quality") => {
             if let Some(p) = v.get("p").and_then(|x| x.as_str()).and_then(video::Preset::from_name) {
                 video::set_preset(p);

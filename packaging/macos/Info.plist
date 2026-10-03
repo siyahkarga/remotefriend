@@ -13,5 +13,7 @@
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>RemoteFriend sends this computer's sound to the device that is controlling it.</string>
 </dict>
 </plist>

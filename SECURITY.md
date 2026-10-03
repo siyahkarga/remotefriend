@@ -48,6 +48,14 @@ metadata: which computer IDs are used, when, from which IP addresses and how muc
   `--forget-devices` revokes all of them.
 - A single-use reconnect token, valid for 10 minutes, for dropped sessions (the password is still required).
 
+## v0.8.0: sound
+
+The computer's sound travels inside the same end-to-end encrypted channel as the picture
+(message kind 2 in the browser protocol, `Packet::Audio` natively). It is recorded only while a
+connected viewer has sound turned on and stops a few seconds after the last listener leaves; it
+records the system output (what the speakers play), never a microphone. The unencrypted
+local-network page gets no sound.
+
 ## v0.7.0: end-to-end encryption and a locked-down server
 
 - **End-to-end encryption** between the viewer (browser or app) and the shared computer:

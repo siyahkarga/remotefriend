@@ -5,6 +5,7 @@
 //! prompts with [`pending_prompts`] / [`answer`] (after [`enable_ui_prompts`]).
 
 mod approval;
+pub mod audio;
 mod auth;
 mod convert;
 mod files;
