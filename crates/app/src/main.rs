@@ -66,6 +66,8 @@ pub(crate) struct App {
     last_prompt_seq: u64,
     flash: Option<(String, Instant)>,
     logo: Option<egui::TextureHandle>,
+    /// Very narrow window: which panel is shown (0 = this computer, 1 = connect).
+    narrow_tab: u8,
 }
 
 fn load_icon() -> egui::IconData {
@@ -161,6 +163,7 @@ fn main() -> Result<()> {
         last_prompt_seq: 0,
         flash: None,
         logo: None,
+        narrow_tab: 0,
     };
 
     let opts = eframe::NativeOptions {
@@ -168,7 +171,7 @@ fn main() -> Result<()> {
             .with_title("RemoteFriend")
             .with_app_id("remotefriend")
             .with_inner_size([1060.0, 680.0])
-            .with_min_inner_size([780.0, 540.0])
+            .with_min_inner_size([480.0, 480.0])
             .with_icon(load_icon()),
         ..Default::default()
     };
@@ -374,6 +377,7 @@ impl App {
                     ui.image((logo.id(), egui::vec2(30.0, 30.0)));
                 }
                 ui.label(RichText::new("RemoteFriend").size(21.0).strong());
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙ Settings").clicked() {
                         let (server, web) = remote_friend_host::server_settings();
@@ -406,18 +410,25 @@ impl App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
-            if ui.available_width() >= 900.0 {
-                // Wide window: side by side.
+            if ui.available_width() >= 680.0 {
+                // Side by side (rows wrap inside each panel, nothing spills over).
                 ui.columns(2, |cols| {
                     card(&mut cols[0], "This computer", true, |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
                     card(&mut cols[1], "Control another computer", true, |ui| self.connect_ui(ui));
                 });
             } else {
-                // Narrow window: stacked, scrollable.
+                // Very narrow window: one panel at a time, chosen with tabs.
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.narrow_tab, 0, RichText::new("This computer").size(15.0));
+                    ui.selectable_value(&mut self.narrow_tab, 1, RichText::new("Control another computer").size(15.0));
+                });
+                ui.add_space(6.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    card(ui, "This computer", false, |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
-                    ui.add_space(10.0);
-                    card(ui, "Control another computer", false, |ui| self.connect_ui(ui));
+                    if self.narrow_tab == 0 {
+                        card(ui, "This computer", false, |ui| self.this_computer_ui(ui, &snap, host_error.as_deref()));
+                    } else {
+                        card(ui, "Control another computer", false, |ui| self.connect_ui(ui));
+                    }
                 });
             }
         });
