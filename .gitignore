@@ -1,0 +1,6 @@
+/target/
+# Local secrets (server/password) never enter the repo
+settings.local.bat
+local.env
+*.zip
+.rf-version

@@ -1,0 +1,61 @@
+[package]
+name = "remotefriend"
+version = "0.12.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Remote desktop: share this computer and control other computers"
+homepage = "https://blobidea.com/products/remotefriend"
+readme = "../../README.md"
+
+[[bin]]
+name = "remotefriend"
+path = "src/main.rs"
+
+[dependencies]
+remote-friend-common = { path = "../common" }
+remote-friend-host = { path = "../host" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+image = { version = "0.25" }
+serde_json = "1"
+openh264 = "0.9"
+eframe = "0.32"
+egui = "0.32"
+rfd = "0.15"
+# Remote sound playback
+opus = "0.4"
+cpal = "0.18"
+raw-window-handle = "0.6"
+arboard = "3"
+
+# Hide the window from screen capture while someone is connected
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# Linux package: `cargo deb -p remotefriend` (see .github/workflows/build.yml)
+[package.metadata.deb]
+name = "remotefriend"
+maintainer = "RemoteFriend <support@blobidea.com>"
+copyright = "RemoteFriend contributors"
+section = "net"
+priority = "optional"
+extended-description = """\
+Share this computer and control other computers from a desktop app or any \
+browser (including phones). Works on Wayland (GNOME/KDE), X11, Windows and macOS."""
+depends = "$auto"
+assets = [
+    ["target/release/remotefriend", "usr/bin/", "755"],
+    ["target/release/remote-friend-host", "usr/bin/", "755"],
+    ["../../assets/remotefriend.desktop", "usr/share/applications/", "644"],
+    ["../../assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/remotefriend.png", "644"],
+    ["../../assets/icon.png", "usr/share/pixmaps/remotefriend.png", "644"],
+]

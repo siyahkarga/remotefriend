@@ -1,0 +1,1537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1017">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>RemoteFriend</title>
+<style>
+  :root {
+    --bg:#f4f6fb; --card:#ffffff; --line:#dde2ee; --txt:#141824; --dim:#5d6578; --field:#f7f8fc;
+    --acc:#3b6cf6; --acc-ink:#ffffff; --ok:#1f9d5c; --err:#d93a40; --warn:#b7791f;
+    --bar:rgba(18,21,30,.86); --bar-line:rgba(255,255,255,.10); --bar-txt:#eef1f8; --bar-dim:#a3abbf;
+    --r:16px; --shadow:0 10px 40px rgba(20,30,60,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0d1017; --card:#161a24; --line:#262c3b; --txt:#eef1f8; --dim:#98a1b8; --field:#0f121a;
+      --acc:#5b84ff; --shadow:0 12px 44px rgba(0,0,0,.45);
+    }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; }
+  body { background:var(--bg); color:var(--txt); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  button, input, select, textarea { font:inherit; color:inherit; }
+  [hidden] { display:none !important; }
+
+  /* ---------- login ---------- */
+  #login { min-height:100%; display:flex; align-items:center; justify-content:center; padding:24px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:28px 24px; box-shadow:var(--shadow); }
+  .brand { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+  .logo { width:40px; height:40px; border-radius:12px; background:linear-gradient(135deg,#3b6cf6,#7b61ff); display:grid; place-items:center; color:#fff; flex:none; }
+  .brand h1 { font-size:20px; margin:0; letter-spacing:-.2px; }
+  .brand p { margin:0; color:var(--dim); font-size:13px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--dim); margin:14px 0 6px; }
+  .field { width:100%; background:var(--field); border:1px solid var(--line); border-radius:12px; padding:13px 14px; font-size:16px; outline:none; transition:border-color .15s, box-shadow .15s; }
+  .field:focus { border-color:var(--acc); box-shadow:0 0 0 3px color-mix(in srgb, var(--acc) 25%, transparent); }
+  #idInput { font-size:24px; letter-spacing:3px; text-align:center; font-weight:700; font-variant-numeric:tabular-nums; }
+  .pw-wrap { position:relative; }
+  .pw-wrap .field { padding-right:48px; }
+  .eye { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border:0; background:none; color:var(--dim); border-radius:10px; cursor:pointer; display:grid; place-items:center; }
+  .primary { width:100%; margin-top:20px; padding:14px; border:0; border-radius:12px; background:var(--acc); color:var(--acc-ink); font-weight:700; font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+  .primary:disabled { opacity:.6; cursor:default; }
+  .ghost-btn { width:100%; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:transparent; cursor:pointer; font-weight:600; }
+  .msg { margin-top:14px; padding:12px 14px; border-radius:12px; font-size:14px; }
+  .msg.err { background:color-mix(in srgb, var(--err) 12%, transparent); color:var(--err); border:1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+  .msg.info { background:color-mix(in srgb, var(--acc) 10%, transparent); border:1px solid color-mix(in srgb, var(--acc) 30%, transparent); }
+  .hint { color:var(--dim); font-size:13px; margin-top:16px; }
+  .recents { margin-top:22px; }
+  .recents h2 { font-size:13px; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  .recent { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; margin-top:8px; cursor:pointer; background:var(--field); }
+  .recent b { font-variant-numeric:tabular-nums; letter-spacing:1px; }
+  .recent span { color:var(--dim); font-size:12px; margin-left:auto; }
+  .recent button { border:0; background:none; color:var(--dim); cursor:pointer; padding:4px 6px; border-radius:8px; }
+  .spinner { width:16px; height:16px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:sp .8s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+
+  /* ---------- viewer ---------- */
+  #viewer { position:fixed; inset:0; background:#000; overflow:hidden; color:var(--bar-txt); }
+  #stage { position:absolute; inset:0; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #screen { position:absolute; left:0; top:0; transform-origin:0 0; background:#000; }
+  #stage.mouse #screen { cursor:default; }
+  #cursorDot { position:absolute; left:0; top:0; width:20px; height:26px; margin:-1px 0 0 -1px; pointer-events:none; filter:drop-shadow(0 1px 2px rgba(0,0,0,.6)); transform-origin:1px 1px; transition:transform .06s; }
+  #cursorDot svg { width:100%; height:100%; display:block; }
+  #cursorDot.down { transform:scale(.85); }
+  #bar { position:absolute; left:50%; top:calc(8px + env(safe-area-inset-top)); transform:translateX(-50%); display:flex; align-items:center; gap:4px; padding:5px; background:var(--bar); border:1px solid var(--bar-line); border-radius:14px; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); box-shadow:0 6px 24px rgba(0,0,0,.4); max-width:calc(100% - 16px); z-index:5; transition:opacity .2s, transform .2s; }
+  #bar.min > :not(#barToggle) { display:none; }
+  .tb { width:40px; height:40px; border:0; border-radius:10px; background:transparent; color:var(--bar-txt); display:grid; place-items:center; cursor:pointer; flex:none; }
+  .tb:hover { background:rgba(255,255,255,.08); }
+  .tb.on { background:rgba(91,132,255,.30); color:#fff; }
+  .tb.danger { color:#ff7a7f; }
+  .tb svg { width:21px; height:21px; }
+  #stats { font-size:12px; color:var(--bar-dim); padding:0 8px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  @media (max-width:520px) { #stats { display:none; } }
+  @media (max-width:400px) { .tb { width:36px; } }
+  .sheet { position:absolute; left:50%; top:calc(62px + env(safe-area-inset-top)); transform:translateX(-50%); width:min(440px, calc(100% - 16px)); background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:14px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); box-shadow:0 10px 32px rgba(0,0,0,.5); z-index:6; max-height:calc(100% - 90px); overflow:auto; }
+  .sheet h3 { margin:4px 2px 8px; font-size:12px; color:var(--bar-dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .seg { display:flex; gap:4px; background:rgba(255,255,255,.06); border-radius:12px; padding:4px; margin-bottom:14px; }
+  .seg button { flex:1; border:0; padding:9px 6px; border-radius:9px; background:transparent; color:var(--bar-txt); cursor:pointer; font-size:14px; }
+  .seg button.on { background:#5b84ff; color:#fff; font-weight:600; }
+  .sheet .note { font-size:12.5px; color:var(--bar-dim); margin:-6px 2px 12px; }
+  .keys { display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; margin-bottom:12px; }
+  .key { padding:10px 4px; border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:10px; cursor:pointer; font-size:13.5px; }
+  .key.on { background:#5b84ff; border-color:#5b84ff; }
+  .flist { display:flex; flex-direction:column; gap:2px; }
+  .frow { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:10px; cursor:pointer; color:var(--bar-txt); background:transparent; border:0; text-align:left; font-size:14px; }
+  .frow:hover { background:rgba(255,255,255,.06); }
+  .frow span:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .frow small { color:var(--bar-dim); flex:none; }
+  .fbar { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+  .fbar button, .xfer button { border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:9px; padding:6px 10px; cursor:pointer; }
+  .fbar code { font-size:12px; color:var(--bar-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left; }
+  .xfer { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; color:var(--bar-txt); }
+  .xfer span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .remember { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:14px; color:var(--dim); cursor:pointer; user-select:none; }
+  .remember input { width:18px; height:18px; accent-color:var(--acc); }
+  .rowbtn { width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--bar-line); background:rgba(255,255,255,.05); color:var(--bar-txt); border-radius:12px; cursor:pointer; margin-bottom:8px; text-align:left; }
+  .sheet dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:13px; margin:0 2px; }
+  .sheet dt { color:var(--bar-dim); }
+  .sheet dd { margin:0; font-variant-numeric:tabular-nums; }
+  #kb { position:absolute; left:0; bottom:0; width:1px; height:1px; opacity:0; border:0; padding:0; resize:none; font-size:16px; }
+  #viewOnly { position:absolute; left:50%; top:calc(64px + env(safe-area-inset-top)); transform:translateX(-50%); background:rgba(245,165,36,.92); color:#1a1200; padding:6px 12px; border-radius:10px; font-size:13px; font-weight:600; z-index:6; pointer-events:none; max-width:calc(100% - 32px); text-align:center; }
+  #clipBar { position:absolute; left:50%; bottom:calc(70px + env(safe-area-inset-bottom)); transform:translateX(-50%); display:flex; align-items:center; gap:8px; background:var(--bar); border:1px solid var(--bar-line); color:var(--bar-txt); padding:8px 10px; border-radius:12px; font-size:13px; max-width:calc(100% - 32px); z-index:7; box-shadow:0 6px 24px rgba(0,0,0,.4); }
+  #clipBar span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  #clipBar button { flex:none; border:0; border-radius:8px; padding:6px 10px; cursor:pointer; font-weight:600; }
+  #clipCopy { background:var(--acc); color:var(--acc-ink); }
+  #clipClose { background:transparent; color:var(--bar-txt); }
+  #toast { position:absolute; left:50%; bottom:calc(20px + env(safe-area-inset-bottom)); transform:translateX(-50%); background:var(--bar); border:1px solid var(--bar-line); padding:10px 16px; border-radius:12px; font-size:14px; max-width:calc(100% - 32px); z-index:7; box-shadow:0 6px 24px rgba(0,0,0,.4); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.55); z-index:8; padding:16px; }
+  #overlay .box { background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:22px; max-width:380px; text-align:center; }
+  #overlay .box p { color:var(--bar-dim); margin:8px 0 16px; }
+  #overlay .box button { margin:4px; padding:11px 18px; border-radius:11px; border:0; cursor:pointer; font-weight:600; }
+  #overlay .go { background:#5b84ff; color:#fff; }
+  #overlay .no { background:rgba(255,255,255,.1); color:var(--bar-txt); }
+  #waitMsg { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--bar-dim); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-kb" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></g></symbol>
+    <symbol id="i-cmd" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/></g></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></g></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></g></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></g></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 10l6 6 6-6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+    <symbol id="i-snd" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></g></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></g></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g></symbol>
+  </defs>
+</svg>
+
+<section id="login">
+  <form class="card" id="form" autocomplete="on" novalidate>
+    <div class="brand">
+      <div class="logo"><svg width="22" height="22"><use href="#i-monitor"/></svg></div>
+      <div><h1>RemoteFriend</h1><p id="sub">Remote desktop</p></div>
+    </div>
+    <div id="idPane">
+      <label for="idInput">Computer ID</label>
+      <input class="field" type="text" id="idInput" name="username" placeholder="123 456 789" maxlength="11"
+             inputmode="numeric" autocomplete="username" autocapitalize="off" spellcheck="false">
+    </div>
+    <label for="pw">Password</label>
+    <div class="pw-wrap">
+      <input class="field" type="password" id="pw" name="password" placeholder="Password shown on the host screen"
+             autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" class="eye" id="eyeBtn" aria-label="Show password"><svg width="20" height="20"><use href="#i-eye"/></svg></button>
+    </div>
+    <label class="remember"><input type="checkbox" id="rememberPw" checked> Remember the password on this device</label>
+    <button class="primary" id="connectBtn" type="submit">Connect</button>
+    <button class="ghost-btn" id="cancelBtn" type="button" hidden>Cancel</button>
+    <div id="msg" class="msg" hidden></div>
+    <p class="hint" id="hint">The ID and password are shown in RemoteFriend on that computer.</p>
+    <div class="recents" id="recents" hidden><h2>Recent</h2><div id="recentList"></div></div>
+  </form>
+</section>
+
+<section id="viewer" hidden>
+  <div id="stage">
+    <canvas id="screen" width="16" height="9"></canvas>
+    <div id="cursorDot" hidden><svg viewBox="0 0 20 26"><path d="M1.5 1.5v19.5l5.2-5 3.6 8.2 3.4-1.5-3.6-8h7.3z" fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+    <div id="waitMsg"><div class="spinner"></div><div id="waitTxt">Waiting for video…</div></div>
+  </div>
+  <div id="bar">
+    <button class="tb danger" id="discBtn" title="Disconnect" aria-label="Disconnect"><svg><use href="#i-x"/></svg></button>
+    <button class="tb" id="kbBtn" title="Keyboard" aria-label="Keyboard"><svg><use href="#i-kb"/></svg></button>
+    <button class="tb" id="keysBtn" title="Special keys" aria-label="Special keys"><svg><use href="#i-cmd"/></svg></button>
+    <button class="tb" id="setBtn" title="Settings" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
+    <button class="tb" id="fileBtn" title="Files" aria-label="Files"><svg><use href="#i-file"/></svg></button>
+    <button class="tb" id="sndBtn" title="Sound" aria-label="Sound" hidden><svg><use href="#i-snd"/></svg></button>
+    <button class="tb" id="fsBtn" title="Fullscreen" aria-label="Fullscreen"><svg><use href="#i-full"/></svg></button>
+    <span id="stats">—</span>
+    <button class="tb" id="barToggle" title="Hide toolbar" aria-label="Hide toolbar"><svg><use href="#i-up"/></svg></button>
+  </div>
+
+  <div class="sheet" id="keysSheet" hidden>
+    <h3>Modifiers (tap to hold)</h3>
+    <div class="keys" id="modKeys">
+      <button class="key" data-mod="Control">Ctrl</button>
+      <button class="key" data-mod="Alt">Alt</button>
+      <button class="key" data-mod="Shift">Shift</button>
+      <button class="key" data-mod="Meta">Win/⌘</button>
+    </div>
+    <h3>Keys</h3>
+    <div class="keys" id="specialKeys">
+      <button class="key" data-key="Escape">Esc</button>
+      <button class="key" data-key="Tab">Tab</button>
+      <button class="key" data-key="Enter">Enter</button>
+      <button class="key" data-key="Backspace">⌫</button>
+      <button class="key" data-key="Delete">Del</button>
+      <button class="key" data-key="Home">Home</button>
+      <button class="key" data-key="End">End</button>
+      <button class="key" data-key="PageUp">PgUp</button>
+      <button class="key" data-key="PageDown">PgDn</button>
+      <button class="key" data-key="ArrowLeft">←</button>
+      <button class="key" data-key="ArrowUp">↑</button>
+      <button class="key" data-key="ArrowDown">↓</button>
+      <button class="key" data-key="ArrowRight">→</button>
+    </div>
+    <h3>Shortcuts</h3>
+    <div class="keys" id="comboKeys">
+      <button class="key" data-combo="Control+c">Copy</button>
+      <button class="key" data-combo="Control+v">Paste</button>
+      <button class="key" data-combo="Control+x">Cut</button>
+      <button class="key" data-combo="Control+z">Undo</button>
+      <button class="key" data-combo="Control+a">Select all</button>
+      <button class="key" data-combo="Alt+Tab">Alt+Tab</button>
+      <button class="key" data-combo="Alt+F4">Alt+F4</button>
+      <button class="key" data-combo="Meta">Start</button>
+    </div>
+    <h3>F keys</h3>
+    <div class="keys" id="fKeys"></div>
+    <button class="rowbtn" id="pasteBtn">📋 Paste this device's clipboard on the computer</button>
+  </div>
+
+  <div class="sheet" id="filesSheet" hidden>
+    <button class="rowbtn" id="sendFileBtn">⬆ Send files to the computer</button>
+    <div class="xfer" id="upBox" hidden><span id="upText"></span><button id="upCancel">Cancel</button></div>
+    <h3>On the computer</h3>
+    <div class="fbar"><button id="dirUp">⬆ Up</button><button id="dirHome">Home</button><code id="dirPath"></code></div>
+    <div class="xfer" id="downBox" hidden><span id="downText"></span><button id="downCancel">Cancel</button></div>
+    <div class="flist" id="dirList"></div>
+  </div>
+
+  <div class="sheet" id="setSheet" hidden>
+    <h3>Touch control</h3>
+    <div class="seg" id="modeSeg">
+      <button data-mode="trackpad">Touchpad</button>
+      <button data-mode="direct">Touchscreen</button>
+    </div>
+    <p class="note" id="modeNote"></p>
+    <h3>Display</h3>
+    <div class="seg" id="qualSeg">
+      <button data-q="fast">Fast</button>
+      <button data-q="balanced">Balanced</button>
+      <button data-q="sharp">Sharp</button>
+    </div>
+    <div id="screenBox" hidden>
+      <h3>Screen</h3>
+      <div class="seg" id="screenSeg"></div>
+    </div>
+    <button class="rowbtn" id="fitBtn">🔍 Reset zoom</button>
+    <h3>Connection</h3>
+    <dl id="info"></dl>
+  </div>
+
+  <textarea id="kb" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Remote keyboard"></textarea>
+  <input type="file" id="filePick" multiple hidden>
+  <div id="toast" hidden></div>
+  <div id="viewOnly" hidden>View only: the computer's user turned off your mouse and keyboard</div>
+  <div id="clipBar" hidden><span id="clipText"></span><button id="clipCopy">Copy here</button><button id="clipClose" aria-label="Close">✕</button></div>
+  <div id="overlay" hidden><div class="box"><b id="ovTitle">Connection lost</b><p id="ovText"></p><button class="go" id="ovRetry">Reconnect</button><button class="no" id="ovClose">Close</button></div></div>
+</section>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const FRAME_VER = 3, PROTO_VER = 6, HDR = 16, FLAG_KEY = 1, FLAG_JPEG = 2;
+const canvas = $('screen'), ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+const stage = $('stage');
+const hasWebCodecs = window.isSecureContext && typeof VideoDecoder !== 'undefined';
+const isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+
+let role = 'relay', hostName = '';
+let ws = null, connected = false, savedPw = '', savedId = '';
+let resumeToken = '', autoTries = 0, autoReconnecting = false;
+let jpegMode = false, frameW = 0, frameH = 0, hadFrame = false;
+let cursorInVideo = false; // the computer draws its pointer into the picture
+
+// ---------------- helpers ----------------
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } }
+function showMsg(text, kind) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (kind || 'err'); m.hidden = !text; }
+let toastT = 0;
+function toast(text, ms) { const t = $('toast'); t.textContent = text; t.hidden = false; clearTimeout(toastT); if (ms !== 0) toastT = setTimeout(() => t.hidden = true, ms || 2600); }
+function send(o) {
+  if (!ws || ws.readyState !== 1) return;
+  if (sec && sec.ready) sendSecure(o);
+  else if (!sec) ws.send(JSON.stringify(o)); // legacy (unencrypted local page)
+}
+
+// ---------------- end-to-end encryption ----------------
+// Same handshake as the computer (crates/common/src/e2e.rs): ECDH P-256, PBKDF2-SHA256,
+// HKDF-SHA256, HMAC proofs both ways, then AES-256-GCM with counter nonces. The server only
+// forwards ciphertext and never sees the password.
+const hasSubtle = !!(window.isSecureContext && window.crypto && crypto.subtle);
+const te = new TextEncoder(), td = new TextDecoder();
+let sec = null; // { ready, txKey, rxKey, txCtr, rxCtr, outChain, inChain, pending, outQueued }
+function b64e(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+function b64d(s) { const b = atob(s); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+function cat(...parts) { let n = 0; for (const p of parts) n += p.length; const o = new Uint8Array(n); let i = 0; for (const p of parts) { o.set(p, i); i += p.length; } return o; }
+function preparePw(pw, norm) { return norm ? pw.replace(/[\s-]/g, '').toLowerCase() : pw.trim(); }
+async function hmac(key, data) {
+  const k = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', k, data));
+}
+function nonce(ctr) { const iv = new Uint8Array(12); const dv = new DataView(iv.buffer); dv.setUint32(4, Math.floor(ctr / 4294967296)); dv.setUint32(8, ctr >>> 0); return iv; }
+function secFail(msg) { if (ws) { ws._reason = msg; ws.close(); } }
+
+// Public id of a trusted-device token (the token itself never leaves this browser).
+async function deviceId(tok) {
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('rf-device' + tok.toLowerCase())));
+  return hex(h.subarray(0, 16));
+}
+
+async function e2eStart(m) {
+  try {
+    const salt = b64d(m.salt), hostPub = b64d(m.pub), iter = m.iter;
+    if (m.v !== 1 || !(iter >= 10000 && iter <= 5000000) || hostPub.length !== 65 || salt.length !== 16) throw new Error('bad handshake');
+    const tok = deviceToken();
+    // A computer that trusts this browser lets it in with its device key: no password needed.
+    if (m.mode !== 'device' && m.dev && tok && !savedPw) {
+      setBusy(true, 'Logging in as a trusted device…');
+      sec = { ready: false, pending: null, deviceLogin: true };
+      ws.send(JSON.stringify({ t: 'e2e2d', dev: await deviceId(tok) }));
+      return;
+    }
+    if (m.mode === 'device' && !tok) throw new Error('no device key');
+    setBusy(true, m.mode === 'device' ? 'Logging in as a trusted device…' : 'Checking password…');
+    const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+    const myPub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+    const hostKey = await crypto.subtle.importKey('raw', hostPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: hostKey }, kp.privateKey, 256));
+    const secret = m.mode === 'device' ? tok.toLowerCase() : preparePw(savedPw, !!m.norm);
+    const pwBase = await crypto.subtle.importKey('raw', te.encode(secret), 'PBKDF2', false, ['deriveBits']);
+    const pwKey = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, pwBase, 256));
+    const transcript = cat(te.encode('rf-e2e-v1'), salt, hostPub, myPub);
+    const th = new Uint8Array(await crypto.subtle.digest('SHA-256', transcript));
+    const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+    const okm = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: pwKey, info: cat(te.encode('rf-e2e-v1 keys'), th) }, ikm, 1024));
+    const macC = await hmac(okm.slice(0, 32), cat(te.encode('client'), transcript));
+    // Separate keys for a direct (peer-to-peer) path, independent counters.
+    const dkm = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: pwKey, info: cat(te.encode('rf-e2e-v1 direct'), th) }, ikm, 512));
+    sec = { ready: false, deviceLogin: m.mode === 'device', pending: { macHKey: okm.slice(32, 64), transcript, kC2H: okm.slice(64, 96), kH2C: okm.slice(96, 128), dC2H: dkm.slice(0, 32), dH2C: dkm.slice(32, 64) } };
+    ws.send(JSON.stringify({ t: 'e2e2', pub: b64e(myPub), mac: b64e(macC) }));
+  } catch (e) { secFail('Secure connection failed: ' + (e && e.message || e)); }
+}
+
+async function e2eFinish(m) {
+  try {
+    const p = sec && sec.pending;
+    if (!p) throw new Error('unexpected handshake');
+    const expect = await hmac(p.macHKey, cat(te.encode('host'), p.transcript));
+    const got = b64d(m.mac || '');
+    let diff = got.length ^ expect.length;
+    for (let i = 0; i < Math.min(got.length, expect.length); i++) diff |= got[i] ^ expect[i];
+    if (diff) { secFail('The remote computer could not prove it knows the password (connection refused for your safety).'); return; }
+    sec.txKey = await crypto.subtle.importKey('raw', p.kC2H, 'AES-GCM', false, ['encrypt']);
+    sec.rxKey = await crypto.subtle.importKey('raw', p.kH2C, 'AES-GCM', false, ['decrypt']);
+    sec.txCtr = 0; sec.rxCtr = 0; sec.outChain = Promise.resolve(); sec.inChain = Promise.resolve(); sec.outQueued = 0;
+    sec.dTxKey = await crypto.subtle.importKey('raw', p.dC2H, 'AES-GCM', false, ['encrypt']);
+    sec.dRxKey = await crypto.subtle.importKey('raw', p.dH2C, 'AES-GCM', false, ['decrypt']);
+    sec.dTxCtr = 0; sec.dRxCtr = 0; sec.dOutChain = Promise.resolve(); sec.dInChain = Promise.resolve();
+    sec.pending = null; sec.ready = true;
+    sendSecure({
+      t: 'auth', name: deviceName(),
+      device: sec.deviceLogin ? undefined : deviceToken(),
+      resume: (autoReconnecting && resumeToken) || undefined,
+    });
+  } catch (e) { secFail('Secure connection failed: ' + (e && e.message || e)); }
+}
+
+function sendSecure(o, relayOnly) {
+  const s = sec, sock = ws;
+  const pt = cat([1], te.encode(JSON.stringify(o)));
+  if (!relayOnly && p2p && p2p.open) { sendDirect(pt); return; }
+  const iv = nonce(s.txCtr++); // counter fixed in call order; the chain keeps the wire order
+  s.outQueued++;
+  s.outChain = s.outChain.then(async () => {
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, s.txKey, pt);
+    if (sock.readyState === 1) sock.send(ct);
+  }).catch(() => secFail('Encryption failed')).finally(() => { s.outQueued--; });
+}
+
+function receiveSecure(buf) {
+  const s = sec;
+  const iv = nonce(s.rxCtr++);
+  s.inChain = s.inChain.then(async () => {
+    dispatchPlain(new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, s.rxKey, buf)));
+  }).catch(() => secFail('A message could not be decrypted (connection closed for safety).'));
+}
+function dispatchPlain(pt) {
+  if (pt[0] === 1) handleJson(JSON.parse(td.decode(pt.subarray(1))));
+  else if (pt[0] === 0) onFrame(pt.slice(1).buffer);
+  else if (pt[0] === 2) onAudio(pt.subarray(1));
+}
+
+// ---------------- direct (peer-to-peer) path ----------------
+// After the session is up, this page offers a WebRTC data channel inside the encrypted
+// session (the server can't change the offer). If the devices can reach each other, video,
+// sound and input go directly; our end-to-end encryption still applies, with separate keys.
+// Messages are split into 16 KiB fragments: first byte 1 = more follow, 0 = last.
+let p2p = null;
+const FRAG = 16 * 1024;
+function sendDirect(pt) {
+  const s = sec, me = p2p;
+  const iv = nonce(s.dTxCtr++);
+  s.outQueued++;
+  s.dOutChain = s.dOutChain.then(async () => {
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, s.dTxKey, pt));
+    if (!me || !me.open || me.dc.readyState !== 'open') return;
+    for (let off = 0; off < ct.length || off === 0; off += FRAG) {
+      const part = ct.subarray(off, off + FRAG), f = new Uint8Array(part.length + 1);
+      f[0] = off + FRAG < ct.length ? 1 : 0; f.set(part, 1);
+      me.dc.send(f);
+      if (off + FRAG >= ct.length) break;
+    }
+  }).catch(() => {}).finally(() => { s.outQueued--; });
+}
+function p2pData(buf) {
+  const me = p2p, u8 = new Uint8Array(buf);
+  if (!u8.length) return;
+  me.parts.push(u8.subarray(1));
+  if (u8[0] === 1) return;
+  const ct = cat(...me.parts); me.parts = [];
+  const s = sec, iv = nonce(s.dRxCtr++);
+  s.dInChain = s.dInChain.then(async () => {
+    dispatchPlain(new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, s.dRxKey, ct)));
+  }).catch(() => { stopP2P(); });
+}
+async function startP2P() {
+  if (p2p || !window.RTCPeerConnection || !(sec && sec.ready && sec.dTxKey)) return;
+  let pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers: location.protocol === 'https:' ? [{ urls: 'stun:' + location.hostname + ':3478' }] : [] });
+  } catch (_) { return; }
+  const dc = pc.createDataChannel('rf', { ordered: true });
+  dc.binaryType = 'arraybuffer';
+  const me = p2p = { pc, dc, open: false, parts: [] };
+  dc.onopen = () => { if (p2p === me) { me.open = true; updateStats(); } };
+  dc.onclose = () => { if (p2p === me) { me.open = false; updateStats(); } };
+  dc.onmessage = ev => { if (p2p === me) p2pData(ev.data); };
+  pc.onconnectionstatechange = () => {
+    if (p2p === me && ['failed', 'closed', 'disconnected'].includes(pc.connectionState)) { me.open = false; updateStats(); }
+  };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(res => {
+      if (pc.iceGatheringState === 'complete') return res();
+      const t = setTimeout(res, 2500);
+      pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    });
+    if (p2p === me) send({ t: 'p2p_offer', sdp: pc.localDescription.sdp });
+  } catch (_) { stopP2P(); }
+}
+function stopP2P() {
+  const me = p2p; p2p = null;
+  if (me) { try { me.dc.close(); } catch (_) {} try { me.pc.close(); } catch (_) {} }
+}
+
+// ---------------- login screen ----------------
+const idInput = $('idInput');
+idInput.addEventListener('input', () => {
+  const d = idInput.value.replace(/\D/g, '').slice(0, 9);
+  idInput.value = [d.slice(0, 3), d.slice(3, 6), d.slice(6, 9)].filter(Boolean).join(' ');
+});
+$('eyeBtn').onclick = () => { const p = $('pw'); p.type = p.type === 'password' ? 'text' : 'password'; };
+
+function applyRole() {
+  if (role === 'host') {
+    $('idPane').hidden = true;
+    $('sub').textContent = hostName ? 'Connecting to: ' + hostName : 'Connect to this computer';
+    $('hint').innerHTML = 'The password is shown in the RemoteFriend window on that computer. Someone there must approve the connection.';
+    $('recents').hidden = true;
+  } else {
+    $('idPane').hidden = false;
+    renderRecents();
+  }
+  if (!hasWebCodecs) {
+    $('hint').innerHTML += '<br><br>⚠️ This page is not served over HTTPS, or the browser is outdated: video will use the slower JPEG mode.';
+  }
+}
+
+function renderRecents() {
+  const list = load('rf_recents', []).filter(r => r && /^\d{9}$/.test(r.id));
+  const box = $('recentList'); box.innerHTML = '';
+  $('recents').hidden = !list.length;
+  for (const r of list.slice(0, 6)) {
+    const row = document.createElement('div');
+    row.className = 'recent';
+    const when = r.ts ? new Date(r.ts).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
+    const trusted = !!tokenFor(r.id), saved = !trusted && !!storedPw(r.id);
+    row.innerHTML = '<b>' + esc(r.id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3')) + '</b>' +
+      (r.name ? '<span style="margin-left:0">' + esc(r.name) + '</span>' : '') +
+      (trusted ? '<span style="color:var(--ok, #2fbf71)">✓ trusted</span>' : saved ? '<span>password saved</span>' : '') +
+      '<span>' + esc(when) + '</span><button type="button" aria-label="Remove">✕</button>';
+    row.querySelector('button').onclick = e => { e.stopPropagation(); store('rf_recents', load('rf_recents', []).filter(x => x.id !== r.id)); renderRecents(); };
+    row.onclick = () => {
+      idInput.value = r.id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+      showPwHint();
+      if (trusted || saved) { $('pw').value = ''; connect(); } else $('pw').focus();
+    };
+    box.appendChild(row);
+  }
+}
+// Password remembered for a computer (it works until that computer gets a new one).
+function pwKeyFor(id) { return role === 'host' ? 'rf_pw_lan_' + location.host : 'rf_pw_' + id; }
+function storedPw(id) { const p = load(pwKeyFor(id), ''); return typeof p === 'string' ? p : ''; }
+function showPwHint() {
+  const id = idInput.value.replace(/\D/g, '');
+  $('pw').placeholder = tokenFor(id) ? 'Not needed: this device is trusted' : storedPw(id) ? 'Saved — leave empty to use it' : 'Password shown on that computer';
+}
+idInput.addEventListener('input', showPwHint);
+
+// Token for this browser after the host chose "Always allow": logs in without the password.
+function deviceKeyFor(id) { return role === 'host' ? 'rf_dev_lan_' + location.host : 'rf_dev_' + id; }
+function deviceKey() { return deviceKeyFor(savedId); }
+function tokenFor(id) { const t = load(deviceKeyFor(id), ''); return /^[0-9a-f]{64}$/.test(t) ? t : undefined; }
+function deviceToken() { return tokenFor(savedId); }
+// Shown in the computer's list of connections, e.g. "Chrome on Android".
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+    : /Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'unknown system';
+  const br = /Edg\//.test(ua) ? 'Edge' : /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Firefox\/|FxiOS/.test(ua) ? 'Firefox'
+    : /Chrome\/|CriOS/.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  return br + ' on ' + os;
+}
+
+function rememberRecent(id, name) {
+  if (!id) return;
+  const list = load('rf_recents', []).filter(x => x.id !== id);
+  list.unshift({ id, name: name || '', ts: Date.now() });
+  store('rf_recents', list.slice(0, 8));
+}
+
+fetch('info', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => {
+  if (j && j.role) { role = j.role; hostName = j.name || ''; }
+}).catch(() => {}).finally(() => {
+  applyRole();
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (q.get('id')) idInput.value = q.get('id').replace(/\D/g, '').replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+  (role === 'host' || idInput.value ? $('pw') : idInput).focus({ preventScroll: true });
+});
+
+$('form').addEventListener('submit', e => { e.preventDefault(); connect(); });
+$('cancelBtn').onclick = () => { if (ws) { ws._quiet = true; ws.close(); } resetLogin(); };
+
+function setBusy(on, text) {
+  const b = $('connectBtn');
+  b.disabled = on;
+  b.innerHTML = on ? '<span class="spinner"></span>' + esc(text || 'Connecting…') : 'Connect';
+  $('cancelBtn').hidden = !on;
+}
+function resetLogin() { setBusy(false); }
+
+// ---------------- connection ----------------
+function connect(retry, auto) {
+  if (ws && ws.readyState <= 1) return;
+  autoReconnecting = !!auto;
+  showMsg('');
+  const id = retry ? savedId : idInput.value.replace(/\D/g, '');
+  const pw = retry ? savedPw : ($('pw').value || storedPw(id));
+  if (role !== 'host' && id.length !== 9) { showMsg('Enter the full 9-digit computer ID.'); idInput.focus(); return; }
+  if (!pw && !(role !== 'host' && tokenFor(id)) && !(role === 'host' && tokenFor(''))) { showMsg('Enter the password.'); $('pw').focus(); return; }
+  savedId = id; savedPw = pw;
+  unlockAudio();
+  setBusy(true, 'Connecting…');
+  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  sock.binaryType = 'arraybuffer';
+  ws = sock;
+  sec = null;
+  // Encrypted (normal): the password never leaves this device. Legacy plaintext only on
+  // an http page in the local network, where browsers disable WebCrypto.
+  sock.onopen = () => sock.send(JSON.stringify(hasSubtle ? {
+    t: 'hello', id: role === 'host' ? undefined : id, e2e: true,
+    jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined
+  } : {
+    t: 'hello', id: role === 'host' ? undefined : id, password: pw,
+    jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined,
+    resume: (auto && resumeToken) || undefined,
+    device: deviceToken()
+  }));
+  sock.onmessage = ev => { if (ws === sock) onMessage(ev); };
+  sock.onclose = () => { if (ws === sock) onClosed(sock); };
+}
+
+function onClosed(sock) {
+  const was = connected;
+  connected = false;
+  stopViewer();
+  if (sock._quiet) { resetLogin(); return; }
+  // Brief drop: retry automatically a few times (with the resume token, no host approval needed).
+  if ((was || autoReconnecting) && resumeToken && autoTries < 4 && !sock._reason) {
+    autoTries++;
+    toast('Connection lost, reconnecting… (' + autoTries + ')', 0);
+    setTimeout(() => connect(true, true), 700 * autoTries);
+    return;
+  }
+  if (was || autoReconnecting) {
+    autoReconnecting = false;
+    $('toast').hidden = true;
+    $('ovTitle').textContent = sock._title || 'Connection lost';
+    $('ovText').textContent = sock._reason || 'The network dropped or the remote computer ended the session.';
+    $('overlay').hidden = false;
+  } else {
+    showLogin();
+    showMsg(sock._reason || 'Could not reach the server. Check your internet connection and the address.');
+  }
+}
+
+function onMessage(ev) {
+  if (typeof ev.data !== 'string') {
+    if (sec && sec.ready) { receiveSecure(ev.data); return; }
+    if (!connected) { ws._reason = 'RemoteFriend on the remote computer is outdated. Update it.'; ws.close(); return; }
+    onFrame(ev.data);
+    return;
+  }
+  let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+  // Before encryption only these plain messages are accepted.
+  if (hasSubtle) {
+    if (m.t === 'e2e1') { e2eStart(m); return; }
+    if (m.t === 'e2e3') { e2eFinish(m); return; }
+    if (m.t === 'welcome' && !(sec && sec.ready)) { secFail('RemoteFriend on the remote computer is outdated (no encryption). Update it.'); return; }
+    if (m.t !== 'wait' && m.t !== 'reject') return;
+  }
+  handleJson(m);
+}
+
+function handleJson(m) {
+  switch (m.t) {
+    case 'wait': if (autoReconnecting) toast('Waiting for approval on the remote computer…', 0);
+      setBusy(true, 'Waiting for approval…');
+      showMsg('Waiting for approval on the remote computer: Allow once, or Always allow to remember this device.', 'info'); break;
+    case 'reject':
+      if (m.code === 'unknown_device' || m.msg === 'device key rejected') store(deviceKey(), '');
+      if (m.msg === 'wrong password') { store(pwKeyFor(savedId), ''); m.msg = 'wrong password (the computer may have a new one)'; }
+      if (m.code === 'ended') { ws._title = 'Session ended'; ws._reason = 'The remote computer\'s user ended the session.'; }
+      else ws._reason = 'Rejected: ' + (m.msg || 'unknown reason');
+      ws.close(); break;
+    case 'perms': applyPerms(m, true); break;
+    case 'clip': showClip(m.text || ''); break;
+    case 'p2p_answer': if (p2p) p2p.pc.setRemoteDescription({ type: 'answer', sdp: m.sdp }).catch(() => stopP2P()); break;
+    case 'p2p_off': stopP2P(); break;
+    case 'monitors': applyMonitors(m); toast('Showing ' + screenName(m.current), 1500); break;
+    case 'file_progress': if (m.total) toast('Saving on the computer: ' + Math.floor(m.got * 100 / m.total) + '%', 0); break;
+    case 'welcome': onWelcome(m); break;
+    case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
+    case 'quality': setQualityUi(m.p); break;
+    case 'file_done': $('upBox').hidden = true; toast('✓ Sent ' + (m.name || 'file') + ' — saved on the computer as ' + (m.path || '?'), 7000); break;
+    case 'ls': dir = m; renderDir(); break;
+    case 'fdata': onFileData(m); break;
+    case 'get_err': download = null; showDownload(); toast('Download failed: ' + (m.msg || ''), 5000); break;
+    case 'file_err': $('upBox').hidden = true; toast('File error: ' + (m.msg || ''), 5000); break;
+  }
+}
+
+function onWelcome(m) {
+  connected = true;
+  resumeToken = m.resume || '';
+  if (m.device && /^[0-9a-f]{64}$/.test(m.device)) { store(deviceKey(), m.device); toast('This device is now trusted ✓', 3000); }
+  if (autoReconnecting) toast('Reconnected ✓', 1800);
+  autoTries = 0; autoReconnecting = false;
+  jpegMode = !!m.jpeg || m.codec === 'jpeg';
+  if (m.name) hostName = m.name;
+  cursorInVideo = !!m.cursor;
+  hostAudio = !!m.audio;
+  hostOs = m.os || '';
+  safeView = !!m.safe;
+  if (m.perms) applyPerms(m.perms, false);
+  if (m.monitors) applyMonitors(m.monitors);
+  if (m.v && m.v !== PROTO_VER) toast('Warning: the remote computer runs a different version (' + m.v + '). Update both.', 6000);
+  if (role !== 'host') rememberRecent(savedId, hostName);
+  // Remember a password that worked (or forget it if the user doesn't want that).
+  if (savedPw && !(sec && sec.deviceLogin)) {
+    if ($('rememberPw').checked) store(pwKeyFor(savedId), savedPw); else store(pwKeyFor(savedId), '');
+  }
+  setQualityUi(m.preset || 'balanced');
+  showMsg('');
+  setBusy(false);
+  $('pw').value = '';
+  startViewer();
+  updateSoundBtn();
+  startSound();
+  startP2P();
+}
+
+// ---------------- viewer ----------------
+let decoder = null, decCfg = '', sps = null, pps = null, needKey = true, lastKeyReq = 0;
+let jpegBusy = false, jpegNext = null, lastSeq = null;
+let statFrames = 0, statBytes = 0, statT = 0, fps = 0, kbps = 0, rtt = 0, pingTimer = 0, statsTimer = 0;
+let wakeLock = null;
+
+function showLogin() { $('viewer').hidden = true; $('login').hidden = false; resetLogin(); }
+
+function startViewer() {
+  $('login').hidden = true;
+  $('viewer').hidden = false;
+  $('overlay').hidden = true;
+  $('waitMsg').hidden = false;
+  $('waitTxt').textContent = 'Waiting for video…';
+  hadFrame = false; needKey = true; frameW = frameH = 0; lastSeq = null;
+  view.zoom = 1;
+  setMode(load('rf_mode', isTouch ? 'trackpad' : 'direct'));
+  stage.classList.toggle('mouse', !isTouch);
+  statT = performance.now(); statFrames = statBytes = 0;
+  let pings = 0;
+  // Every 5th ping goes through the server even on a direct path, so the server keeps the session.
+  pingTimer = setInterval(() => {
+    const o = { t: 'ping', ts: performance.now() };
+    if (sec && sec.ready) sendSecure(o, ++pings % 5 === 0); else send(o);
+  }, 2000);
+  statsTimer = setInterval(updateStats, 1000);
+  try { navigator.wakeLock && navigator.wakeLock.request('screen').then(l => wakeLock = l).catch(() => {}); } catch (_) {}
+}
+
+function stopViewer() {
+  stopSound(false);
+  stopP2P();
+  releaseAllKeys(false);
+  clearInterval(pingTimer); clearInterval(statsTimer);
+  closeDecoder();
+  sps = pps = null; jpegBusy = false; jpegNext = null;
+  dir = null; download = null; showDownload(); $('upBox').hidden = true;
+  closeSheets();
+  try { wakeLock && wakeLock.release(); } catch (_) {}
+  wakeLock = null;
+}
+
+function updateStats() {
+  const now = performance.now(), dt = (now - statT) / 1000;
+  fps = Math.round(statFrames / dt); kbps = Math.round(statBytes * 8 / 1000 / dt);
+  statFrames = statBytes = 0; statT = now;
+  const txt = (frameW ? frameW + '×' + frameH + ' · ' : '') + fps + ' fps · ' + (kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbit/s' : kbps + ' kbit/s') + (rtt ? ' · ' + rtt + ' ms' : '') + (p2p && p2p.open ? ' · direct' : '');
+  $('stats').textContent = txt;
+  if (!$('setSheet').hidden) renderInfo();
+}
+
+function renderInfo() {
+  const rows = [
+    ['Computer', hostName || '—'],
+    ['Encoding', jpegMode ? 'JPEG (slow path)' : 'H.264 (WebCodecs)'],
+    ['Resolution', frameW ? frameW + ' × ' + frameH : '—'],
+    ['Frame rate', fps + ' fps'],
+    ['Data rate', kbps + ' kbit/s'],
+    ['Latency (RTT)', rtt ? rtt + ' ms' : '—'],
+    ['View', safeView ? 'Safe: RemoteFriend and private apps are hidden' : 'Everything'],
+    ['Path', p2p && p2p.open ? 'Direct (peer-to-peer), end-to-end encrypted' : 'Via the server, end-to-end encrypted'],
+    ['Sound', soundReq ? 'On (' + (aCodec === 'opus' ? 'Opus' : 'PCM') + ')' : hostAudio ? 'Off' : 'Not available'],
+  ];
+  $('info').innerHTML = rows.map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('');
+}
+
+function onFrame(buf) {
+  if (buf.byteLength < HDR) return;
+  const u8 = new Uint8Array(buf, 0, HDR);
+  if (u8[0] !== FRAME_VER) {
+    $('waitTxt').textContent = 'The host version is not compatible with this page. Update the host app.';
+    return;
+  }
+  const dv = new DataView(buf, 0, HDR);
+  const w = dv.getUint32(4, true), h = dv.getUint32(8, true), seq = dv.getUint32(12, true);
+  if (!w || !h || w > 8192 || h > 8192) return;
+  // A frame older than one already shown (still on its way through the server after the
+  // switch to the direct path) is dropped.
+  if (lastSeq !== null && seq <= lastSeq && lastSeq - seq < 1000000) return;
+  lastSeq = seq;
+  statBytes += buf.byteLength;
+  const payload = new Uint8Array(buf, HDR);
+  if (u8[1] & FLAG_JPEG) feedJpeg(payload, seq);
+  else feedH264(payload, seq, w, h);
+}
+
+function frameSize(w, h) {
+  if (w === frameW && h === frameH) return;
+  // Changing quality changes the resolution: keep the pointer at the same relative position.
+  if (frameW && frameH && cur.x >= 0) { cur.x = cur.x * w / frameW; cur.y = cur.y * h / frameH; }
+  frameW = w; frameH = h;
+  canvas.width = w; canvas.height = h;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  if (cur.x < 0 || cur.x >= w || cur.y >= h) { cur.x = w / 2; cur.y = h / 2; }
+  layout();
+}
+
+function drawn(seq) {
+  statFrames++;
+  send({ t: 'ack', s: seq });
+  if (!hadFrame) { hadFrame = true; $('waitMsg').hidden = true; layout(); }
+}
+
+function requestKey() {
+  const now = performance.now();
+  if (now - lastKeyReq > 800) { lastKeyReq = now; send({ t: 'kf' }); }
+}
+
+// --- H.264 (WebCodecs) ---
+function splitNals(b) {
+  const starts = [];
+  for (let i = 0; i + 2 < b.length; i++) {
+    if (b[i] === 0 && b[i + 1] === 0) {
+      if (b[i + 2] === 1) { starts.push([i, 3]); i += 2; }
+      else if (b[i + 2] === 0 && i + 3 < b.length && b[i + 3] === 1) { starts.push([i, 4]); i += 3; }
+    }
+  }
+  const out = [];
+  for (let k = 0; k < starts.length; k++) {
+    const s = starts[k][0] + starts[k][1], e = k + 1 < starts.length ? starts[k + 1][0] : b.length;
+    if (e > s) out.push({ type: b[s] & 0x1f, data: b.subarray(s, e) });
+  }
+  return out;
+}
+function avcc(sps, pps) {
+  const out = new Uint8Array(11 + sps.length + pps.length);
+  out.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 255]);
+  out.set(sps, 8);
+  let o = 8 + sps.length;
+  out[o++] = 1; out[o++] = pps.length >> 8; out[o++] = pps.length & 255;
+  out.set(pps, o);
+  return out;
+}
+function toAvccSample(nals) {
+  let total = 0;
+  for (const n of nals) if (n.type !== 7 && n.type !== 8 && n.type !== 9) total += 4 + n.data.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const n of nals) {
+    if (n.type === 7 || n.type === 8 || n.type === 9) continue;
+    const l = n.data.length;
+    out[o++] = l >>> 24; out[o++] = (l >>> 16) & 255; out[o++] = (l >>> 8) & 255; out[o++] = l & 255;
+    out.set(n.data, o); o += l;
+  }
+  return out;
+}
+function closeDecoder() { if (decoder) { try { decoder.close(); } catch (_) {} } decoder = null; decCfg = ''; }
+function hex(b) { return Array.from(b, x => x.toString(16).padStart(2, '0')).join(''); }
+
+function ensureDecoder(w, h) {
+  if (!sps || !pps) return false;
+  const key = w + 'x' + h + ':' + hex(sps) + ':' + hex(pps);
+  if (decoder && decoder.state === 'configured' && decCfg === key) return true;
+  closeDecoder();
+  const desc = avcc(sps, pps);
+  const codec = 'avc1.' + hex(sps.subarray(1, 4));
+  decoder = new VideoDecoder({
+    output: f => {
+      frameSize(f.displayWidth, f.displayHeight);
+      ctx.drawImage(f, 0, 0);
+      const seq = Math.round(f.timestamp / 1000);
+      f.close();
+      drawn(seq);
+    },
+    error: e => { console.warn('decode', e); closeDecoder(); needKey = true; requestKey(); }
+  });
+  try {
+    decoder.configure({ codec, codedWidth: w, codedHeight: h, description: desc, optimizeForLatency: true });
+  } catch (e) {
+    closeDecoder();
+    $('waitTxt').textContent = 'This browser cannot decode the video (' + codec + '). Try an up-to-date Chrome, Safari or Edge.';
+    return false;
+  }
+  decCfg = key;
+  return true;
+}
+
+function feedH264(payload, seq, w, h) {
+  if (!hasWebCodecs) return;
+  const nals = splitNals(payload);
+  let isKey = false, vcl = false;
+  for (const n of nals) {
+    if (n.type === 7) sps = n.data.slice();
+    else if (n.type === 8) pps = n.data.slice();
+    else if (n.type === 5) { isKey = true; vcl = true; }
+    else if (n.type === 1) vcl = true;
+  }
+  if (!vcl) return;
+  if (decoder && decoder.decodeQueueSize > 4) { closeDecoder(); needKey = true; requestKey(); }
+  // Skipped frames are acked too, so the host's send window does not fill up and stall.
+  if (needKey && !isKey) { requestKey(); send({ t: 'ack', s: seq }); return; }
+  if (!ensureDecoder(w, h)) { needKey = true; requestKey(); send({ t: 'ack', s: seq }); return; }
+  try {
+    decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: seq * 1000, data: toAvccSample(nals) }));
+    if (isKey) needKey = false;
+  } catch (e) { closeDecoder(); needKey = true; requestKey(); }
+}
+
+// --- JPEG ---
+function feedJpeg(bytes, seq) {
+  if (jpegBusy) { jpegNext = [bytes, seq]; return; }
+  jpegBusy = true;
+  createImageBitmap(new Blob([bytes], { type: 'image/jpeg' })).then(bmp => {
+    frameSize(bmp.width, bmp.height);
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    drawn(seq);
+  }).catch(() => {}).finally(() => {
+    jpegBusy = false;
+    const n = jpegNext; jpegNext = null;
+    if (n) feedJpeg(n[0], n[1]);
+  });
+}
+
+// ---------------- view (fit / zoom / pan) ----------------
+const view = { zoom: 1, s: 1, ox: 0, oy: 0 };
+function stageSize() { return [stage.clientWidth, stage.clientHeight]; }
+function baseScale() { const [sw, sh] = stageSize(); return frameW ? Math.min(sw / frameW, sh / frameH) : 1; }
+function clampView() {
+  const [sw, sh] = stageSize();
+  const dw = frameW * view.s, dh = frameH * view.s;
+  view.ox = dw <= sw ? (sw - dw) / 2 : Math.min(0, Math.max(sw - dw, view.ox));
+  view.oy = dh <= sh ? (sh - dh) / 2 : Math.min(0, Math.max(sh - dh, view.oy));
+}
+function applyView() {
+  clampView();
+  canvas.style.transform = 'translate(' + view.ox + 'px,' + view.oy + 'px) scale(' + view.s + ')';
+  placeCursor();
+}
+function layout() {
+  if (!frameW) return;
+  const cx = (stageSize()[0] / 2 - view.ox) / view.s, cy = (stageSize()[1] / 2 - view.oy) / view.s;
+  view.s = baseScale() * view.zoom;
+  view.ox = stageSize()[0] / 2 - cx * view.s; view.oy = stageSize()[1] / 2 - cy * view.s;
+  if (view.zoom === 1) { view.ox = 0; view.oy = 0; }
+  applyView();
+}
+function zoomAt(px, py, newZoom) {
+  newZoom = Math.min(6, Math.max(1, newZoom));
+  const fx = (px - view.ox) / view.s, fy = (py - view.oy) / view.s;
+  view.zoom = newZoom;
+  view.s = baseScale() * newZoom;
+  view.ox = px - fx * view.s; view.oy = py - fy * view.s;
+  applyView();
+}
+window.addEventListener('resize', () => layout());
+$('fitBtn').onclick = () => { view.zoom = 1; layout(); closeSheets(); };
+
+function stagePoint(clientX, clientY) { const r = stage.getBoundingClientRect(); return [clientX - r.left, clientY - r.top]; }
+function toFrame(clientX, clientY) {
+  const [px, py] = stagePoint(clientX, clientY);
+  return [(px - view.ox) / view.s, (py - view.oy) / view.s];
+}
+
+// ---------------- mouse ----------------
+const cur = { x: -1, y: -1 };
+let lastSent = '', moveRaf = 0;
+function sendMove() {
+  if (moveRaf) return;
+  moveRaf = requestAnimationFrame(() => {
+    moveRaf = 0;
+    const x = Math.round(Math.min(frameW - 1, Math.max(0, cur.x))), y = Math.round(Math.min(frameH - 1, Math.max(0, cur.y)));
+    const k = x + ',' + y;
+    if (k !== lastSent) { lastSent = k; send({ t: 'mouse', x, y }); }
+  });
+}
+function moveNow() {
+  if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; }
+  const x = Math.round(Math.min(frameW - 1, Math.max(0, cur.x))), y = Math.round(Math.min(frameH - 1, Math.max(0, cur.y)));
+  lastSent = x + ',' + y;
+  send({ t: 'mouse', x, y });
+}
+function click(b) { moveNow(); send({ t: 'down', b: b || 'left' }); send({ t: 'up', b: b || 'left' }); releaseOneShotMods(); }
+let buttonsDown = new Set();
+function btnDown(b) { moveNow(); buttonsDown.add(b); send({ t: 'down', b }); $('cursorDot').classList.add('down'); }
+function btnUp(b) { if (!buttonsDown.has(b)) return; buttonsDown.delete(b); moveNow(); send({ t: 'up', b }); $('cursorDot').classList.remove('down'); releaseOneShotMods(); }
+
+function placeCursor() {
+  const dot = $('cursorDot');
+  if (mode !== 'trackpad' || !frameW || cursorInVideo) { dot.hidden = true; return; }
+  dot.hidden = false;
+  dot.style.left = (view.ox + cur.x * view.s) + 'px';
+  dot.style.top = (view.oy + cur.y * view.s) + 'px';
+}
+// When zoomed in, keep the pointer on screen: the view follows the pointer.
+function followCursor() {
+  if (view.zoom <= 1) return placeCursor();
+  const [sw, sh] = stageSize(), m = 40;
+  const px = view.ox + cur.x * view.s, py = view.oy + cur.y * view.s;
+  if (px < m) view.ox += m - px; else if (px > sw - m) view.ox -= px - (sw - m);
+  if (py < m) view.oy += m - py; else if (py > sh - m) view.oy -= py - (sh - m);
+  applyView();
+}
+
+// Desktop mouse
+const btnName = b => b === 2 ? 'right' : b === 1 ? 'middle' : 'left';
+stage.addEventListener('mousemove', e => {
+  if (!connected || !frameW || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  [cur.x, cur.y] = toFrame(e.clientX, e.clientY);
+  sendMove();
+});
+stage.addEventListener('mousedown', e => {
+  if (!connected || !frameW || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  closeSheets();
+  [cur.x, cur.y] = toFrame(e.clientX, e.clientY);
+  btnDown(btnName(e.button));
+  e.preventDefault();
+});
+window.addEventListener('mouseup', e => {
+  if (!connected || e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+  btnUp(btnName(e.button));
+});
+stage.addEventListener('contextmenu', e => e.preventDefault());
+let wheelAcc = 0, wheelAccX = 0;
+stage.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!connected) return;
+  const unit = e.deltaMode === 1 ? 1 / 3 : e.deltaMode === 2 ? 3 : 1 / 100;
+  wheelAcc += e.deltaY * unit; wheelAccX += e.deltaX * unit;
+  const dy = Math.trunc(wheelAcc), dx = Math.trunc(wheelAccX);
+  if (dy || dx) { wheelAcc -= dy; wheelAccX -= dx; send({ t: 'scroll', dx, dy }); }
+}, { passive: false });
+
+// ---------------- touch ----------------
+let mode = 'trackpad';
+function setMode(m) {
+  mode = m === 'direct' ? 'direct' : 'trackpad';
+  store('rf_mode', mode);
+  for (const b of document.querySelectorAll('#modeSeg button')) b.classList.toggle('on', b.dataset.mode === mode);
+  $('modeNote').textContent = mode === 'trackpad'
+    ? 'Slide a finger to move the pointer. Tap: click. Two-finger tap: right click. Two-finger slide: scroll. Press and hold, then move: drag. Pinch: zoom.'
+    : 'Tap to click where you touch. Press and hold: right click. Slide: drag. Two fingers: scroll, or pan when zoomed in; pinch: zoom.';
+  placeCursor();
+}
+for (const b of document.querySelectorAll('#modeSeg button')) b.onclick = () => setMode(b.dataset.mode);
+
+// Gesture state: 'one' (one finger) or 'two' (two fingers). Once two fingers have touched,
+// the gesture stays 'two' until all fingers lift (lifting them one by one does not produce clicks).
+const T = { g: null, start: 0, sx: 0, sy: 0, lx: 0, ly: 0, moved: 0, drag: false, long: 0, longFired: false,
+            twoMoved: false, pinch: null, scrollAcc: 0, scrollAccX: 0 };
+const TAP_MOVE = 10, LONG_MS = 550;
+
+function centroid(ts) { let x = 0, y = 0; for (const t of ts) { x += t.clientX; y += t.clientY; } return [x / ts.length, y / ts.length]; }
+function dist(ts) { return Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY); }
+function vibrate() { try { navigator.vibrate && navigator.vibrate(15); } catch (_) {} }
+
+stage.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (!connected || !frameW) return;
+  closeSheets();
+  const ts = Array.from(e.touches);
+  if (ts.length === 1 && T.g === null) {
+    const t = ts[0];
+    Object.assign(T, { g: 'one', start: performance.now(), sx: t.clientX, sy: t.clientY, lx: t.clientX, ly: t.clientY, moved: 0, drag: false, longFired: false });
+    if (mode === 'direct') { [cur.x, cur.y] = toFrame(t.clientX, t.clientY); sendMove(); }
+    clearTimeout(T.long);
+    T.long = setTimeout(() => {
+      if (T.g !== 'one' || T.moved > TAP_MOVE) return;
+      T.longFired = true; vibrate();
+      if (mode === 'direct') click('right');
+      else { T.drag = true; btnDown('left'); }   // touchpad: press and hold + drag
+    }, LONG_MS);
+  } else if (ts.length >= 2 && T.g !== 'two') {
+    clearTimeout(T.long);
+    if (T.drag) { T.drag = false; btnUp('left'); }
+    const two = ts.slice(0, 2), [cx, cy] = centroid(two);
+    Object.assign(T, { g: 'two', start: performance.now(), twoMoved: T.g === 'one' && T.moved > TAP_MOVE,
+      pinch: { d0: dist(two), z0: view.zoom, cx, cy, lastCx: cx, lastCy: cy, zooming: false }, scrollAcc: 0, scrollAccX: 0 });
+  } else if (ts.length > 2) {
+    T.twoMoved = true; // three fingers: do not count as a tap
+  }
+}, { passive: false });
+
+stage.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!connected || !frameW) return;
+  const ts = Array.from(e.touches);
+  if (T.g === 'one' && ts.length === 1) {
+    const t = ts[0];
+    const dx = t.clientX - T.lx, dy = t.clientY - T.ly;
+    T.lx = t.clientX; T.ly = t.clientY;
+    T.moved = Math.max(T.moved, Math.hypot(t.clientX - T.sx, t.clientY - T.sy));
+    if (mode === 'trackpad') {
+      // At 1x the pointer tracks the finger 1:1 on the displayed image; it accelerates on fast moves.
+      const speed = Math.hypot(dx, dy);
+      const gain = (speed > 14 ? 2.4 : speed > 6 ? 1.6 : 1.0) / view.s;
+      cur.x = Math.min(frameW - 1, Math.max(0, cur.x + dx * gain));
+      cur.y = Math.min(frameH - 1, Math.max(0, cur.y + dy * gain));
+      followCursor(); sendMove();
+    } else {
+      [cur.x, cur.y] = toFrame(t.clientX, t.clientY);
+      if (!T.drag && !T.longFired && T.moved > TAP_MOVE) {
+        clearTimeout(T.long);
+        // Drag: press at the initial touch point, then follow the finger.
+        const now = [cur.x, cur.y];
+        [cur.x, cur.y] = toFrame(T.sx, T.sy);
+        T.drag = true; btnDown('left');
+        [cur.x, cur.y] = now;
+      }
+      if (T.drag) sendMove();
+    }
+  } else if (T.g === 'two' && ts.length >= 2 && T.pinch) {
+    const p = T.pinch, two = ts.slice(0, 2), d = dist(two), [cx, cy] = centroid(two);
+    const [px, py] = stagePoint(cx, cy);
+    const mdx = cx - p.lastCx, mdy = cy - p.lastCy;
+    if (!p.zooming && Math.abs(d - p.d0) > 45) { p.zooming = true; T.twoMoved = true; }
+    if (p.zooming) {
+      zoomAt(px, py, p.z0 * d / p.d0);
+      view.ox += mdx; view.oy += mdy; applyView();
+    } else {
+      if (Math.hypot(cx - p.cx, cy - p.cy) > 8) T.twoMoved = true;
+      if (mode === 'direct' && view.zoom > 1.01) {
+        view.ox += mdx; view.oy += mdy; applyView();
+      } else if (T.twoMoved) {
+        // Natural scrolling: fingers up -> content up (scroll down).
+        T.scrollAcc -= mdy / 28; T.scrollAccX -= mdx / 28;
+        const sy = Math.trunc(T.scrollAcc), sx = Math.trunc(T.scrollAccX);
+        if (sy || sx) { T.scrollAcc -= sy; T.scrollAccX -= sx; send({ t: 'scroll', dx: sx, dy: sy }); }
+      }
+    }
+    p.lastCx = cx; p.lastCy = cy;
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  e.preventDefault();
+  if (e.touches.length > 0) return; // decide once all fingers have lifted
+  clearTimeout(T.long);
+  const dur = performance.now() - T.start;
+  if (connected && T.g === 'two') {
+    if (!T.twoMoved && dur < 400) click('right');
+  } else if (connected && T.g === 'one') {
+    if (T.drag) { T.drag = false; btnUp('left'); }
+    else if (!T.longFired && T.moved <= TAP_MOVE && dur < 400) {
+      if (mode === 'direct') [cur.x, cur.y] = toFrame(T.sx, T.sy);
+      click('left');
+    }
+  }
+  T.g = null; T.pinch = null;
+}
+stage.addEventListener('touchend', touchEnd, { passive: false });
+stage.addEventListener('touchcancel', e => {
+  e.preventDefault();
+  clearTimeout(T.long);
+  if (T.drag) { T.drag = false; btnUp('left'); }
+  T.g = null; T.pinch = null;
+}, { passive: false });
+
+// ---------------- keyboard ----------------
+const pressed = new Map();       // e.code -> key name that was sent
+const stickyMods = new Set();    // modifiers held from the special keys panel
+function keyDown(k) { send({ t: 'key', code: k, down: true }); }
+function keyUp(k) { send({ t: 'key', code: k, down: false }); }
+function tapKey(k) { keyDown(k); keyUp(k); releaseOneShotMods(); }
+function releaseOneShotMods() {
+  if (!stickyMods.size) return;
+  for (const m of stickyMods) keyUp(m);
+  stickyMods.clear();
+  for (const b of document.querySelectorAll('#modKeys .key')) b.classList.remove('on');
+}
+function releaseAllKeys(sendUps) {
+  if (sendUps !== false) { for (const k of pressed.values()) keyUp(k); for (const b of buttonsDown) send({ t: 'up', b }); }
+  pressed.clear(); buttonsDown.clear();
+  releaseOneShotMods();
+}
+
+const kb = $('kb');
+const SENT = '                ';  // 16 spaces so Backspace can be detected
+let kbLast = SENT, composing = false;
+function kbReset() { kb.value = SENT; kbLast = SENT; try { kb.setSelectionRange(SENT.length, SENT.length); } catch (_) {} }
+kbReset();
+
+function onKeyDown(e) {
+  if (!connected || $('viewer').hidden) return;
+  const t = e.target;
+  if (t && t !== kb && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  if (e.isComposing || e.key === 'Process' || e.key === 'Unidentified' || e.key === 'Dead' || e.keyCode === 229) return;
+  // Printable characters typed into the keyboard field are sent by the 'input' event (phone keyboards).
+  if (t === kb && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) return;
+  // AltGr (e.g. @ € { [ on many European layouts): send the character as text. On Windows
+  // the browser emits a fake Ctrl press before AltGr; undo it.
+  if (e.key === 'AltGraph') {
+    if (pressed.has('ControlLeft')) { keyUp(pressed.get('ControlLeft')); pressed.delete('ControlLeft'); }
+    e.preventDefault(); return;
+  }
+  if (e.key.length === 1 && e.getModifierState && e.getModifierState('AltGraph')) {
+    send({ t: 'text', s: e.key }); e.preventDefault(); return;
+  }
+  if (e.repeat && pressed.has(e.code)) { keyUp(pressed.get(e.code)); keyDown(pressed.get(e.code)); e.preventDefault(); return; }
+  pressed.set(e.code || e.key, e.key);
+  keyDown(e.key);
+  e.preventDefault();
+}
+function onKeyUp(e) {
+  if (!connected) return;
+  const k = pressed.get(e.code || e.key);
+  if (k === undefined) return;
+  pressed.delete(e.code || e.key);
+  keyUp(k);
+  e.preventDefault();
+}
+window.addEventListener('keydown', onKeyDown, true);
+window.addEventListener('keyup', onKeyUp, true);
+window.addEventListener('blur', () => releaseAllKeys());
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllKeys(); });
+
+kb.addEventListener('compositionstart', () => composing = true);
+kb.addEventListener('compositionend', () => { composing = false; kbDiff(); kbReset(); });
+kb.addEventListener('input', () => { kbDiff(); if (!composing && (kb.value.length < 8 || kb.value.length > 64)) kbReset(); });
+function kbDiff() {
+  const now = kb.value, old = kbLast;
+  let i = 0;
+  while (i < old.length && i < now.length && old[i] === now[i]) i++;
+  const removed = old.length - i, added = now.slice(i);
+  for (let k = 0; k < removed; k++) tapKey('Backspace');
+  if (added) {
+    const parts = added.split('\n');
+    parts.forEach((p, idx) => { if (p) { send({ t: 'text', s: p }); releaseOneShotMods(); } if (idx < parts.length - 1) tapKey('Enter'); });
+  }
+  kbLast = now;
+}
+$('kbBtn').onclick = () => {
+  if (document.activeElement === kb) { kb.blur(); $('kbBtn').classList.remove('on'); return; }
+  kbReset(); kb.focus({ preventScroll: true }); $('kbBtn').classList.add('on');
+};
+kb.addEventListener('blur', () => $('kbBtn').classList.remove('on'));
+
+// special keys
+const fk = $('fKeys');
+for (let i = 1; i <= 12; i++) { const b = document.createElement('button'); b.className = 'key'; b.dataset.key = 'F' + i; b.textContent = 'F' + i; fk.appendChild(b); }
+for (const b of document.querySelectorAll('#specialKeys .key, #fKeys .key')) b.onclick = () => tapKey(b.dataset.key);
+for (const b of document.querySelectorAll('#modKeys .key')) b.onclick = () => {
+  const m = b.dataset.mod;
+  if (stickyMods.has(m)) { stickyMods.delete(m); keyUp(m); b.classList.remove('on'); }
+  else { stickyMods.add(m); keyDown(m); b.classList.add('on'); }
+};
+for (const b of document.querySelectorAll('#comboKeys .key')) b.onclick = () => {
+  const keys = b.dataset.combo.split('+');
+  for (const k of keys) keyDown(k);
+  for (const k of keys.slice().reverse()) keyUp(k);
+  releaseOneShotMods();
+};
+$('pasteBtn').onclick = async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { toast('Clipboard is empty'); return; }
+    if (perms.clipboard) {
+      // Put it on the computer's clipboard, then paste there with its own shortcut.
+      send({ t: 'clip', text: text.slice(0, 200000) });
+      const mod = hostOs === 'macos' ? 'Meta' : 'Control';
+      setTimeout(() => { keyDown(mod); keyDown('v'); keyUp('v'); keyUp(mod); }, 150);
+      toast('Pasted (' + text.length + ' characters)');
+    } else {
+      send({ t: 'text', s: text.slice(0, 4000) });
+      toast('Typed clipboard text (' + Math.min(text.length, 4000) + ' characters)');
+    }
+  } catch (_) { toast('Could not read the clipboard (permission denied or not HTTPS)'); }
+};
+
+// ---------------- toolbar / panels ----------------
+function closeSheets() {
+  for (const id of ['keysSheet', 'setSheet', 'filesSheet']) $(id).hidden = true;
+  for (const id of ['keysBtn', 'setBtn', 'fileBtn']) $(id).classList.remove('on');
+}
+function toggleSheet(id, btn) {
+  const open = $(id).hidden;
+  closeSheets();
+  if (open) { $(id).hidden = false; btn.classList.add('on'); if (id === 'setSheet') renderInfo(); }
+}
+$('keysBtn').onclick = () => toggleSheet('keysSheet', $('keysBtn'));
+$('setBtn').onclick = () => toggleSheet('setSheet', $('setBtn'));
+// ---------------- permissions and clipboard ----------------
+let safeView = false;
+let hostOs = '', perms = { control: true, sound: true, files: true, clipboard: true };
+function applyPerms(p, announce) {
+  const old = perms;
+  perms = { control: p.control !== false, sound: p.sound !== false, files: p.files !== false, clipboard: p.clipboard !== false };
+  $('viewOnly').hidden = perms.control;
+  $('fileBtn').disabled = !perms.files;
+  if (!perms.clipboard) $('clipBar').hidden = true;
+  if (announce) {
+    const msg = [];
+    const say = (k, what) => { if (old[k] !== perms[k]) msg.push(what + (perms[k] ? ' allowed again' : ' turned off by the computer\'s user')); };
+    say('control', 'Mouse and keyboard'); say('sound', 'Sound'); say('files', 'File transfer'); say('clipboard', 'Clipboard');
+    if (msg.length) toast(msg.join(' · '), 4000);
+  }
+  if (typeof updateSoundBtn === 'function') updateSoundBtn();
+}
+// Several screens on the computer: choose which one to see (Settings sheet).
+let screenList = [], screenCurrent = 0;
+function screenName(i) { const s = screenList.find(x => x.i === i); return s ? s.name : 'screen ' + (i + 1); }
+function applyMonitors(m) {
+  screenList = Array.isArray(m.list) ? m.list : [];
+  screenCurrent = m.current || 0;
+  const seg = $('screenSeg'); seg.innerHTML = '';
+  $('screenBox').hidden = screenList.length < 2;
+  for (const s of screenList) {
+    const b = document.createElement('button');
+    b.textContent = (s.i + 1) + (s.w ? ' · ' + s.w + '×' + s.h : '');
+    b.title = s.name;
+    b.classList.toggle('on', s.i === screenCurrent);
+    b.onclick = () => { if (perms.control) send({ t: 'monitor', i: s.i }); else toast('View only: you cannot switch screens'); };
+    seg.appendChild(b);
+  }
+}
+let clipPending = '';
+function showClip(text) {
+  if (!text || !perms.clipboard) return;
+  clipPending = text;
+  $('clipText').textContent = 'Copied on the computer: “' + text.slice(0, 80) + (text.length > 80 ? '…' : '') + '”';
+  $('clipBar').hidden = false;
+}
+$('clipCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(clipPending); toast('Copied to this device', 1500); }
+  catch (_) { toast('This browser did not allow copying'); }
+  $('clipBar').hidden = true;
+};
+$('clipClose').onclick = () => { $('clipBar').hidden = true; };
+
+// ---------------- sound ----------------
+// The computer sends 20 ms packets: Opus (decoded with WebCodecs) or 24 kHz PCM when this
+// browser has no Opus decoder. Played through Web Audio with a small jitter buffer.
+const ACtx = window.AudioContext || window.webkitAudioContext;
+let soundOn = load('rf_sound', true), hostAudio = false, soundReq = false;
+let actx = null, adec = null, aNext = 0, aCodec = '';
+
+// Browsers only allow sound after a tap: the audio output is created/resumed inside one.
+function unlockAudio() {
+  if (!ACtx || !soundOn) return;
+  try {
+    if (!actx) actx = new ACtx({ latencyHint: 'interactive' });
+    if (actx.state !== 'running') actx.resume().catch(() => {});
+  } catch (_) {}
+}
+document.addEventListener('touchend', () => { if (soundReq) unlockAudio(); }, true);
+document.addEventListener('pointerdown', () => { if (soundReq) unlockAudio(); }, true);
+
+async function pickCodec() {
+  if (typeof AudioDecoder !== 'undefined') {
+    try {
+      const r = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+      if (r && r.supported) return 'opus';
+    } catch (_) {}
+  }
+  return 'pcm';
+}
+
+async function startSound() {
+  if (!hostAudio || !soundOn || !ACtx || !(sec && sec.ready)) return;
+  unlockAudio();
+  const codec = await pickCodec();
+  if (!connected || !soundOn) return;
+  closeAudioDecoder();
+  aCodec = codec;
+  if (codec === 'opus') {
+    try {
+      adec = new AudioDecoder({ output: playAudioData, error: () => closeAudioDecoder() });
+      adec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+    } catch (_) { adec = null; aCodec = 'pcm'; }
+  }
+  aNext = 0;
+  soundReq = true;
+  send({ t: 'audio', on: true, codec: aCodec });
+  updateSoundBtn();
+}
+
+function stopSound(tellHost) {
+  if (tellHost && soundReq) send({ t: 'audio', on: false });
+  soundReq = false;
+  closeAudioDecoder();
+}
+
+function closeAudioDecoder() { if (adec) { try { adec.close(); } catch (_) {} } adec = null; }
+
+function onAudio(u8) {
+  if (!soundReq || !actx || actx.state !== 'running' || u8.length < 6) return;
+  const seq = ((u8[1] << 24) | (u8[2] << 16) | (u8[3] << 8) | u8[4]) >>> 0, data = u8.subarray(5);
+  if (u8[0] === 0) {
+    if (!adec || adec.state !== 'configured') return;
+    try { adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * 20000, data })); } catch (_) {}
+    return;
+  }
+  const n = data.length >> 2, L = new Float32Array(n), R = new Float32Array(n);
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < n; i++) { L[i] = dv.getInt16(i * 4, true) / 32768; R[i] = dv.getInt16(i * 4 + 2, true) / 32768; }
+  playPcm(L, R, 24000);
+}
+
+function playAudioData(d) {
+  try {
+    const n = d.numberOfFrames, L = new Float32Array(n), R = new Float32Array(n);
+    d.copyTo(L, { planeIndex: 0, format: 'f32-planar' });
+    if (d.numberOfChannels > 1) d.copyTo(R, { planeIndex: 1, format: 'f32-planar' }); else R.set(L);
+    playPcm(L, R, d.sampleRate);
+  } catch (_) {
+  } finally { d.close(); }
+}
+
+function playPcm(L, R, rate) {
+  if (!actx || !soundReq) return;
+  const now = actx.currentTime;
+  // After a gap (silence is not sent) or if the delay grew too long, start fresh.
+  if (aNext < now + 0.01 || aNext > now + 0.35) aNext = now + 0.08;
+  const buf = actx.createBuffer(2, L.length, rate);
+  buf.copyToChannel(L, 0); buf.copyToChannel(R, 1);
+  const src = actx.createBufferSource();
+  src.buffer = buf; src.connect(actx.destination); src.start(aNext);
+  aNext += buf.duration;
+}
+
+function updateSoundBtn() {
+  const b = $('sndBtn');
+  b.hidden = !hostAudio || !ACtx || !(sec && sec.ready);
+  b.disabled = !perms.sound;
+  b.innerHTML = '<svg><use href="#' + (soundOn ? 'i-snd' : 'i-mute') + '"/></svg>';
+  b.title = soundOn ? 'Sound on (tap to mute)' : 'Sound off (tap to hear the computer)';
+  b.setAttribute('aria-label', b.title);
+}
+
+$('sndBtn').onclick = () => {
+  soundOn = !soundOn;
+  store('rf_sound', soundOn);
+  if (soundOn) startSound(); else stopSound(true);
+  updateSoundBtn();
+  toast(soundOn ? 'Sound on' : 'Sound off', 1200);
+};
+
+$('discBtn').onclick = () => {
+  resumeToken = '';
+  const sock = ws;
+  if (sock) { send({ t: 'bye' }); sock._quiet = true; setTimeout(() => sock.close(), 200); }
+  connected = false; stopViewer(); showLogin();
+};
+$('barToggle').onclick = () => {
+  const b = $('bar'); b.classList.toggle('min');
+  $('barToggle').innerHTML = '<svg><use href="#' + (b.classList.contains('min') ? 'i-down' : 'i-up') + '"/></svg>';
+  closeSheets();
+};
+$('fsBtn').onclick = () => {
+  const d = document;
+  if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+  else { const el = d.documentElement; (el.requestFullscreen || el.webkitRequestFullscreen || (() => toast('This browser does not support fullscreen'))).call(el); }
+};
+document.addEventListener('fullscreenchange', () => setTimeout(layout, 50));
+
+function setQualityUi(p) { for (const b of document.querySelectorAll('#qualSeg button')) b.classList.toggle('on', b.dataset.q === p); }
+for (const b of document.querySelectorAll('#qualSeg button')) b.onclick = () => { setQualityUi(b.dataset.q); send({ t: 'quality', p: b.dataset.q }); };
+
+$('ovRetry').onclick = () => { $('overlay').hidden = true; autoTries = 0; showLogin(); connect(true, !!resumeToken); };
+$('ovClose').onclick = () => { $('overlay').hidden = true; showLogin(); };
+
+// ---------------- file upload ----------------
+$('fileBtn').onclick = () => {
+  toggleSheet('filesSheet', $('fileBtn'));
+  if (!$('filesSheet').hidden && !dir) send({ t: 'ls', path: '' });
+};
+$('sendFileBtn').onclick = () => $('filePick').click();
+
+// ---------------- files on the computer (browse, download) ----------------
+let dir = null, download = null, uploadCancel = false, uploadId = 0;
+function humanSize(n) { return n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + ' GB' : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB' : n >= 1024 ? (n >> 10) + ' KB' : n + ' B'; }
+function joinPath(base, name) {
+  if (!base) return name;
+  const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
+  return base.endsWith(sep) ? base + name : base + sep + name;
+}
+function renderDir() {
+  const list = $('dirList'); list.innerHTML = '';
+  $('dirPath').textContent = dir ? (dir.path || 'This PC') : '';
+  $('dirUp').disabled = !dir || dir.parent == null;
+  if (!dir) return;
+  if (dir.error) { const e = document.createElement('div'); e.className = 'note'; e.textContent = dir.error; list.appendChild(e); return; }
+  for (const e of dir.entries || []) {
+    const row = document.createElement('button');
+    row.className = 'frow';
+    row.innerHTML = '<span>' + (e.d ? '📁 ' : '📄 ') + esc(e.n) + '</span>' + (e.d ? '' : '<small>' + humanSize(e.s) + ' · ⬇</small>');
+    row.onclick = () => e.d ? send({ t: 'ls', path: joinPath(dir.path, e.n) }) : startDownload(joinPath(dir.path, e.n), e.n, e.s);
+    list.appendChild(row);
+  }
+  if (!(dir.entries || []).length) { const e = document.createElement('div'); e.className = 'note'; e.textContent = 'Empty folder'; list.appendChild(e); }
+}
+$('dirUp').onclick = () => { if (dir && dir.parent != null) send({ t: 'ls', path: dir.parent }); };
+$('dirHome').onclick = () => send({ t: 'ls', path: '' });
+// Downloads are kept in memory until complete, then saved by the browser.
+const MAX_DOWNLOAD = 1024 * 1024 * 1024;
+function startDownload(path, name, size) {
+  if (download) { toast('A download is already running'); return; }
+  if (size > MAX_DOWNLOAD) { toast('Files over 1 GB can only be downloaded with the desktop app', 4000); return; }
+  const rnd = new Uint32Array(1); crypto.getRandomValues(rnd);
+  download = { id: Date.now() * 1000 + (rnd[0] % 1000), name, total: size, got: 0, parts: [] };
+  showDownload();
+  send({ t: 'get', path, id: download.id });
+}
+function showDownload() {
+  $('downBox').hidden = !download;
+  if (download) $('downText').textContent = 'Downloading ' + download.name + ' ' + (download.total ? Math.floor(download.got * 100 / download.total) : 0) + '%';
+}
+function onFileData(m) {
+  if (!download || m.id !== download.id) return;
+  const part = b64d(m.data || '');
+  download.parts.push(part); download.got += part.length;
+  showDownload();
+  if (!m.last) return;
+  const blob = new Blob(download.parts), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = download.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  toast('✓ Downloaded ' + download.name + ' (saved by your browser, usually in Downloads)', 5000);
+  download = null; showDownload();
+}
+$('downCancel').onclick = () => {
+  if (download) send({ t: 'get_cancel', id: download.id });
+  download = null; showDownload();
+};
+$('upCancel').onclick = () => { uploadCancel = true; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function drain() {
+  while (ws && ws.readyState === 1 && (ws.bufferedAmount > 1024 * 1024 || (sec && sec.outQueued > 4)
+    || (p2p && p2p.open && p2p.dc.bufferedAmount > 1024 * 1024))) await sleep(20);
+  if (!ws || ws.readyState !== 1) throw new Error('connection closed');
+}
+$('filePick').addEventListener('change', async () => {
+  const files = Array.from($('filePick').files || []);
+  $('filePick').value = '';
+  for (const f of files) {
+    if (!f.size || f.size > 512 * 1024 * 1024) { toast(f.name + ': empty or larger than the 512 MB limit', 4000); continue; }
+    const rnd = new Uint32Array(1); crypto.getRandomValues(rnd);
+    const id = Date.now() * 1000 + (rnd[0] % 1000);
+    const CH = 192 * 1024;
+    uploadCancel = false; uploadId = id;
+    $('upBox').hidden = false;
+    try {
+      for (let off = 0; off < f.size; off += CH) {
+        if (uploadCancel) {
+          send({ t: 'file_cancel', id });
+          $('upBox').hidden = true; toast('Sending ' + f.name + ' canceled', 3000);
+          return;
+        }
+        const part = new Uint8Array(await f.slice(off, Math.min(off + CH, f.size)).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < part.length; i += 8192) bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
+        await drain();
+        send({ t: 'file', transfer_id: id, name: f.name, offset: off, total: f.size, data: btoa(bin), last: off + part.length === f.size });
+        const pct = Math.floor((off + part.length) * 100 / f.size);
+        $('upText').textContent = 'Sending ' + f.name + ' ' + pct + '%';
+        toast('Sending: ' + f.name + ' ' + pct + '%', 0);
+      }
+    } catch (e) { toast('Send failed: ' + (e && e.message || e), 4000); return; }
+  }
+});
+</script>
+</body>
+</html>

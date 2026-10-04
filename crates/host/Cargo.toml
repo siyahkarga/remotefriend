@@ -1,0 +1,44 @@
+[package]
+name = "remote-friend-host"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+remote-friend-common = { path = "../common" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+hex = { workspace = true }
+xcap = "0.4"
+openh264 = "0.9"
+# Raw option API to change the bitrate while encoding.
+openh264-sys2 = "0.9"
+hostname = { workspace = true }
+image = { version = "0.25", features = ["jpeg"] }
+enigo = "0.6"
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+local-ip-address = "0.6"
+base64 = { workspace = true }
+# System sound: Opus encoder (libopus built from source) and capture on Windows/macOS.
+opus = "0.4"
+cpal = "0.18"
+# Clipboard sync with viewers
+arboard = "3"
+# Direct (peer-to-peer) connections: WebRTC data channel with pure-Rust crypto
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+rand = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wayland: portal RemoteDesktop (real mouse/keyboard) + ScreenCast + PipeWire. On Xorg: xcap + enigo.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop", "pipewire"] }
+pipewire = "0.9"
+memmap2 = "0.9"
+libc = "0.2"
