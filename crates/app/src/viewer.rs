@@ -53,7 +53,10 @@ impl App {
 
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("✖ Disconnect").clicked() {
+                let disconnect = egui::Button::new(RichText::new("✖  Disconnect").strong().color(egui::Color32::WHITE))
+                    .fill(crate::ERR)
+                    .min_size(egui::vec2(0.0, 28.0));
+                if ui.add(disconnect).on_hover_text("End the session").clicked() {
                     self.send_control(serde_json::json!({"t": "bye"}));
                     self.disconnect();
                     return;
@@ -277,8 +280,10 @@ impl App {
                                     egui::MouseWheelUnit::Line => 1.0,
                                     egui::MouseWheelUnit::Page => 10.0,
                                 };
-                                self.scroll_acc.0 += delta.x * mult;
-                                self.scroll_acc.1 += delta.y * mult;
+                                // egui: positive y = wheel up (content moves down); the protocol
+                                // counts lines with positive = down/right, like the browser page.
+                                self.scroll_acc.0 -= delta.x * mult;
+                                self.scroll_acc.1 -= delta.y * mult;
                                 let dx = self.scroll_acc.0.trunc() as i32;
                                 let dy = self.scroll_acc.1.trunc() as i32;
                                 if dx != 0 || dy != 0 {

@@ -675,7 +675,21 @@ impl App {
         ui.add_enabled_ui(self.settings_use_server, |ui| {
             egui::Grid::new("server_grid").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
                 ui.label("Access key").on_hover_text("Lets this computer use the server; ask the server owner for one");
-                ui.add(egui::TextEdit::singleline(&mut self.settings_key).password(true).hint_text("RF-XXXXX-…").desired_width(340.0));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_key)
+                            .password(!self.settings_key_visible)
+                            .hint_text("RF-XXXXX-…")
+                            .desired_width(250.0),
+                    );
+                    let label = if self.settings_key_visible { "Hide" } else { "Show" };
+                    if ui.small_button(label).clicked() {
+                        self.settings_key_visible = !self.settings_key_visible;
+                    }
+                    if !self.settings_key.trim().is_empty() && ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(self.settings_key.trim().to_string());
+                    }
+                });
                 ui.end_row();
                 ui.label("Server").on_hover_text("Leave empty for the blobidea server; your own relay: host:33202");
                 ui.add(

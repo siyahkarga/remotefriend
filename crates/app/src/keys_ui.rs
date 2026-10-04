@@ -1,7 +1,8 @@
 //! Settings → Server → Manage access keys: the server owner lists, creates and revokes the keys
 //! that let other people's computers use the server. It needs the owner key in Settings. Keys
-//! made here are also remembered on this computer (issued_keys.json), because the server keeps
-//! only their hashes and could never show them again.
+//! made here are also remembered on this computer (issued_keys.json, with the email address
+//! typed for them), because the server keeps only their hashes and could never show them again.
+//! The email address is used only to address the email draft; it never goes to the server.
 
 use egui::{Color32, RichText};
 use serde_json::{json, Value};
@@ -19,10 +20,11 @@ pub(crate) struct KeysUi {
     keys: Vec<Value>,
     error: Option<String>,
     name: String,
+    email: String,
     computers: String,
     days: String,
-    /// The key just created: (name, key).
-    created: Option<(String, String)>,
+    /// The key just created: (name, key, email).
+    created: Option<(String, String, String)>,
     confirm_delete: Option<String>,
     issued: serde_json::Map<String, Value>,
 }
@@ -60,10 +62,15 @@ impl KeysUi {
                 self.keys = answer["keys"].as_array().cloned().unwrap_or_default();
                 if let (Some(key), Some(id)) = (answer["key"].as_str(), answer["id"].as_str()) {
                     let name = self.name.trim().to_string();
-                    self.issued.insert(id.to_string(), json!({ "name": name, "key": key }));
+                    let email = self.email.trim().to_string();
+                    self.issued.insert(id.to_string(), json!({ "name": name, "key": key, "email": email }));
                     save_issued(&self.issued);
-                    self.created = Some((name, key.to_string()));
+                    if !email.is_empty() {
+                        crate::open_url(&email_url(&name, &email, key));
+                    }
+                    self.created = Some((name, key.to_string(), email));
                     self.name.clear();
+                    self.email.clear();
                     self.computers.clear();
                     self.days.clear();
                 }
@@ -97,7 +104,7 @@ impl KeysUi {
             ui.add_space(4.0);
             ui.colored_label(ERR, e);
         }
-        if let Some((name, key)) = self.created.clone() {
+        if let Some((name, key, email)) = self.created.clone() {
             ui.add_space(6.0);
             egui::Frame::new()
                 .fill(OK.gamma_multiply(0.12))
@@ -108,8 +115,11 @@ impl KeysUi {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new(format!("Key for {name}")).strong());
                     ui.label(RichText::new(&key).monospace().size(17.0).strong());
+                    if !email.is_empty() {
+                        ui.label(RichText::new(format!("An email to {email} was opened in your email program; check it and press Send.")).size(12.0).color(MUTED));
+                    }
                     ui.horizontal(|ui| {
-                        share_buttons(ui, &name, &key);
+                        share_buttons(ui, &name, &key, &email);
                         if ui.button("Done").clicked() {
                             self.created = None;
                         }
@@ -120,7 +130,9 @@ impl KeysUi {
         ui.add_space(8.0);
         ui.label(RichText::new("New key").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("Name, e.g. Ali").desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("Name, e.g. Ali").desired_width(130.0));
+            ui.add(egui::TextEdit::singleline(&mut self.email).hint_text("Email (optional)").desired_width(170.0))
+                .on_hover_text("Opens an email to this address with the key; kept only on this computer");
             ui.add(egui::TextEdit::singleline(&mut self.computers).hint_text("Computers: any").desired_width(115.0))
                 .on_hover_text("How many computers may use this key (empty: no limit)");
             ui.add(egui::TextEdit::singleline(&mut self.days).hint_text("Days: forever").desired_width(105.0))
@@ -128,6 +140,7 @@ impl KeysUi {
             let ready = !self.name.trim().is_empty() && self.pending.is_none();
             if ui.add_enabled(ready, egui::Button::new("Create")).clicked() {
                 match (number(&self.computers), number(&self.days)) {
+                    _ if !email_ok(&self.email) => self.error = Some("That does not look like an email address.".into()),
                     (Ok(computers), Ok(days)) => {
                         let name = self.name.trim().to_string();
                         self.send(json!({ "cmd": "add", "name": name, "computers": computers, "days": days }));
@@ -164,7 +177,13 @@ impl KeysUi {
                     let id = k["id"].as_str().unwrap_or_default().to_string();
                     let name = k["name"].as_str().unwrap_or_default().to_string();
                     let used = k["computers"].as_u64().unwrap_or(0);
-                    ui.label(&name);
+                    let email = self.issued.get(&id).and_then(|v| v["email"].as_str()).unwrap_or_default().to_string();
+                    ui.vertical(|ui| {
+                        ui.label(&name);
+                        if !email.is_empty() {
+                            ui.label(RichText::new(&email).size(11.0).color(MUTED));
+                        }
+                    });
                     ui.label(match k["max_computers"].as_u64() {
                         Some(max) => format!("{used} of {max}"),
                         None => used.to_string(),
@@ -179,7 +198,7 @@ impl KeysUi {
                     ui.colored_label(color, status);
                     ui.horizontal(|ui| {
                         if let Some(key) = self.issued.get(&id).and_then(|v| v["key"].as_str()) {
-                            share_buttons(ui, &name, key);
+                            share_buttons(ui, &name, key, &email);
                         }
                         if status == "revoked" {
                             if ui.small_button("Restore").clicked() {
@@ -216,23 +235,33 @@ impl KeysUi {
 }
 
 /// Copy and Email buttons for a key.
-fn share_buttons(ui: &mut egui::Ui, name: &str, key: &str) {
+fn share_buttons(ui: &mut egui::Ui, name: &str, key: &str, email: &str) {
     if ui.small_button("Copy").clicked() {
         ui.ctx().copy_text(key.to_string());
     }
     if ui.small_button("Email…").on_hover_text("Opens your email program with the key and instructions").clicked() {
-        crate::open_url(&email_url(name, key));
+        crate::open_url(&email_url(name, email, key));
     }
 }
 
-fn email_url(name: &str, key: &str) -> String {
+/// Empty, or something@domain.tld without spaces.
+fn email_ok(email: &str) -> bool {
+    let email = email.trim();
+    email.is_empty()
+        || (email.len() <= 254
+            && !email.chars().any(|c| c.is_whitespace() || c.is_control() || c == '?' || c == '&')
+            && email.split_once('@').is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.')))
+}
+
+fn email_url(name: &str, email: &str, key: &str) -> String {
     let body = format!(
         "Hi {name},\n\nhere is your RemoteFriend access key:\n\n    {key}\n\n\
          1. Download RemoteFriend: https://blobidea.com/products/remotefriend\n\
          2. Open it, go to Settings > Server > Access key, paste the key and click \"Save and reconnect\".\n\n\
          The key is personal, please keep it to yourself.\n"
     );
-    format!("mailto:?subject={}&body={}", percent(&"Your RemoteFriend access key"), percent(&body))
+    let to = percent(email.trim()).replace("%40", "@");
+    format!("mailto:{to}?subject={}&body={}", percent("Your RemoteFriend access key"), percent(&body))
 }
 
 fn percent(s: &str) -> String {
@@ -275,8 +304,10 @@ mod tests {
 
     #[test]
     fn email_link_is_encoded() {
-        let url = email_url("Ali Veli", "RF-ABCDE-FGHJK");
+        let url = email_url("Ali Veli", "", "RF-ABCDE-FGHJK");
         assert!(url.starts_with("mailto:?subject=Your%20RemoteFriend%20access%20key&body=Hi%20Ali%20Veli"));
+        assert!(email_url("Ali", "ali@example.com", "RF-X").starts_with("mailto:ali@example.com?subject="));
+        assert!(email_ok("") && email_ok(" ali@example.com ") && !email_ok("ali") && !email_ok("a b@c.d") && !email_ok("a@b"));
         assert!(url.contains("RF-ABCDE-FGHJK") && !url.contains(' ') && !url.contains('\n'));
         assert_eq!(number(" 3 "), Ok(Some(3)));
         assert_eq!(number(""), Ok(None));

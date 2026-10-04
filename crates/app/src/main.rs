@@ -69,6 +69,8 @@ pub(crate) struct App {
     settings_web: String,
     settings_key: String,
     settings_use_server: bool,
+    /// Show the access key in Settings instead of dots.
+    settings_key_visible: bool,
     /// A newer version on blobidea.com (filled by update::start).
     update: Arc<Mutex<Option<update::Update>>>,
     update_dismissed: Option<String>,
@@ -220,6 +222,7 @@ fn main() -> Result<()> {
         settings_web: server_settings.web_url,
         settings_key: server_settings.key,
         settings_use_server: server_settings.use_server,
+        settings_key_visible: false,
         update: Arc::new(Mutex::new(None)),
         update_dismissed: None,
         keys_ui: keys_ui::KeysUi::default(),
