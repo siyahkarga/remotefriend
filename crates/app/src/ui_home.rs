@@ -83,6 +83,12 @@ fn pill(ui: &mut egui::Ui, color: Color32, text: &str) -> egui::Response {
 }
 
 /// Highlighted box for something that needs the user (e.g. the desktop permission).
+/// The server owner's key (setup: 32 hex characters), as opposed to a personal "RF-…" key.
+fn owner_key_like(key: &str) -> bool {
+    let key = key.trim();
+    key.len() >= 16 && key.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn hint_box(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(color.gamma_multiply(0.12))
@@ -696,10 +702,9 @@ impl App {
                 remote_friend_host::set_server(&self.settings_server, &self.settings_web, &self.settings_key, self.settings_use_server);
                 self.flash("Server settings saved");
             }
-            if ui
-                .button("Manage access keys…")
-                .on_hover_text("For the server's owner: needs the owner key as the access key above")
-                .clicked()
+            // Only the server's owner has a key that is not a personal "RF-…" access key.
+            if owner_key_like(&self.settings_key)
+                && ui.button("Manage access keys…").on_hover_text("Create, share and revoke keys for other people").clicked()
             {
                 self.keys_ui.show();
             }
