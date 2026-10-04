@@ -36,7 +36,9 @@ metadata: which computer IDs are used, when, from which IP addresses and how muc
   there is no “trust this server?” question to get wrong; another relay can still be set.
 - Twice a day the app asks blobidea.com for the current version (only the request itself; it can
   be turned off) and shows a red notice when the installed version has a known security problem.
-- The relay keeps its logs (IP addresses, IDs, times) for 30 days.
+- The relay keeps no record of who connects: its logs contain no IP addresses, computer IDs or
+  names and stay in RAM; the computer name is not even kept in memory. On disk it stores only
+  the computer IDs with their computer keys and access key, and the access keys as hashes.
 - The app (client, terminal host, phone page) is open source under the GPL-3.0; the relay is not.
 
 ## High-risk issues fixed in v0.5.6
@@ -165,7 +167,8 @@ access) is not encrypted; there has been no independent security audit.
 
 ## Known remaining risks
 
-- The relay sees connection metadata (IDs, computer names, times, IP addresses, traffic volume).
+- While a connection is open, the relay necessarily knows the IP addresses and IDs involved (in
+  memory, not logged).
 - There has been no independent security audit yet.
 - The local-network browser page (plain http, only when local network access is enabled) is not encrypted.
 - A malicious relay can try passwords offline against one recorded handshake; the generated password
