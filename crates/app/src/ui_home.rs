@@ -166,8 +166,8 @@ impl App {
                     let tip = match (&snap.server, &snap.server_error, refused) {
                         (None, _, _) => "Reachable on the local network only (Settings → Server)".to_string(),
                         (Some(_), _, Some(reason)) => format!("The server says: {reason}. Other computers can still be reached from here."),
-                        (Some(s), Some(e), None) => format!("Cannot reach {s}: {e}"),
-                        (Some(s), None, None) => format!("Server {s}"),
+                        (Some(_), Some(e), None) => format!("Cannot reach the server: {e}"),
+                        (Some(_), None, None) => "Connecting to the server".to_string(),
                     };
                     if pill(ui, color, text).on_hover_text(tip).clicked() {
                         self.open_settings(0);
@@ -330,7 +330,8 @@ impl App {
                 });
             }
         }
-        if let Some(url) = &snap.web_url {
+        // The phone address only matters once this computer is reachable (it has a valid key).
+        if let Some(url) = snap.web_url.as_ref().filter(|_| snap.online) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("📱").size(15.0)).on_hover_text("Open this address on a phone or in any browser");
                 ui.hyperlink_to(RichText::new(url.trim_start_matches("https://")).size(15.0), url);
@@ -668,7 +669,6 @@ impl App {
     }
 
     fn settings_server(&mut self, ui: &mut egui::Ui, snap: &remote_friend_host::Snapshot) {
-        use remote_friend_common::identity::{DEFAULT_SERVER, DEFAULT_WEB_URL};
         ui.checkbox(&mut self.settings_use_server, "Reachable over the internet (through a server)")
             .on_hover_text("Off: this computer can only be reached from your local network");
         ui.add_space(6.0);
@@ -691,14 +691,14 @@ impl App {
                     }
                 });
                 ui.end_row();
-                ui.label("Server").on_hover_text("Leave empty for the blobidea server; your own relay: host:33202");
+                ui.label("Server").on_hover_text("Leave empty for the built-in server; another relay: host:33202");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_server)
-                        .hint_text(format!("{DEFAULT_SERVER} (default)"))
+                        .hint_text("built-in server")
                         .desired_width(340.0),
                 );
                 ui.end_row();
-                let web_hint = if self.settings_server.trim().is_empty() { DEFAULT_WEB_URL } else { "https://…" };
+                let web_hint = if self.settings_server.trim().is_empty() { "built-in server's page" } else { "https://…" };
                 ui.label("Phone address").on_hover_text("Web address phones open, e.g. https://remote.example.com");
                 ui.add(egui::TextEdit::singleline(&mut self.settings_web).hint_text(web_hint).desired_width(340.0));
                 ui.end_row();
