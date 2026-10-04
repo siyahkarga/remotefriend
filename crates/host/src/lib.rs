@@ -105,14 +105,14 @@ pub fn set_server(server: &str, web_url: &str, register_key: &str, use_server: b
     if !server.is_empty() && !server.contains(':') {
         server = format!("{server}:{}", remote_friend_common::RENDEZVOUS_PORT);
     }
-    if server == DEFAULT_SERVER {
+    if !DEFAULT_SERVER.is_empty() && server == DEFAULT_SERVER {
         server.clear(); // stays on the default, with its pinned certificate
     }
     if cfg.server != server {
         cfg.fp.clear(); // a different server needs its own trusted fingerprint
     }
     let mut web_url = web_url.trim().trim_end_matches('/').to_string();
-    if server.is_empty() && web_url == DEFAULT_WEB_URL {
+    if server.is_empty() && !DEFAULT_WEB_URL.is_empty() && web_url == DEFAULT_WEB_URL {
         web_url.clear();
     }
     cfg.server = server;

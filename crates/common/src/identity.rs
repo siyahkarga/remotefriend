@@ -66,11 +66,23 @@ pub fn load_or_create_host_secret() -> String {
     secret
 }
 
-/// The relay used when Settings name none, run by blobidea.com. Its certificate is pinned here,
-/// so nobody is asked whether to trust it (the setup script keeps that certificate for good).
-pub const DEFAULT_SERVER: &str = "remote.blobidea.com:33202";
-pub const DEFAULT_SERVER_FP: &str = "f827d57c794820e2a1dbe419e4dabe495d922cc71b4e426ede14564f2728dade";
-pub const DEFAULT_WEB_URL: &str = "https://remote.blobidea.com";
+/// The built-in relay, used when Settings name none: its address, the SHA-256 fingerprint of its
+/// certificate (pinned, so nobody is asked whether to trust it) and its web page for phones.
+/// They come from the build (RF_DEFAULT_SERVER, RF_DEFAULT_SERVER_FP, RF_DEFAULT_WEB_URL; the
+/// release builds set them), so the source names no server. Without them there is no built-in
+/// server and the app works on the local network until one is set in Settings.
+pub const DEFAULT_SERVER: &str = match option_env!("RF_DEFAULT_SERVER") {
+    Some(s) => s,
+    None => "",
+};
+pub const DEFAULT_SERVER_FP: &str = match option_env!("RF_DEFAULT_SERVER_FP") {
+    Some(s) => s,
+    None => "",
+};
+pub const DEFAULT_WEB_URL: &str = match option_env!("RF_DEFAULT_WEB_URL") {
+    Some(s) => s,
+    None => "",
+};
 
 /// Relay server settings (address + pinned certificate fingerprint + public web URL).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
@@ -132,7 +144,7 @@ pub fn load_rv_config() -> RvConfig {
     let mut c = load_rv_config_saved();
     if c.no_server {
         c.server.clear();
-    } else if c.server.trim().is_empty() {
+    } else if c.server.trim().is_empty() && !DEFAULT_SERVER.is_empty() {
         c.server = DEFAULT_SERVER.into();
         c.fp = DEFAULT_SERVER_FP.into();
         if c.web_url.trim().is_empty() {

@@ -694,11 +694,12 @@ impl App {
                 ui.label("Server").on_hover_text("Leave empty for the built-in server; another relay: host:33202");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_server)
-                        .hint_text("built-in server")
+                        .hint_text(if remote_friend_common::identity::DEFAULT_SERVER.is_empty() { "host:33202" } else { "built-in server" })
                         .desired_width(340.0),
                 );
                 ui.end_row();
-                let web_hint = if self.settings_server.trim().is_empty() { "built-in server's page" } else { "https://…" };
+                let built_in = self.settings_server.trim().is_empty() && !remote_friend_common::identity::DEFAULT_SERVER.is_empty();
+                let web_hint = if built_in { "built-in server's page" } else { "https://…" };
                 ui.label("Phone address").on_hover_text("Web address phones open, e.g. https://remote.example.com");
                 ui.add(egui::TextEdit::singleline(&mut self.settings_web).hint_text(web_hint).desired_width(340.0));
                 ui.end_row();

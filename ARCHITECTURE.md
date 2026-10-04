@@ -9,7 +9,7 @@
           │                                            inject: portal (Wayland), enigo
           │  1. TLS to the relay, "connect to ID"               │
           ▼                                                     │ keeps one TLS link open
-   ┌──────────────── relay server (remote.blobidea.com) ───────────────┐
+   ┌──────────────────────── relay server (blobidea) ──────────────────┐
    │ finds the computer by ID, asks it to dial back, then splices the  │
    │ two links. Access keys decide which computers may register,       │
    │ per-IP limits, STUN on UDP 3478. nginx serves the phone page.     │

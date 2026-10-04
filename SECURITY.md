@@ -18,7 +18,7 @@ RemoteFriend gives a client that knows the password, and that the host approves,
 
 | Path | Encryption | Notes |
 |---|---|---|
-| Browser → relay → computer (`https://remote.blobidea.com`) | End-to-end (AES-256-GCM) inside HTTPS/TLS | The relay only forwards ciphertext |
+| Browser → relay → computer (the relay's HTTPS page) | End-to-end (AES-256-GCM) inside HTTPS/TLS | The relay only forwards ciphertext |
 | App → relay → computer (`33202`) | End-to-end (AES-256-GCM) inside TLS with the relay's certificate pinned in the app | The relay only forwards ciphertext |
 | App → computer on the local network (`33200`) | End-to-end (AES-256-GCM) | Off by default |
 | Browser → computer on the local network (`33201`) | Plain HTTP/WebSocket (browsers block WebCrypto on plain http) | Off by default; trusted networks only |

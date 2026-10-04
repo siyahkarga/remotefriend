@@ -36,7 +36,7 @@ new version is out (*Settings → General* turns the check off).
    - **Computer:** open RemoteFriend, type the ID (or the local IP address) and password,
      click **Connect**.
    - **Phone / any browser:** open the address shown next to 📱 in RemoteFriend
-     (`https://remote.blobidea.com`), type the ID and password.
+     (shown once the computer is online), type the ID and password.
 3. On the shared computer, a window asks: **Allow**, **Always allow this device** or **Deny**.
    With *Always allow*, that phone, browser or computer connects from then on **without the
    password and without asking** — no one needs to be at the computer. Recent computers that
@@ -97,8 +97,10 @@ RemoteFriend under *System Settings → Privacy & Security → Screen Recording*
 ## Reachable from anywhere: the server and access keys
 
 Within the same network everything works without a server. Over the internet, devices meet at
-the RemoteFriend relay run by blobidea (`remote.blobidea.com`; its certificate is built into the
-app). The relay only forwards encrypted data and is not part of this repository.
+the RemoteFriend relay run by blobidea (built into the downloads from blobidea.com, with its
+certificate pinned). The relay only forwards encrypted data and is not part of this repository;
+builds from this source have no built-in server unless `RF_DEFAULT_SERVER`,
+`RF_DEFAULT_SERVER_FP` and `RF_DEFAULT_WEB_URL` are set when compiling.
 
 - **Connecting to** another computer needs nothing but its ID and password.
 - **Making a computer reachable** needs an **access key**: enter it once in
@@ -161,7 +163,7 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
 | Black screen on Wayland | Click **Ask again** in the app and allow screen sharing. |
 | Mouse/keyboard do nothing on Wayland | “Allow Remote Interaction” was off: click **Ask again** and turn it on. wlroots desktops (Sway, Hyprland) can only control XWayland windows. |
 | Black screen / no control on macOS | Grant Screen Recording and Accessibility, then restart RemoteFriend. |
-| Browser video is slow (“JPEG mode”) | Open the page over **HTTPS** (`https://remote.blobidea.com`) in a current Chrome, Edge or Safari. |
+| Browser video is slow (“JPEG mode”) | Open the server's page over **HTTPS** (the 📱 address) in a current Chrome, Edge or Safari. |
 | “version mismatch” | Update the app on both computers. |
 | “This device is no longer trusted” | The computer removed this device (or forgot all devices): enter the current password once. |
 | A computer drops off (“ID not found”) after sleep or a network change | Dead links are noticed within about a minute and the computer reconnects; update the app if it is older than v0.9. |

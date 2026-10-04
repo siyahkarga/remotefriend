@@ -1,6 +1,6 @@
 [package]
 name = "remotefriend"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Remote desktop: share this computer and control other computers"
