@@ -26,6 +26,14 @@ RemoteFriend gives a client that knows the password, and that the host approves,
 Since v0.7.0 the relay never sees the password, the screen, the input or the files. It still sees
 metadata: which computer IDs are used, when, from which IP addresses and how much data flows.
 
+## v0.13.0: managing access keys from the app
+
+The server's owner can list, create, revoke and delete access keys in the app (*Settings →
+Server → Manage access keys…*). The request travels inside the TLS link to the relay (its
+certificate is pinned) and is accepted only with the owner key, compared in constant time and
+rate limited per IP like connection requests. The relay still stores only hashes; the owner's
+app remembers the keys it created in `issued_keys.json` (readable only by the user).
+
 ## v0.12.0: access keys, built-in server, update notices
 
 - The relay decides with **access keys** which computers may register: one owner key plus a key

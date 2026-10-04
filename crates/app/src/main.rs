@@ -9,6 +9,7 @@
 mod audio;
 mod autostart;
 mod history;
+mod keys_ui;
 mod net;
 mod privacy;
 mod ui_home;
@@ -71,6 +72,8 @@ pub(crate) struct App {
     /// A newer version on blobidea.com (filled by update::start).
     update: Arc<Mutex<Option<update::Update>>>,
     update_dismissed: Option<String>,
+    /// Settings → Server → Manage access keys (server owner only).
+    keys_ui: keys_ui::KeysUi,
     lan_enabled: bool,
     lan_changed: bool,
     autostart: bool,
@@ -219,6 +222,7 @@ fn main() -> Result<()> {
         settings_use_server: server_settings.use_server,
         update: Arc::new(Mutex::new(None)),
         update_dismissed: None,
+        keys_ui: keys_ui::KeysUi::default(),
         lan_enabled: remote_friend_host::lan_enabled(),
         lan_changed: false,
         autostart: autostart::is_enabled(),
@@ -564,6 +568,16 @@ pub(crate) fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(path).spawn();
+}
+
+/// Opens a web or mailto: link with the system's default program.
+pub(crate) fn open_url(url: &str) {
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
 /// Start a fresh copy of the app and quit (used to ask for screen permission again).

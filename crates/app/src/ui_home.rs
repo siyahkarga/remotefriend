@@ -211,6 +211,9 @@ impl App {
         if self.settings_open {
             self.settings_ui(ctx, &snap);
         }
+        if self.keys_ui.open {
+            self.keys_ui.window(ctx);
+        }
         if self.history_open {
             self.history_window(ctx);
         }
@@ -692,6 +695,13 @@ impl App {
             if ui.button("Save and reconnect").clicked() {
                 remote_friend_host::set_server(&self.settings_server, &self.settings_web, &self.settings_key, self.settings_use_server);
                 self.flash("Server settings saved");
+            }
+            if ui
+                .button("Manage access keys…")
+                .on_hover_text("For the server's owner: needs the owner key as the access key above")
+                .clicked()
+            {
+                self.keys_ui.show();
             }
             match (&snap.server, snap.online, &snap.server_error) {
                 (_, true, _) => dot(ui, OK, "Connected"),

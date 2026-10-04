@@ -107,6 +107,8 @@ app). The relay only forwards encrypted data and is not part of this repository.
   local network and can still connect to others.
 - *Settings → Server* can also point RemoteFriend at another relay, or turn the server off
   (local network only).
+- The server's owner manages the keys in *Settings → Server → Manage access keys…* (create with
+  Copy and Email buttons, revoke, delete); this needs the server's owner key.
 
 ## Phone controls
 

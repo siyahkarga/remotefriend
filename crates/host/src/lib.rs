@@ -86,6 +86,16 @@ pub fn set_lan_enabled(enabled: bool) {
     remote_friend_common::identity::save_host_settings(&s);
 }
 
+/// Access keys on the server: list, add, revoke, ... (see the relay's keys.rs). Needs the
+/// server's owner key in Settings; blocks, so call it off the UI thread.
+pub fn manage_access_keys(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(server::admin_request(&request)).map_err(|e| format!("{e:#}"))
+}
+
 /// Save relay settings and reconnect. An empty server means the default one; `use_server`
 /// off keeps the computer on the local network.
 pub fn set_server(server: &str, web_url: &str, register_key: &str, use_server: bool) {

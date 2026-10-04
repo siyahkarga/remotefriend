@@ -617,6 +617,24 @@ async fn rv_connect(t: &RvTarget) -> Result<(BoxRd, BoxWr)> {
     }
 }
 
+/// Access key management on the relay: only works with the server's owner key in Settings.
+pub(crate) async fn admin_request(request: &serde_json::Value) -> Result<serde_json::Value> {
+    use remote_friend_common::io::{read_rv, write_rv};
+    use remote_friend_common::RvMsg;
+    let target = rv_target().context("no server is set (Settings -> Server)")?;
+    let (mut rd, mut wr) = rv_connect(&target).await?;
+    write_rv(&mut wr, &RvMsg::Admin { key: target.register_key.clone(), request: request.to_string() }).await?;
+    let answer = tokio::time::timeout(Duration::from_secs(15), read_rv(&mut rd))
+        .await
+        .context("the server did not answer")?;
+    match answer {
+        Ok(RvMsg::AdminReply(json)) => Ok(serde_json::from_str(&json)?),
+        Ok(_) => anyhow::bail!("unexpected answer from the server"),
+        // Servers before v0.13 close the link on a message they don't know.
+        Err(_) => anyhow::bail!("this server cannot manage access keys yet (it needs an update)"),
+    }
+}
+
 /// Trust on first use: ask about the server fingerprint once and remember it.
 static TOFU_FP: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 static TOFU_DECLINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

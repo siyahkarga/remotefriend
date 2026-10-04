@@ -315,6 +315,10 @@ pub enum RvMsg {
     FromHost { payload: Vec<u8> },
     /// host -> server: registration with the server's registration key (may be empty).
     RegisterV2 { id: String, name: String, secret: String, key: String },
+    /// Server owner -> server: manage access keys (owner key + JSON request). Since v0.13.
+    Admin { key: String, request: String },
+    /// server -> owner: JSON answer to `Admin`.
+    AdminReply(String),
 }
 
 pub fn rv_encode(m: &RvMsg) -> anyhow::Result<Vec<u8>> {
