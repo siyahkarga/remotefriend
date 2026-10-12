@@ -269,6 +269,8 @@ const isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoi
 
 let role = 'relay', hostName = '';
 let ws = null, connected = false, savedPw = '', savedId = '';
+// The password was typed for this attempt (a saved one never stops a trusted-device login).
+let pwTyped = false;
 let resumeToken = '', autoTries = 0, autoReconnecting = false;
 let jpegMode = false, frameW = 0, frameH = 0, hadFrame = false;
 let cursorInVideo = false; // the computer draws its pointer into the picture
@@ -316,7 +318,7 @@ async function e2eStart(m) {
     if (m.v !== 1 || !(iter >= 10000 && iter <= 5000000) || hostPub.length !== 65 || salt.length !== 16) throw new Error('bad handshake');
     const tok = deviceToken();
     // A computer that trusts this browser lets it in with its device key: no password needed.
-    if (m.mode !== 'device' && m.dev && tok && !savedPw) {
+    if (m.mode !== 'device' && m.dev && tok && !pwTyped) {
       setBusy(true, 'Logging in as a trusted device…');
       sec = { ready: false, pending: null, deviceLogin: true };
       ws.send(JSON.stringify({ t: 'e2e2d', dev: await deviceId(tok) }));
@@ -360,7 +362,7 @@ async function e2eFinish(m) {
     sec.dTxCtr = 0; sec.dRxCtr = 0; sec.dOutChain = Promise.resolve(); sec.dInChain = Promise.resolve();
     sec.pending = null; sec.ready = true;
     sendSecure({
-      t: 'auth', name: deviceName(),
+      t: 'auth', name: deviceName(), vid: viewerId(),
       device: sec.deviceLogin ? undefined : deviceToken(),
       resume: (autoReconnecting && resumeToken) || undefined,
     });
@@ -512,6 +514,12 @@ idInput.addEventListener('input', showPwHint);
 // Token for this browser after the host chose "Always allow": logs in without the password.
 function deviceKeyFor(id) { return role === 'host' ? 'rf_dev_lan_' + location.host : 'rf_dev_' + id; }
 function deviceKey() { return deviceKeyFor(savedId); }
+// Random id of this browser, sent when connecting so a computer's owner can block it.
+function viewerId() {
+  let v = load('rf_vid', '');
+  if (!/^[0-9a-f]{32}$/.test(v)) { v = hex(crypto.getRandomValues(new Uint8Array(16))); store('rf_vid', v); }
+  return v;
+}
 function tokenFor(id) { const t = load(deviceKeyFor(id), ''); return /^[0-9a-f]{64}$/.test(t) ? t : undefined; }
 function deviceToken() { return tokenFor(savedId); }
 // Shown in the computer's list of connections, e.g. "Chrome on Android".
@@ -560,6 +568,7 @@ function connect(retry, auto) {
   const pw = retry ? savedPw : ($('pw').value || storedPw(id));
   if (role !== 'host' && id.length !== 9) { showMsg('Enter the full 9-digit computer ID.'); idInput.focus(); return; }
   if (!pw && !(role !== 'host' && tokenFor(id)) && !(role === 'host' && tokenFor(''))) { showMsg('Enter the password.'); $('pw').focus(); return; }
+  if (!retry) pwTyped = !!$('pw').value;
   savedId = id; savedPw = pw;
   unlockAudio();
   setBusy(true, 'Connecting…');
@@ -576,7 +585,7 @@ function connect(retry, auto) {
     t: 'hello', id: role === 'host' ? undefined : id, password: pw,
     jpeg: (!hasWebCodecs || location.hash.includes('jpeg')) || undefined,
     resume: (auto && resumeToken) || undefined,
-    device: deviceToken()
+    device: deviceToken(), vid: viewerId()
   }));
   sock.onmessage = ev => { if (ws === sock) onMessage(ev); };
   sock.onclose = () => { if (ws === sock) onClosed(sock); };
@@ -628,9 +637,13 @@ function handleJson(m) {
   switch (m.t) {
     case 'wait': if (autoReconnecting) toast('Waiting for approval on the remote computer…', 0);
       setBusy(true, 'Waiting for approval…');
-      showMsg('Waiting for approval on the remote computer: Allow once, or Always allow to remember this device.', 'info'); break;
+      showMsg('Waiting for the remote computer\'s owner to answer.', 'info'); break;
     case 'reject':
-      if (m.code === 'unknown_device' || m.msg === 'device key rejected') store(deviceKey(), '');
+      if (m.code === 'unknown_device' || m.msg === 'device key rejected') {
+        store(deviceKey(), '');
+        // The computer forgot this device: try the password right away if there is one.
+        if (savedPw) { ws._quiet = true; ws.close(); setTimeout(() => connect(true), 150); break; }
+      }
       if (m.msg === 'wrong password') { store(pwKeyFor(savedId), ''); m.msg = 'wrong password (the computer may have a new one)'; }
       if (m.code === 'ended') { ws._title = 'Session ended'; ws._reason = 'The remote computer\'s user ended the session.'; }
       else ws._reason = 'Rejected: ' + (m.msg || 'unknown reason');
@@ -639,7 +652,8 @@ function handleJson(m) {
     case 'clip': showClip(m.text || ''); break;
     case 'p2p_answer': if (p2p) p2p.pc.setRemoteDescription({ type: 'answer', sdp: m.sdp }).catch(() => stopP2P()); break;
     case 'p2p_off': stopP2P(); break;
-    case 'monitors': applyMonitors(m); toast('Showing ' + screenName(m.current), 1500); break;
+    case 'monitors': { const before = screenCurrent; applyMonitors(m); if (m.current !== before) toast('Showing ' + screenName(m.current), 1500); break; }
+    case 'monitor_no': toast('The computer\'s user kept the current screen.', 3000); break;
     case 'file_progress': if (m.total) toast('Saving on the computer: ' + Math.floor(m.got * 100 / m.total) + '%', 0); break;
     case 'welcome': onWelcome(m); break;
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
@@ -655,7 +669,10 @@ function handleJson(m) {
 function onWelcome(m) {
   connected = true;
   resumeToken = m.resume || '';
-  if (m.device && /^[0-9a-f]{64}$/.test(m.device)) { store(deviceKey(), m.device); toast('This device is now trusted ✓', 3000); }
+  if (m.device && /^[0-9a-f]{64}$/.test(m.device)) {
+    store(deviceKey(), m.device);
+    toast(m.ask ? 'Trusted ✓ No password next time (the owner still confirms)' : 'Trusted ✓ No password next time', 3500);
+  }
   if (autoReconnecting) toast('Reconnected ✓', 1800);
   autoTries = 0; autoReconnecting = false;
   jpegMode = !!m.jpeg || m.codec === 'jpeg';
@@ -1269,6 +1286,8 @@ function applyPerms(p, announce) {
     if (msg.length) toast(msg.join(' · '), 4000);
   }
   if (typeof updateSoundBtn === 'function') updateSoundBtn();
+  // Which screens can be switched to directly depends on mouse & keyboard permission.
+  if (old.control !== perms.control && screenList.length) applyMonitors({ list: screenList, current: screenCurrent });
 }
 // Several screens on the computer: choose which one to see (Settings sheet).
 let screenList = [], screenCurrent = 0;
@@ -1280,10 +1299,16 @@ function applyMonitors(m) {
   $('screenBox').hidden = screenList.length < 2;
   for (const s of screenList) {
     const b = document.createElement('button');
-    b.textContent = (s.i + 1) + (s.w ? ' · ' + s.w + '×' + s.h : '');
-    b.title = s.name;
+    // A screen that is not open to viewers is shown only when the computer's user agrees.
+    const direct = s.open !== false && perms.control;
+    b.textContent = (s.i + 1) + (s.w ? ' · ' + s.w + '×' + s.h : '') + (direct || s.i === screenCurrent ? '' : ' · ask');
+    b.title = s.i === screenCurrent ? 'Shown now' : direct ? s.name : s.name + ' — the computer\'s user is asked first';
     b.classList.toggle('on', s.i === screenCurrent);
-    b.onclick = () => { if (perms.control) send({ t: 'monitor', i: s.i }); else toast('View only: you cannot switch screens'); };
+    b.onclick = () => {
+      if (s.i === screenCurrent) return;
+      send({ t: 'monitor', i: s.i });
+      if (!direct) toast('Asked to show screen ' + (s.i + 1) + '…', 2500);
+    };
     seg.appendChild(b);
   }
 }

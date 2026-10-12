@@ -31,3 +31,9 @@ pub(crate) fn exclude_from_capture(frame: &eframe::Frame, on: bool) {
         }
     }
 }
+
+/// A Linux Wayland desktop: apps can't learn where other windows are, so the safe view can
+/// hide only RemoteFriend itself.
+pub(crate) fn wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
+}

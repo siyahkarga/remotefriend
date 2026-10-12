@@ -100,7 +100,7 @@ pub async fn run(opts: RunOptions) -> Result<()> {
     let native_bind = std::env::var("RF_NATIVE_BIND").unwrap_or_else(|_| default_bind.into());
     let native_port = env_port("RF_NATIVE_PORT", remote_friend_common::DEFAULT_PORT);
     let addr = format!("{native_bind}:{native_port}");
-    let listener = TcpListener::bind(&addr).await.with_context(|| {
+    let listener = bind_retry(&addr).await.with_context(|| {
         format!("cannot listen on {addr} (is RemoteFriend already running? set RF_NATIVE_PORT to use another port)")
     })?;
 
@@ -311,7 +311,7 @@ where
             auth::record(source, true);
             write_blob(wr, &e2e::host_result_ok(&mac_h)).await?;
             let login = match device {
-                Some((id, key)) => Login::Device { id, label: key.label, temporary: key.temporary },
+                Some((id, key)) => Login::Device { id, label: key.label, temporary: key.temporary, trust: key.trust },
                 None => {
                     auth::password_login();
                     Login::Password
@@ -325,6 +325,20 @@ where
             let msg = if device.is_some() { "device key rejected" } else { "wrong password" };
             write_blob(wr, &e2e::host_result_err(1, msg)).await?;
             Ok(None)
+        }
+    }
+}
+
+/// Opens a listening port. While it is in use — a RemoteFriend that is just restarting still
+/// holds it for a moment — it tries again for a few seconds.
+pub(crate) async fn bind_retry(addr: &str) -> std::io::Result<TcpListener> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        match TcpListener::bind(addr).await {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            result => return result,
         }
     }
 }
@@ -368,22 +382,19 @@ where
         _ => anyhow::bail!("no login message"),
     };
     let label = crate::core::viewer_label(&login, &auth, &peer);
-    let decision = match crate::core::quick_decision(&login, &auth, &label) {
-        Some(d) => d,
-        None => {
+    let decision = match crate::core::pre_decision(&login, &auth, &label, &peer, true) {
+        crate::core::Pre::Decided(d) => d,
+        crate::core::Pre::Ask(req) => {
             write_packet_secure(&mut wr, &mut tx, &Packet::WaitingForApproval).await?;
-            let who = if label == peer { peer.clone() } else { format!("{label} ({peer})") };
-            tokio::task::spawn_blocking(move || approval::ask(&who, true))
-                .await
-                .unwrap_or(approval::Decision::Deny)
+            tokio::task::spawn_blocking(move || approval::ask(&req)).await.unwrap_or(approval::Decision::Deny)
         }
     };
-    if decision == approval::Decision::Deny {
+    let issued = crate::core::apply(decision, &login, &auth, &label);
+    if !decision.allowed() {
         write_packet_secure(&mut wr, &mut tx, &Packet::Reject("the remote computer denied the connection".into())).await?;
         auth::session_ended(login.used_password(), false);
         anyhow::bail!("denied by operator");
     }
-    let issued = (decision == approval::Decision::Always).then(|| approval::trust_device(&label));
     let trusted = matches!(login, crate::core::Login::Device { .. });
     let handle = crate::sessions::register(&label, &peer, crate::sessions::Via::App, trusted, login.used_password());
     handle.set_can_switch(auth.can_switch);
@@ -632,6 +643,24 @@ pub(crate) async fn admin_request(request: &serde_json::Value) -> Result<serde_j
         Ok(_) => anyhow::bail!("unexpected answer from the server"),
         // Servers before v0.13 close the link on a message they don't know.
         Err(_) => anyhow::bail!("this server cannot manage access keys yet (it needs an update)"),
+    }
+}
+
+/// Free access key by email (RvMsg::Signup): {cmd:"code", email} then {cmd:"verify", email, code, name}.
+pub(crate) async fn signup_request(request: &serde_json::Value) -> Result<serde_json::Value> {
+    use remote_friend_common::io::{read_rv, write_rv};
+    use remote_friend_common::RvMsg;
+    let target = rv_target().context("no server is set (Settings → Server)")?;
+    let (mut rd, mut wr) = rv_connect(&target).await?;
+    write_rv(&mut wr, &RvMsg::Signup { request: request.to_string() }).await?;
+    let answer = tokio::time::timeout(Duration::from_secs(30), read_rv(&mut rd))
+        .await
+        .context("the server did not answer")?;
+    match answer {
+        Ok(RvMsg::SignupReply(json)) => Ok(serde_json::from_str(&json)?),
+        Ok(_) => anyhow::bail!("unexpected answer from the server"),
+        // Servers before v0.14 close the link on a message they don't know.
+        Err(_) => anyhow::bail!("this server does not offer free keys yet"),
     }
 }
 

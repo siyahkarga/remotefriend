@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::approval::Decision;
+use crate::approval::{Decision, Request, Trust};
 use crate::audio::AudioPacket;
 use crate::sessions::{SessionHandle, Transfer};
 use crate::web::Flow;
@@ -18,8 +18,8 @@ pub(crate) const MAX_TEXT: usize = 400 * 1024;
 /// How the viewer proved itself in the encrypted handshake.
 pub(crate) enum Login {
     Password,
-    /// A trusted device (or a one-time grant for switching sides).
-    Device { id: String, label: String, temporary: bool },
+    /// A known device (or a one-time grant for switching sides).
+    Device { id: String, label: String, temporary: bool, trust: Trust },
 }
 
 impl Login {
@@ -28,7 +28,7 @@ impl Login {
     }
 }
 
-/// The viewer's first encrypted message: {t:"auth", device?, resume?, name?, switch?}.
+/// The viewer's first encrypted message: {t:"auth", device?, resume?, name?, switch?, vid?}.
 #[derive(Default)]
 pub(crate) struct AuthMsg {
     /// Device token from before v0.9, sent along with the password.
@@ -38,6 +38,8 @@ pub(crate) struct AuthMsg {
     pub name: String,
     /// A RemoteFriend app that can switch sides.
     pub can_switch: bool,
+    /// Random id of the viewer's install (app or browser), so it can be blocked (v0.14+).
+    pub vid: String,
 }
 
 impl AuthMsg {
@@ -54,6 +56,7 @@ impl AuthMsg {
             resume: field("resume", 64),
             name: field("name", 60),
             can_switch: v.get("switch").and_then(|x| x.as_bool()).unwrap_or(false),
+            vid: Some(field("vid", 64)).filter(|s| s.len() >= 16 && s.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_default(),
         })
     }
 }
@@ -69,30 +72,91 @@ pub(crate) fn viewer_label(login: &Login, auth: &AuthMsg, peer: &str) -> String 
     }
 }
 
-/// Approval without asking anyone, when possible: trusted device, resumed session, or a
-/// device token from before v0.9 presented together with the password.
-pub(crate) fn quick_decision(login: &Login, auth: &AuthMsg, label: &str) -> Option<Decision> {
-    match login {
-        Login::Device { id, temporary, .. } => {
-            if !*temporary {
-                crate::approval::device_used(id);
-            }
-            crate::status::notice(if *temporary {
-                format!("{label}: connected (switched sides)")
-            } else {
-                format!("{label}: trusted device connected")
-            });
-            Some(Decision::Once)
+/// What happens with a login before anyone is asked.
+pub(crate) enum Pre {
+    /// Decided without a question (own device, resumed session, blocked device).
+    Decided(Decision),
+    /// The operator has to answer this.
+    Ask(Request),
+}
+
+/// Readable "how" for a request: "RemoteFriend app · internet · 83.135.241.220".
+pub(crate) fn describe_peer(peer: &str, app: bool) -> String {
+    let internet = peer.contains("(via internet)");
+    let addr = peer.trim_end_matches(" (via internet)").trim_start_matches("app ").trim();
+    // "1.2.3.4:5678" -> "1.2.3.4" (the port means nothing to people); IPv6 stays whole.
+    let addr = match addr.rsplit_once(':') {
+        Some((ip, port)) if !ip.contains(':') && port.chars().all(|c| c.is_ascii_digit()) => ip,
+        _ => addr,
+    };
+    let kind = if app { "RemoteFriend app" } else { "web browser" };
+    let path = if internet { "internet" } else { "local network" };
+    if addr.is_empty() { format!("{kind} · {path}") } else { format!("{kind} · {path} · {addr}") }
+}
+
+/// Decide without asking when possible: blocked devices are refused, own devices and resumed
+/// sessions are let in; strangers and trusted devices are asked.
+pub(crate) fn pre_decision(login: &Login, auth: &AuthMsg, label: &str, peer: &str, app: bool) -> Pre {
+    let device_id = match login {
+        Login::Device { id, temporary: false, .. } => id.as_str(),
+        _ => "",
+    };
+    if crate::approval::is_blocked(&auth.vid, device_id) {
+        crate::status::notice(format!("{label}: blocked device refused"));
+        return Pre::Decided(Decision::Deny);
+    }
+    if crate::approval::consume_resume(&auth.resume) {
+        crate::status::notice(format!("{label}: session resumed"));
+        return Pre::Decided(Decision::Once);
+    }
+    let trust = match login {
+        Login::Device { temporary: true, .. } => {
+            crate::status::notice(format!("{label}: connected (switched sides)"));
+            return Pre::Decided(Decision::Once);
         }
-        Login::Password if crate::approval::consume_resume(&auth.resume) => {
-            crate::status::notice(format!("{label}: session resumed"));
-            Some(Decision::Once)
+        Login::Device { id, trust, .. } => {
+            crate::approval::device_used(id);
+            Some(*trust)
         }
-        Login::Password if crate::approval::is_trusted(&auth.device) => {
-            crate::status::notice(format!("{label}: trusted device connected"));
-            Some(Decision::Once)
+        Login::Password => crate::approval::legacy_trust(&auth.device),
+    };
+    if trust == Some(Trust::Mine) {
+        crate::status::notice(format!("{label}: your device connected"));
+        return Pre::Decided(Decision::Once);
+    }
+    Pre::Ask(Request {
+        name: label.to_string(),
+        detail: describe_peer(peer, app),
+        trusted: trust.is_some(),
+        can_block: !auth.vid.is_empty() || !device_id.is_empty(),
+    })
+}
+
+/// A device token handed to the viewer: it logs in with it from now on.
+pub(crate) struct Issued {
+    pub token: String,
+    /// The operator is still asked when it connects.
+    pub ask: bool,
+}
+
+/// Carry out the operator's answer: remember or block the device. Returns the token for a
+/// newly remembered device.
+pub(crate) fn apply(decision: Decision, login: &Login, auth: &AuthMsg, label: &str) -> Option<Issued> {
+    let device_id = match login {
+        Login::Device { id, temporary: false, .. } => id.as_str(),
+        _ => "",
+    };
+    match decision {
+        Decision::Block => {
+            crate::approval::block(label, &auth.vid, device_id);
+            None
         }
-        Login::Password => None,
+        // A device that already logs in with its key keeps it.
+        Decision::Trust | Decision::Mine if device_id.is_empty() => {
+            let trust = if decision == Decision::Mine { Trust::Mine } else { Trust::Trusted };
+            Some(Issued { token: crate::approval::trust_device(label, &auth.vid, trust), ask: trust == Trust::Trusted })
+        }
+        _ => None,
     }
 }
 
@@ -189,6 +253,8 @@ pub(crate) struct Core {
     /// Lowest-priority lane for files this computer sends (downloads).
     file_lane: Option<mpsc::Sender<FileChunk>>,
     downloads: std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+    /// A "show another screen" question is open (one at a time).
+    screen_asking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Core {
@@ -208,6 +274,7 @@ impl Core {
             direct,
             file_lane: None,
             downloads: Default::default(),
+            screen_asking: Default::default(),
         }
     }
 
@@ -372,11 +439,8 @@ impl Core {
             }
             Some("bye") => self.handle.bye = true,
             Some("monitor") => {
-                // Changing the shared screen is a control action.
-                if self.handle.control_allowed() {
-                    if let Some(i) = v.get("i").and_then(|x| x.as_u64()) {
-                        crate::video::select_monitor(i as usize);
-                    }
+                if let Some(i) = v.get("i").and_then(|x| x.as_u64()) {
+                    self.on_monitor_request(i as usize);
                 }
             }
             Some("monitors") => self.send(crate::video::monitors_json()),
@@ -540,6 +604,48 @@ impl Core {
         });
     }
 
+    /// The viewer wants another screen: {t:"monitor", i}. Screens open to viewers switch at once
+    /// (for viewers with mouse & keyboard); any other screen needs this computer's user's OK.
+    fn on_monitor_request(&mut self, index: usize) {
+        use std::sync::atomic::Ordering;
+        let Some(m) = crate::video::monitors().into_iter().find(|m| m.index == index) else { return };
+        if index == crate::video::current_monitor() {
+            return;
+        }
+        if crate::video::viewer_may_switch(index) && self.handle.control_allowed() {
+            crate::video::select_monitor(index);
+            return;
+        }
+        if self.screen_asking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let screen = if m.name == format!("Screen {}", index + 1) {
+            m.name
+        } else {
+            format!("Screen {} ({})", index + 1, m.name)
+        };
+        crate::status::notice(format!("{} asks to see {screen}", self.label));
+        let (label, ctrl, asking) = (self.label.clone(), self.ctrl.clone(), self.screen_asking.clone());
+        tokio::spawn(async move {
+            let yes = tokio::task::spawn_blocking(move || {
+                matches!(
+                    crate::status::ask_ui(crate::status::PromptKind::ShowScreen { label, screen }, Duration::from_secs(30)),
+                    Some(crate::status::Answer::Screen(true))
+                )
+            })
+            .await
+            .unwrap_or(false);
+            if yes {
+                crate::video::select_monitor(index);
+            } else {
+                let _ = ctrl.send(serde_json::json!({"t": "monitor_no", "i": index}).to_string()).await;
+                // No new question right after a "no": asking again and again is not possible.
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+            asking.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// The viewer (a RemoteFriend app) offers its own computer: {t:"switch", id, token, reply}.
     /// `reply` = it answers our request, otherwise this computer's user is asked first.
     fn on_switch(&mut self, v: &serde_json::Value) {
@@ -596,4 +702,25 @@ fn num_u32(v: &serde_json::Value, k: &str) -> u32 {
 
 fn num_i32(v: &serde_json::Value, k: &str) -> i32 {
     v.get(k).and_then(|n| n.as_f64()).unwrap_or(0.0).clamp(-1000.0, 1000.0) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_describe_how_the_viewer_connects() {
+        assert_eq!(describe_peer("app 83.135.241.220:5481 (via internet)", true), "RemoteFriend app · internet · 83.135.241.220");
+        assert_eq!(describe_peer("83.135.241.223 (via internet)", false), "web browser · internet · 83.135.241.223");
+        assert_eq!(describe_peer("192.168.1.20:40000", true), "RemoteFriend app · local network · 192.168.1.20");
+        assert_eq!(describe_peer("fe80::1", false), "web browser · local network · fe80::1");
+    }
+
+    #[test]
+    fn install_ids_must_look_random() {
+        let parse = |vid: &str| AuthMsg::parse(&serde_json::json!({"t": "auth", "vid": vid}).to_string()).unwrap().vid;
+        assert_eq!(parse("0123456789abcdef0123456789abcdef"), "0123456789abcdef0123456789abcdef");
+        assert_eq!(parse("short"), "");
+        assert_eq!(parse("0123456789abcdef'; drop table"), "");
+    }
 }

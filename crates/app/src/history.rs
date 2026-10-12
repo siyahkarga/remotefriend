@@ -59,6 +59,20 @@ pub fn set_device(recents: &mut [RecentEntry], addr: &str, token: &str) {
     }
 }
 
+/// Random id of this install, sent when connecting so a computer's owner can block it.
+pub fn viewer_id() -> String {
+    let p = config_dir().join("viewer_id");
+    if let Ok(id) = std::fs::read_to_string(&p) {
+        let id = id.trim();
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return id.to_string();
+        }
+    }
+    let id = remote_friend_common::new_secret_hex()[..32].to_string();
+    let _ = remote_friend_common::identity::write_private(&p, id.as_bytes());
+    id
+}
+
 pub fn config_dir() -> PathBuf {
     let base = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))

@@ -4,17 +4,15 @@
 //! typed for them), because the server keeps only their hashes and could never show them again.
 //! The email address is used only to address the email draft; it never goes to the server.
 
-use egui::{Color32, RichText};
+use egui::RichText;
 use serde_json::{json, Value};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::ui_home::MUTED;
-use crate::{ERR, OK, WARN};
+use crate::ui_kit::{self as kit, ERR, OK, WARN};
 
 #[derive(Default)]
 pub(crate) struct KeysUi {
-    pub(crate) open: bool,
     pending: Option<mpsc::Receiver<Result<Value, String>>>,
     loaded: bool,
     keys: Vec<Value>,
@@ -31,7 +29,6 @@ pub(crate) struct KeysUi {
 
 impl KeysUi {
     pub(crate) fn show(&mut self) {
-        self.open = true;
         self.error = None;
         self.created = None;
         self.confirm_delete = None;
@@ -80,65 +77,51 @@ impl KeysUi {
         }
     }
 
-    pub(crate) fn window(&mut self, ctx: &egui::Context) {
+    /// The Access keys page (Settings → Server shows the way here for the owner).
+    pub(crate) fn page(&mut self, ui: &mut egui::Ui) {
         self.poll();
         if self.pending.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(150));
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
-        let mut open = self.open;
-        egui::Window::new("Access keys")
-            .collapsible(false)
-            .resizable(true)
-            .default_size([620.0, 460.0])
-            .open(&mut open)
-            .show(ctx, |ui| self.contents(ui));
-        self.open = open;
-    }
-
-    fn contents(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            RichText::new("A key makes someone's computer reachable through your server. Connecting to a computer never needs one.")
-                .color(MUTED),
-        );
         if let Some(e) = &self.error {
-            ui.add_space(4.0);
-            ui.colored_label(ERR, e);
+            kit::callout(ui, ERR, |ui| {
+                ui.label(RichText::new(e).color(kit::TEXT));
+            });
+            ui.add_space(10.0);
         }
         if let Some((name, key, email)) = self.created.clone() {
-            ui.add_space(6.0);
-            egui::Frame::new()
-                .fill(OK.gamma_multiply(0.12))
-                .stroke(egui::Stroke::new(1.0_f32, OK.gamma_multiply(0.7)))
-                .corner_radius(10.0)
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(format!("Key for {name}")).strong());
-                    ui.label(RichText::new(&key).monospace().size(17.0).strong());
-                    if !email.is_empty() {
-                        ui.label(RichText::new(format!("An email to {email} was opened in your email program; check it and press Send.")).size(12.0).color(MUTED));
+            kit::callout(ui, OK, |ui| {
+                ui.label(RichText::new(format!("Key for {name}")).color(kit::TEXT).strong());
+                ui.label(RichText::new(&key).monospace().size(17.0).color(kit::TEXT));
+                if !email.is_empty() {
+                    kit::note(ui, format!("An email to {email} was opened in your email program; check it and press Send."));
+                }
+                ui.horizontal(|ui| {
+                    share_buttons(ui, &name, &key, &email);
+                    if ui.add(kit::quiet("Done")).clicked() {
+                        self.created = None;
                     }
-                    ui.horizontal(|ui| {
-                        share_buttons(ui, &name, &key, &email);
-                        if ui.button("Done").clicked() {
-                            self.created = None;
-                        }
-                    });
                 });
+            });
+            ui.add_space(10.0);
         }
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("New key").strong());
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("Name, e.g. Ali").desired_width(130.0));
-            ui.add(egui::TextEdit::singleline(&mut self.email).hint_text("Email (optional)").desired_width(170.0))
-                .on_hover_text("Opens an email to this address with the key; kept only on this computer");
-            ui.add(egui::TextEdit::singleline(&mut self.computers).hint_text("Computers: any").desired_width(115.0))
-                .on_hover_text("How many computers may use this key (empty: no limit)");
-            ui.add(egui::TextEdit::singleline(&mut self.days).hint_text("Days: forever").desired_width(105.0))
-                .on_hover_text("How many days the key works (empty: no expiry)");
+        kit::titled_card(ui, "New key", "Name is required; the rest is optional.", |ui| {
+            // Four fields in a row: the gaps and each field's inner margin (2 × 10) come off.
+            let w = ((ui.available_width() - 3.0 * 10.0) / 4.0 - 20.0).max(80.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add(kit::input(&mut self.name, "Name, e.g. Ali").desired_width(w));
+                ui.add(kit::input(&mut self.email, "Email").desired_width(w))
+                    .on_hover_text("Opens an email to this address with the key; kept only on this computer");
+                ui.add(kit::input(&mut self.computers, "Computers: any").desired_width(w))
+                    .on_hover_text("How many computers may use this key (empty: no limit)");
+                ui.add(kit::input(&mut self.days, "Days: forever").desired_width(w))
+                    .on_hover_text("How many days the key works (empty: no expiry)");
+            });
+            ui.add_space(6.0);
             let ready = !self.name.trim().is_empty() && self.pending.is_none();
-            if ui.add_enabled(ready, egui::Button::new("Create")).clicked() {
+            if ui.add_enabled(ready, kit::primary("Create key")).clicked() {
                 match (number(&self.computers), number(&self.days)) {
                     _ if !email_ok(&self.email) => self.error = Some("That does not look like an email address.".into()),
                     (Ok(computers), Ok(days)) => {
@@ -149,98 +132,99 @@ impl KeysUi {
                 }
             }
         });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Keys").strong());
-            if self.pending.is_some() {
-                ui.spinner();
-            } else if ui.small_button("Refresh").clicked() {
-                self.send(json!({ "cmd": "list" }));
-            }
-        });
-        if self.loaded && self.keys.is_empty() {
-            ui.label(RichText::new("No keys yet").color(MUTED));
-        }
+        ui.add_space(12.0);
 
         let mut request = None;
-        egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-            egui::Grid::new("access_keys").num_columns(5).striped(true).spacing([14.0, 8.0]).show(ui, |ui| {
-                if !self.keys.is_empty() {
-                    for title in ["Name", "Computers", "Valid until", "Status", ""] {
-                        ui.label(RichText::new(title).size(12.0).color(MUTED));
+        kit::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Keys").size(16.0).color(kit::TEXT).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.pending.is_some() {
+                        ui.spinner();
+                    } else if ui.add(kit::quiet("Refresh")).clicked() {
+                        self.send(json!({ "cmd": "list" }));
                     }
-                    ui.end_row();
+                });
+            });
+            ui.add_space(4.0);
+            if self.loaded && self.keys.is_empty() {
+                kit::empty(ui, "No keys yet.");
+            }
+            for k in self.keys.clone() {
+                let id = k["id"].as_str().unwrap_or_default().to_string();
+                let name = k["name"].as_str().unwrap_or_default().to_string();
+                let used = k["computers"].as_u64().unwrap_or(0);
+                let email = self.issued.get(&id).and_then(|v| v["email"].as_str()).unwrap_or_default().to_string();
+                let computers = match k["max_computers"].as_u64() {
+                    Some(max) => format!("{used} of {max} computers"),
+                    None => format!("{used} computer(s)"),
+                };
+                let until = match k["expires"].as_str() {
+                    Some(d) => format!("until {d}"),
+                    None => "no expiry".to_string(),
+                };
+                let mut detail = vec![computers, until];
+                if !email.is_empty() {
+                    detail.insert(0, email.clone());
                 }
-                for k in self.keys.clone() {
-                    let id = k["id"].as_str().unwrap_or_default().to_string();
-                    let name = k["name"].as_str().unwrap_or_default().to_string();
-                    let used = k["computers"].as_u64().unwrap_or(0);
-                    let email = self.issued.get(&id).and_then(|v| v["email"].as_str()).unwrap_or_default().to_string();
-                    ui.vertical(|ui| {
-                        ui.label(&name);
-                        if !email.is_empty() {
-                            ui.label(RichText::new(&email).size(11.0).color(MUTED));
-                        }
-                    });
-                    ui.label(match k["max_computers"].as_u64() {
-                        Some(max) => format!("{used} of {max}"),
-                        None => used.to_string(),
-                    });
-                    ui.label(k["expires"].as_str().unwrap_or("—"));
-                    let status = k["status"].as_str().unwrap_or_default();
-                    let color: Color32 = match status {
-                        "active" => OK,
-                        "revoked" => ERR,
-                        _ => WARN,
-                    };
-                    ui.colored_label(color, status);
-                    ui.horizontal(|ui| {
-                        if let Some(key) = self.issued.get(&id).and_then(|v| v["key"].as_str()) {
+                let status = k["status"].as_str().unwrap_or_default().to_string();
+                let color = match status.as_str() {
+                    "active" => OK,
+                    "revoked" => ERR,
+                    _ => WARN,
+                };
+                let key = self.issued.get(&id).and_then(|v| v["key"].as_str()).map(str::to_string);
+                kit::row(
+                    ui,
+                    |ui| {
+                        kit::row_text(ui, &name, &detail.join(" · "));
+                    },
+                    |ui| {
+                        ui.menu_button(RichText::new("⋯").size(16.0), |ui| {
+                            if status == "revoked" {
+                                if ui.button("Restore").clicked() {
+                                    request = Some(json!({ "cmd": "restore", "id": id }));
+                                    ui.close();
+                                }
+                            } else if ui.button("Revoke").on_hover_text("Its computers go offline within seconds").clicked() {
+                                request = Some(json!({ "cmd": "revoke", "id": id }));
+                                ui.close();
+                            }
+                            if self.confirm_delete.as_deref() == Some(id.as_str()) {
+                                if ui.button(RichText::new("Delete for good").color(ERR)).clicked() {
+                                    request = Some(json!({ "cmd": "delete", "id": id }));
+                                    self.confirm_delete = None;
+                                    ui.close();
+                                }
+                            } else if ui.button("Delete…").clicked() {
+                                self.confirm_delete = Some(id.clone());
+                            }
+                        });
+                        if let Some(key) = &key {
                             share_buttons(ui, &name, key, &email);
                         }
-                        if status == "revoked" {
-                            if ui.small_button("Restore").clicked() {
-                                request = Some(json!({ "cmd": "restore", "id": id }));
-                            }
-                        } else if ui.small_button("Revoke").on_hover_text("Its computers go offline within seconds").clicked() {
-                            request = Some(json!({ "cmd": "revoke", "id": id }));
-                        }
-                        if self.confirm_delete.as_deref() == Some(id.as_str()) {
-                            if ui.small_button(RichText::new("Delete for good").color(ERR)).clicked() {
-                                request = Some(json!({ "cmd": "delete", "id": id }));
-                                self.confirm_delete = None;
-                            }
-                        } else if ui.small_button("Delete").clicked() {
-                            self.confirm_delete = Some(id.clone());
-                        }
-                    });
-                    ui.end_row();
-                }
-            });
+                        kit::badge(ui, &status, color);
+                    },
+                );
+            }
+            ui.add_space(4.0);
+            kit::note(ui, "The server keeps only a hash of each key. Keys made here are remembered on this computer so you can copy them again.");
         });
         if let Some(req) = request {
             if self.pending.is_none() {
                 self.send(req);
             }
         }
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("The server keeps only a hash of each key. Keys made here are remembered on this computer so you can copy them again.")
-                .size(12.0)
-                .color(MUTED),
-        );
     }
 }
 
-/// Copy and Email buttons for a key.
+/// Copy and Email buttons for a key (laid out right to left in rows).
 fn share_buttons(ui: &mut egui::Ui, name: &str, key: &str, email: &str) {
-    if ui.small_button("Copy").clicked() {
-        ui.ctx().copy_text(key.to_string());
-    }
-    if ui.small_button("Email…").on_hover_text("Opens your email program with the key and instructions").clicked() {
+    if ui.add(kit::secondary("Email…")).on_hover_text("Opens your email program with the key and instructions").clicked() {
         crate::open_url(&email_url(name, email, key));
+    }
+    if ui.add(kit::secondary("Copy")).clicked() {
+        ui.ctx().copy_text(key.to_string());
     }
 }
 

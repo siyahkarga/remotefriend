@@ -4,6 +4,7 @@ use remote_friend_common::{FileChunk, InputEvent, MouseButton, Packet, RemoteKey
 use std::io::Read as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ui_kit as kit;
 use crate::{history, App};
 use egui::RichText;
 
@@ -17,7 +18,6 @@ impl App {
             (s.texture.take(), s.status.clone(), s.host_w, s.host_h, s.fps)
         };
         self.viewer_events(ctx, &shared);
-        self.files_window(ctx, &shared);
         let (perms, banner, upload, quality, rtt, monitors, monitor, direct, cursor_in_video) = {
             let s = shared.lock().unwrap();
             let banner = s.banner.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 6).map(|(b, _)| b.clone());
@@ -51,120 +51,162 @@ impl App {
             }
         }
 
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let disconnect = egui::Button::new(RichText::new("✖  Disconnect").strong().color(egui::Color32::WHITE))
-                    .fill(crate::ERR)
-                    .min_size(egui::vec2(0.0, 28.0));
-                if ui.add(disconnect).on_hover_text("End the session").clicked() {
-                    self.send_control(serde_json::json!({"t": "bye"}));
-                    self.disconnect();
-                    return;
-                }
-                let rtt = if rtt > 0 { format!("  ·  {rtt} ms") } else { String::new() };
-                ui.label(format!("{status}  ·  {hw}×{hh}  ·  {fps:.0} fps{rtt}"));
-                if direct {
-                    ui.label(RichText::new("Direct").color(crate::OK))
-                        .on_hover_text("Peer-to-peer: the data goes straight between the devices, not through the server");
-                } else {
-                    ui.label(RichText::new("Via server").weak())
-                        .on_hover_text("End-to-end encrypted through the server (a direct path was not possible or is still being tried)");
-                }
-                ui.separator();
-                let sound_label = if self.sound_on { "🔊 Sound on" } else { "🔇 Sound off" };
-                if ui
-                    .add_enabled(perms.sound, egui::Button::new(sound_label))
-                    .on_hover_text("Play the remote computer's sound here")
-                    .clicked()
-                {
-                    self.sound_on = !self.sound_on;
-                    shared.lock().unwrap().sound = self.sound_on;
-                    self.send_control(serde_json::json!({"t": "audio", "on": self.sound_on}));
-                }
-                ui.add_enabled_ui(perms.control, |ui| {
-                    ui.menu_button("⌨ Keys", |ui| self.keys_menu(ui));
-                });
-                ui.menu_button(format!("Quality: {}", quality_label(&quality)), |ui| {
-                    for (p, label) in [("fast", "Fast (smooth on slow networks)"), ("balanced", "Balanced"), ("sharp", "Sharp (more data)")] {
-                        if ui.selectable_label(quality == p, label).clicked() {
-                            self.send_control(serde_json::json!({"t": "quality", "p": p}));
-                            ui.close();
-                        }
+        let title = if self.current_name.is_empty() { remote_friend_common::format_id(&self.current_addr) } else { self.current_name.clone() };
+        egui::TopBottomPanel::top("bar")
+            .frame(egui::Frame::new().fill(kit::SIDEBAR).inner_margin(egui::Margin::symmetric(12, 8)))
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let disconnect = kit::danger_solid("✖  Disconnect");
+                    if ui.add(disconnect).on_hover_text("End the session").clicked() {
+                        self.send_control(serde_json::json!({"t": "bye"}));
+                        self.disconnect();
+                        return;
                     }
-                });
-                if monitors.len() > 1 {
-                    ui.add_enabled_ui(perms.control, |ui| {
-                        ui.menu_button(format!("🖥 Screen {}", monitor + 1), |ui| {
-                            for (i, label) in &monitors {
-                                if ui.selectable_label(*i == monitor, label).clicked() {
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(RichText::new(&title).color(kit::TEXT).strong());
+                        let rtt = if rtt > 0 { format!(" · {rtt} ms") } else { String::new() };
+                        ui.label(RichText::new(format!("{status} · {hw}×{hh} · {fps:.0} fps{rtt}")).size(11.5).color(kit::MUTED));
+                    });
+                    if direct {
+                        kit::badge(ui, "direct", kit::OK)
+                            .on_hover_text("Peer-to-peer: the data goes straight between the devices, not through the server");
+                    } else {
+                        kit::badge(ui, "via server", kit::MUTED).on_hover_text(
+                            "End-to-end encrypted through the server (a direct path was not possible or is still being tried)",
+                        );
+                    }
+                    ui.add_space(10.0);
+                    if monitors.len() > 1 {
+                        ui.menu_button(format!("🖥 Screen {} of {}", monitor + 1, monitors.len()), |ui| {
+                            for (i, label, open) in &monitors {
+                                let current = *i == monitor;
+                                let direct_switch = *open && perms.control;
+                                let text = if current {
+                                    format!("✔ {label}")
+                                } else if direct_switch {
+                                    label.clone()
+                                } else {
+                                    format!("{label} — ask")
+                                };
+                                let tip = if current {
+                                    "Shown now"
+                                } else if direct_switch {
+                                    "Switch to this screen"
+                                } else {
+                                    "The computer's user is asked first"
+                                };
+                                if ui.selectable_label(current, text).on_hover_text(tip).clicked() && !current {
                                     self.send_control(serde_json::json!({"t": "monitor", "i": i}));
+                                    if !direct_switch {
+                                        shared.lock().unwrap().banner(format!("Asked to show screen {}…", i + 1));
+                                    }
                                     ui.close();
                                 }
                             }
                         });
+                    }
+                    ui.add_enabled_ui(perms.control, |ui| {
+                        ui.menu_button("⌨ Keys", |ui| self.keys_menu(ui));
                     });
-                }
-                let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                if ui.button(if full { "⛶ Exit full screen" } else { "⛶ Full screen" }).clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
-                }
-                if ui
-                    .add_enabled(perms.files, egui::Button::new("📁 Files"))
-                    .on_hover_text("Send files to the remote computer, or browse and download its files")
-                    .clicked()
-                {
-                    self.files_open = !self.files_open;
-                    if self.files_open && shared.lock().unwrap().remote_dir.is_none() {
-                        self.send_control(serde_json::json!({"t": "ls", "path": ""}));
-                    }
-                }
-                let me = remote_friend_host::snapshot();
-                if me.online
-                    && !self.switch_pending
-                    && ui
-                        .button("Switch sides")
-                        .on_hover_text("Let the remote computer control this one instead (they are asked first)")
+                    ui.menu_button(format!("Quality: {}", quality_label(&quality)), |ui| {
+                        for (p, label) in [("fast", "Fast (smooth on slow networks)"), ("balanced", "Balanced"), ("sharp", "Sharp (more data)")] {
+                            if ui.selectable_label(quality == p, label).clicked() {
+                                self.send_control(serde_json::json!({"t": "quality", "p": p}));
+                                ui.close();
+                            }
+                        }
+                    });
+                    let sound_label = if self.sound_on { "🔊" } else { "🔇" };
+                    if ui
+                        .add_enabled(perms.sound, kit::secondary(sound_label))
+                        .on_hover_text(if self.sound_on { "Sound on (click to mute)" } else { "Sound off (click to play)" })
                         .clicked()
-                {
-                    self.offer_switch(false);
-                }
-                if let Some((name, got, total)) = &upload {
-                    let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
-                    ui.add(egui::ProgressBar::new(frac).desired_width(180.0).show_percentage().text(format!("Sending {name}")));
-                    if ui.small_button("Cancel").clicked() {
-                        shared.lock().unwrap().cancel_upload = true;
+                    {
+                        self.sound_on = !self.sound_on;
+                        shared.lock().unwrap().sound = self.sound_on;
+                        self.send_control(serde_json::json!({"t": "audio", "on": self.sound_on}));
                     }
-                }
+                    if ui
+                        .add_enabled(perms.files, kit::secondary("📁 Files"))
+                        .on_hover_text("Send files to the remote computer, or browse and download its files")
+                        .clicked()
+                    {
+                        self.files_open = !self.files_open;
+                        if self.files_open && shared.lock().unwrap().remote_dir.is_none() {
+                            self.send_control(serde_json::json!({"t": "ls", "path": ""}));
+                        }
+                    }
+                    let me = remote_friend_host::snapshot();
+                    if me.online
+                        && !self.switch_pending
+                        && ui
+                            .add(kit::secondary("⇄ Switch sides"))
+                            .on_hover_text("Let the remote computer control this one instead (they are asked first)")
+                            .clicked()
+                    {
+                        self.offer_switch(false);
+                    }
+                    let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                    if ui.add(kit::secondary("⛶")).on_hover_text(if full { "Exit full screen" } else { "Full screen" }).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+                    }
+                    if let Some((name, got, total)) = &upload {
+                        let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
+                        ui.add(egui::ProgressBar::new(frac).desired_width(180.0).show_percentage().text(format!("Sending {name}")));
+                        if ui.add(kit::quiet("Cancel")).clicked() {
+                            shared.lock().unwrap().cancel_upload = true;
+                        }
+                    }
+                });
             });
-            if !perms.control {
-                ui.colored_label(crate::WARN, "View only: the computer's user turned off your mouse and keyboard.");
-            }
-            if let Some(b) = &banner {
-                ui.label(RichText::new(b).color(crate::OK));
-            }
-        });
+
+        // Short messages float over the picture instead of moving it.
+        let notice = if !perms.control {
+            Some(("View only: the computer's user turned off your mouse and keyboard.".to_string(), kit::WARN))
+        } else {
+            banner.map(|b| (b, kit::OK))
+        };
+        if let Some((text, color)) = notice {
+            egui::Area::new(egui::Id::new("viewer_notice"))
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(kit::tint(color, 0.18))
+                        .stroke(egui::Stroke::new(1.0_f32, kit::tint(color, 0.6)))
+                        .corner_radius(kit::R_ROW)
+                        .inner_margin(egui::Margin::symmetric(14, 8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(text).color(kit::TEXT));
+                        });
+                });
+        }
+
+        self.files_window(ctx, &shared);
 
         // Trust on first use: an unknown server is confirmed by its fingerprint once.
         if let Some((srv, fp)) = shared.lock().unwrap().tofu_pending.clone() {
-            egui::Window::new("First connection to this server")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!("Server: {srv}"));
-                    ui.add_space(4.0);
-                    ui.monospace(&fp);
-                    ui.add_space(4.0);
-                    ui.small("This is normal the first time. It must match the fingerprint shown at the end of the server setup; it will be remembered.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Trust and connect").clicked() {
-                            shared.lock().unwrap().tofu_answer = Some(true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            shared.lock().unwrap().tofu_answer = Some(false);
-                        }
-                    });
+            crate::ui_dialogs::dialog("tofu").show(ctx, |ui| {
+                ui.set_width(460.0);
+                crate::ui_dialogs::heading(ui, "🔒", kit::WARN, "First connection to this server", |ui| {
+                    kit::line(ui, RichText::new(format!("Server: {srv}")).color(kit::TEXT));
+                    ui.add(egui::Label::new(RichText::new(&fp).monospace().size(12.0).color(kit::TEXT)).wrap());
+                    kit::note(ui, "This is normal the first time. It must match the fingerprint shown at the end of the server setup; it will be remembered.");
                 });
+                ui.add_space(14.0);
+                kit::split(ui, 32.0, |_| {}, |ui| {
+                    if ui.add(kit::primary("Trust and connect")).clicked() {
+                        shared.lock().unwrap().tofu_answer = Some(true);
+                    }
+                    if ui.add(kit::secondary("Cancel")).clicked() {
+                        shared.lock().unwrap().tofu_answer = Some(false);
+                    }
+                });
+            });
         }
 
         let failed = shared.lock().unwrap().failed;
@@ -338,17 +380,28 @@ impl App {
             (s.remote_dir.clone(), s.upload.clone(), s.download.clone(), s.downloaded.clone())
         };
         let mut open = true;
-        egui::Window::new("Files")
-            .open(&mut open)
-            .default_size([520.0, 440.0])
+        egui::SidePanel::right("files")
+            .default_width(360.0)
+            .min_width(280.0)
+            .frame(egui::Frame::new().fill(kit::SURFACE).inner_margin(14))
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(upload.is_none(), egui::Button::new("⬆ Send a file to the remote computer…")).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.send_file(path);
+                kit::split(
+                    ui,
+                    30.0,
+                    |ui| {
+                        ui.label(RichText::new("Files").size(16.0).color(kit::TEXT).strong());
+                    },
+                    |ui| {
+                        if kit::icon_button(ui, "✖", "Close").clicked() {
+                            open = false;
                         }
+                    },
+                );
+                if kit::wide(ui, kit::primary("⬆  Send a file…"), 34.0).clicked() && upload.is_none() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        self.send_file(path);
                     }
-                });
+                }
                 if let Some((name, got, total)) = &upload {
                     ui.horizontal(|ui| {
                         let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
@@ -358,9 +411,8 @@ impl App {
                         }
                     });
                 }
-                ui.small(format!("Sent files are saved in the remote computer's Downloads/RemoteFriend folder."));
-                ui.separator();
-                ui.label(RichText::new("On the remote computer").strong());
+                kit::note(ui, "Sent files are saved in the remote computer's Downloads/RemoteFriend folder.");
+                kit::section_label(ui, "ON THE REMOTE COMPUTER");
                 let Some(dir) = dir else {
                     ui.spinner();
                     return;
@@ -377,7 +429,7 @@ impl App {
                     ui.label(RichText::new(if dir.path.is_empty() { "This PC" } else { &dir.path }).monospace());
                 });
                 if let Some(e) = &dir.error {
-                    ui.colored_label(crate::WARN, e);
+                    kit::dot(ui, kit::WARN, e.clone());
                 }
                 if let Some(d) = &download {
                     ui.horizontal(|ui| {
@@ -449,9 +501,13 @@ impl App {
             )
         };
         // Remember a password that worked; forget one that no longer does.
-        if login_ok && !self.pending_password.is_empty() {
-            let pw = std::mem::take(&mut self.pending_password);
-            history::set_password(&mut self.recents, &self.current_addr, &pw);
+        if login_ok {
+            // The typed password is used up: next time a trusted device logs in with its key.
+            self.pass_field.clear();
+            if !self.pending_password.is_empty() {
+                let pw = std::mem::take(&mut self.pending_password);
+                history::set_password(&mut self.recents, &self.current_addr, &pw);
+            }
         }
         if wrong_pw {
             history::set_password(&mut self.recents, &self.current_addr, "");
@@ -462,6 +518,14 @@ impl App {
         }
         if rejected {
             history::set_device(&mut self.recents, &self.current_addr, "");
+            // The computer forgot this device: try the saved password right away, if any.
+            let addr = self.current_addr.clone();
+            if let Some(pw) = history::password_for(&self.recents, &addr) {
+                self.disconnect();
+                self.pending_password = pw.clone();
+                self.connect_to(addr, pw, None);
+                return;
+            }
             self.login_msg = "That computer no longer trusts this device: enter its password.".into();
         }
         if let Some(text) = clip {
@@ -481,17 +545,18 @@ impl App {
         }
         if self.switch_question {
             let name = if self.current_name.is_empty() { self.current_addr.clone() } else { self.current_name.clone() };
-            egui::Modal::new(egui::Id::new("switch_question")).show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.label(RichText::new("Switch sides?").size(19.0).strong());
-                ui.label(format!("{name} asks to control this computer instead. Your view of {name} closes."));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("Allow").strong().color(egui::Color32::WHITE)).fill(crate::OK)).clicked() {
+            crate::ui_dialogs::dialog("switch_question").show(ctx, |ui| {
+                ui.set_width(440.0);
+                crate::ui_dialogs::heading(ui, "⇄", kit::ACCENT, "Switch sides?", |ui| {
+                    kit::note(ui, format!("{name} asks to control this computer instead. Your view of {name} closes."));
+                });
+                ui.add_space(14.0);
+                kit::split(ui, 32.0, |_| {}, |ui| {
+                    if ui.add(kit::primary("Allow")).clicked() {
                         self.switch_question = false;
                         self.offer_switch(true);
                     }
-                    if ui.button("No").clicked() {
+                    if ui.add(kit::secondary("No")).clicked() {
                         self.switch_question = false;
                         self.send_control(serde_json::json!({"t": "switch_no"}));
                     }

@@ -125,6 +125,16 @@ pub struct HostSettings {
     /// Don't ask blobidea.com for new versions.
     #[serde(default)]
     pub no_update_check: bool,
+    /// Don't install updates by themselves (they are still offered).
+    #[serde(default)]
+    pub no_auto_update: bool,
+    /// The app's welcome screen (sign in with email) was finished or skipped.
+    #[serde(default)]
+    pub welcome_done: bool,
+    /// Screens viewers may switch to by themselves (indexes); empty: all of them. Other
+    /// screens are shown only when this computer's user agrees.
+    #[serde(default)]
+    pub viewer_screens: Vec<usize>,
 }
 
 pub fn load_host_settings() -> HostSettings {

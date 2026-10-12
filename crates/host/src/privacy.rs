@@ -63,6 +63,18 @@ struct Win {
     w: i32,
     h: i32,
     private: bool,
+    /// Left visible at the top of a private window (a browser's tab strip and address bar).
+    keep_top: i32,
+}
+
+/// Browsers whose window is private only because of the open tab's title keep their tab strip
+/// and address bar visible, so a viewer can switch to another tab. Height at 100 % scale.
+const BROWSER_BARS: f32 = 88.0;
+const BROWSERS: &[&str] =
+    &["chrome", "chromium", "firefox", "msedge", "edge", "brave", "opera", "vivaldi", "safari", "librewolf", "waterfox", "zen", "arc"];
+
+fn is_browser(app: &str) -> bool {
+    BROWSERS.iter().any(|b| app.contains(b))
 }
 
 fn cache() -> &'static Mutex<Option<(Instant, Vec<Win>)>> {
@@ -86,11 +98,24 @@ fn with_windows<R>(f: impl FnOnce(&[Win]) -> R) -> R {
                         if ww <= 0 || hh <= 0 {
                             return None;
                         }
-                        let name = format!("{} {}", w.app_name().unwrap_or_default(), w.title().unwrap_or_default()).to_lowercase();
-                        let private = w.pid().is_ok_and(|p| p == own)
-                            || name.contains("remotefriend")
-                            || patterns.iter().any(|p| name.contains(p.as_str()));
-                        Some(Win { x, y, w: ww, h: hh, private })
+                        let app = w.app_name().unwrap_or_default().to_lowercase();
+                        let title = w.title().unwrap_or_default().to_lowercase();
+                        let whole_window = w.pid().is_ok_and(|p| p == own)
+                            || app.contains("remotefriend")
+                            || title.contains("remotefriend")
+                            || patterns.iter().any(|p| app.contains(p.as_str()));
+                        let by_title = patterns.iter().any(|p| title.contains(p.as_str()));
+                        // Only the page of a browser tab is private: its bars stay visible.
+                        let keep_top = if !whole_window && by_title && is_browser(&app) {
+                            #[cfg(windows)]
+                            let dpi = w.current_monitor().and_then(|m| m.scale_factor()).unwrap_or(1.0);
+                            #[cfg(not(windows))]
+                            let dpi = 1.0;
+                            ((BROWSER_BARS * dpi).round() as i32).min(hh / 3)
+                        } else {
+                            0
+                        };
+                        Some(Win { x, y, w: ww, h: hh, private: whole_window || by_title, keep_top })
                     })
                     .collect()
             })
@@ -106,26 +131,47 @@ pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: 
     if full_view() {
         return;
     }
-    let rects: Vec<((i32, i32, i32, i32), bool)> = with_windows(|wins| {
+    let rects: Vec<Rect> = with_windows(|wins| {
         let to_px = |v: i32, origin: i32| ((v - origin) as f32 * scale).round() as i32;
         wins.iter()
-            .map(|w| ((to_px(w.x, mon_x), to_px(w.y, mon_y), to_px(w.x + w.w, mon_x), to_px(w.y + w.h, mon_y)), w.private))
+            .map(|w| Rect {
+                x0: to_px(w.x, mon_x),
+                y0: to_px(w.y, mon_y),
+                x1: to_px(w.x + w.w, mon_x),
+                y1: to_px(w.y + w.h, mon_y),
+                private: w.private,
+                keep_top: (w.keep_top as f32 * scale).round() as i32,
+            })
             .collect()
     });
     paint(rgba, width, height, &rects);
 }
 
-/// Black out the visible parts of the private rectangles; `rects` are (x0, y0, x1, y1) in
-/// image pixels, topmost first.
-fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[((i32, i32, i32, i32), bool)]) {
-    for (i, &((x0, y0, x1, y1), private)) in rects.iter().enumerate() {
+/// A window in image pixels.
+#[derive(Clone, Copy)]
+struct Rect {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    private: bool,
+    /// Rows at the top that stay visible (a browser's bars).
+    keep_top: i32,
+}
+
+/// Black out the visible parts of the private rectangles (topmost first). Whole windows hide
+/// what is behind them, including a browser's visible bars.
+fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[Rect]) {
+    for (i, r) in rects.iter().enumerate() {
+        let Rect { x0, y0, x1, y1, private, keep_top } = *r;
         if !private {
             continue;
         }
-        for y in y0.max(0)..y1.min(height as i32) {
+        for y in (y0 + keep_top).max(0)..y1.min(height as i32) {
             // This row of the window minus the windows in front of it.
             let mut spans = vec![(x0.max(0), x1.min(width as i32))];
-            for &((ax0, ay0, ax1, ay1), _) in &rects[..i] {
+            for a in &rects[..i] {
+                let (ax0, ay0, ax1, ay1) = (a.x0, a.y0, a.x1, a.y1);
                 if y < ay0 || y >= ay1 {
                     continue;
                 }
@@ -154,12 +200,24 @@ mod tests {
         let (w, h) = (100u32, 50u32);
         let mut img = vec![255u8; (w * h * 4) as usize];
         // A normal window (topmost) overlaps the right half of a private window behind it.
-        let rects = [((50, 0, 100, 50), false), ((20, 10, 80, 40), true)];
+        let r = |x0, y0, x1, y1, private| Rect { x0, y0, x1, y1, private, keep_top: 0 };
+        let rects = [r(50, 0, 100, 50, false), r(20, 10, 80, 40, true)];
         paint(&mut img, w, h, &rects);
         let px = |x: u32, y: u32| img[((y * w + x) * 4) as usize];
         assert_eq!(px(30, 20), 24); // private and visible: covered
         assert_eq!(px(60, 20), 255); // behind the normal window: untouched
         assert_eq!(px(10, 20), 255); // outside: untouched
         assert_eq!(px(30, 45), 255);
+    }
+
+    #[test]
+    fn a_private_browser_tab_keeps_its_bars_visible() {
+        let (w, h) = (100u32, 100u32);
+        let mut img = vec![255u8; (w * h * 4) as usize];
+        let rects = [Rect { x0: 0, y0: 0, x1: 100, y1: 100, private: true, keep_top: 20 }];
+        paint(&mut img, w, h, &rects);
+        let px = |x: u32, y: u32| img[((y * w + x) * 4) as usize];
+        assert_eq!(px(50, 10), 255); // tab strip: visible
+        assert_eq!(px(50, 50), 24); // page: covered
     }
 }

@@ -4754,13 +4754,15 @@ dependencies = [
 
 [[package]]
 name = "remotefriend"
-version = "0.13.4"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64",
  "cpal",
  "eframe",
  "egui",
+ "hex",
  "image 0.25.10",
  "objc2-app-kit 0.3.2",
  "openh264",
@@ -4769,8 +4771,10 @@ dependencies = [
  "remote-friend-common",
  "remote-friend-host",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",

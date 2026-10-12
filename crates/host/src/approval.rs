@@ -1,6 +1,13 @@
-//! Connection approval. In the desktop app the UI shows Allow / Always allow / Deny;
-//! on the terminal the operator types A / P / N. A single stdin reader thread is used so
-//! a timed-out question can never "steal" the answer to the next one.
+//! Connection approval and the devices this computer knows.
+//!
+//! Three kinds of viewer: a stranger (password, then a question: Allow / Always allow / Deny),
+//! a trusted device ("Always allow": no password, but the question is still asked every time)
+//! and one of the user's own devices (no password and no question; set up only from the
+//! device list, never from the question). Blocked devices are refused without asking.
+//!
+//! In the desktop app the question is a window; on the terminal the operator types a letter.
+//! A single stdin reader thread is used so a timed-out question can never "steal" the answer
+//! to the next one.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
@@ -41,23 +48,25 @@ fn yes(s: &str) -> bool {
     matches!(s.to_lowercase().as_str(), "y" | "yes" | "a" | "allow")
 }
 
-fn notify_desktop(peer: &str) {
+/// A short system notification, so a request is noticed while the window is in the background.
+fn notify_desktop(req: &Request) {
     // The text ends up on a command line / in AppleScript: strip quotes and backslashes.
-    let peer: String = peer.chars().filter(|c| !matches!(c, '"' | '\\' | '\'' | '`' | '$')).collect();
+    let name: String = req.name.chars().filter(|c| !matches!(c, '"' | '\\' | '\'' | '`' | '$')).collect();
+    let who = if req.trusted { format!("{name} (trusted)") } else { name };
     let msg = if status::ui_prompts() {
-        format!("{peer} wants to connect. Open RemoteFriend to allow or deny.")
+        format!("{who} wants to connect to this computer. Open RemoteFriend to answer.")
     } else {
-        format!("{peer} wants to connect. Answer in the RemoteFriend terminal.")
+        format!("{who} wants to connect to this computer. Answer in the RemoteFriend terminal.")
     };
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("notify-send")
-        .args(["-u", "critical", "-a", "RemoteFriend", "RemoteFriend: connection request", &msg])
+        .args(["-a", "RemoteFriend", "-i", "remotefriend", "Connection request", &msg])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("osascript")
-        .args(["-e", &format!("display notification \"{msg}\" with title \"RemoteFriend\"")])
+        .args(["-e", &format!("display notification \"{msg}\" with title \"Connection request\"")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -69,47 +78,75 @@ fn notify_desktop(peer: &str) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Deny,
+    /// Deny, and refuse this device from now on without asking.
+    Block,
     /// This connection only.
     Once,
-    /// This device may connect from now on without approval and without the password.
-    Always,
+    /// Remember the device: no password from now on, but the operator is still asked.
+    Trust,
+    /// One of the operator's own devices: no password and no question from now on.
+    Mine,
 }
 
-/// Ask the operator about a connection request (the password was already verified).
-/// `can_remember`: the client can store a device token (browser), so "always" is offered.
-pub(crate) fn ask(peer: &str, can_remember: bool) -> Decision {
+impl Decision {
+    pub fn allowed(self) -> bool {
+        matches!(self, Decision::Once | Decision::Trust | Decision::Mine)
+    }
+}
+
+/// Someone who wants to connect (the password or device key was already verified).
+#[derive(Clone, Debug)]
+pub struct Request {
+    /// Device name, e.g. "mizur" or "Chrome on Android".
+    pub name: String,
+    /// How it connects, e.g. "RemoteFriend app · internet · 83.135.241.220".
+    pub detail: String,
+    /// A trusted device: it needed no password, only Allow / Deny are asked.
+    pub trusted: bool,
+    /// The request carries a device identity, so "Block" can recognise it next time.
+    pub can_block: bool,
+}
+
+/// Ask the operator about a connection request.
+pub(crate) fn ask(req: &Request) -> Decision {
+    let who = if req.detail.is_empty() { req.name.clone() } else { format!("{} ({})", req.name, req.detail) };
     if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").map(|v| v == "1").unwrap_or(false) {
-        status::notice(format!("{peer}: accepted automatically (REMOTE_FRIEND_AUTO_ACCEPT=1)"));
+        status::notice(format!("{who}: accepted automatically (REMOTE_FRIEND_AUTO_ACCEPT=1)"));
         return Decision::Once;
     }
-    notify_desktop(peer);
+    notify_desktop(req);
     let decision = if status::ui_prompts() {
-        match status::ask_ui(PromptKind::Connection { peer: peer.to_string(), can_remember }, ASK_TIMEOUT) {
+        match status::ask_ui(PromptKind::Connection(req.clone()), ASK_TIMEOUT) {
+            Some(Answer::Connection(d)) if req.trusted && matches!(d, Decision::Trust | Decision::Mine) => Decision::Once,
+            Some(Answer::Connection(Decision::Block)) if !req.can_block => Decision::Deny,
             Some(Answer::Connection(d)) => d,
             _ => Decision::Deny,
         }
     } else {
-        let options = if can_remember {
-            "A = allow once / P = allow permanently (this device won't be asked again) / N = deny"
+        let options = if req.trusted {
+            "A = allow / N = deny / B = block"
         } else {
-            "A = allow / N = deny"
+            "A = allow once / T = trust (no password next time, still asked) / M = my own device (never asked) / N = deny / B = block"
         };
-        let answer = prompt_line(
-            &format!("*** Connection request: {peer}\n*** {options}  (30 s, default: deny)"),
-            ASK_TIMEOUT,
-        );
+        let kind = if req.trusted { "Trusted device" } else { "Connection request" };
+        let answer = prompt_line(&format!("*** {kind}: {who}\n*** {options}  (30 s, default: deny)"), ASK_TIMEOUT);
         match answer.as_deref().map(|s| s.to_lowercase()) {
-            Some(a) if can_remember && matches!(a.as_str(), "p" | "permanent" | "always") => Decision::Always,
-            Some(a) if yes(&a) || a == "p" => Decision::Once,
+            Some(a) if !req.trusted && matches!(a.as_str(), "t" | "trust") => Decision::Trust,
+            Some(a) if !req.trusted && matches!(a.as_str(), "m" | "mine") => Decision::Mine,
+            Some(a) if req.can_block && matches!(a.as_str(), "b" | "block") => Decision::Block,
+            Some(a) if yes(&a) => Decision::Once,
             _ => Decision::Deny,
         }
     };
     status::notice(format!(
-        "{peer}: {}",
+        "{}: {}",
+        req.name,
         match decision {
             Decision::Deny => "denied",
-            Decision::Once => "allowed (this time)",
-            Decision::Always => "allowed permanently (this device won't be asked again)",
+            Decision::Block => "denied and blocked",
+            Decision::Once => "allowed",
+            Decision::Trust => "allowed and trusted (no password next time)",
+            Decision::Mine => "allowed as your own device",
         }
     ));
     decision
@@ -146,13 +183,15 @@ fn prompt_line(question: &str, timeout: Duration) -> Option<String> {
     }
 }
 
-// ---- trusted devices ----
+// ---- known devices ----
 //
 // When the operator chooses "Always allow", the device receives a 256-bit token. The
 // computer stores (~/.config/remotefriend/trusted_devices.json, 0600) its SHA-256 plus a
 // salted PBKDF2 key of it, which lets the device log in end-to-end encrypted without the
-// computer's password (that one changes after every session). Entries from before v0.9
+// computer's password (that one changes when RemoteFriend starts). Entries from before v0.9
 // only have the hash; they are upgraded the next time the device logs in with the password.
+// Entries from before v0.14 have no `ask` field: they connected without a question then, so
+// they stay the user's own devices.
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct Device {
@@ -168,16 +207,40 @@ struct Device {
     key: String,
     #[serde(default)]
     last_used: u64,
+    /// Trusted device: the operator is asked every time. False: one of the operator's own
+    /// devices, which connects without a question.
+    #[serde(default)]
+    ask: bool,
+    /// The viewer's install id (see AuthMsg), so a block also covers a later password login.
+    #[serde(default)]
+    vid: String,
 }
 
-/// A trusted device as shown in the app.
+/// A known device as shown in the app.
 #[derive(Clone, Debug)]
 pub struct TrustedDevice {
-    /// Stable handle for `remove_device`.
+    /// Stable handle for `remove_device`, `set_device_mine` and `block_device`.
     pub handle: String,
     pub label: String,
     pub added: u64,
     pub last_used: u64,
+    /// One of the user's own devices (connects without a question).
+    pub mine: bool,
+}
+
+/// How a known device may connect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trust {
+    /// Without password; the operator is asked.
+    Trusted,
+    /// Without password and without a question.
+    Mine,
+}
+
+impl Device {
+    fn trust(&self) -> Trust {
+        if self.ask { Trust::Trusted } else { Trust::Mine }
+    }
 }
 
 /// Key material for a device login.
@@ -187,6 +250,8 @@ pub(crate) struct DeviceKey {
     pub label: String,
     /// One-time grant (switching sides): consumed by the login.
     pub temporary: bool,
+    /// Asked or not (a one-time grant is never asked).
+    pub trust: Trust,
 }
 
 static DEVICES_LOCK: Mutex<()> = Mutex::new(());
@@ -227,8 +292,8 @@ fn with_login_key(mut d: Device, token: &str) -> Device {
     d
 }
 
-/// Add a trusted device and return the token to hand to the client.
-pub(crate) fn trust_device(label: &str) -> String {
+/// Remember a device and return the token to hand to the client. `vid`: the viewer's install id.
+pub(crate) fn trust_device(label: &str, vid: &str, trust: Trust) -> String {
     let token = remote_friend_common::new_secret_hex().to_ascii_lowercase();
     let device = Device {
         hash: token_hash(&token).expect("64 hex chars"),
@@ -238,10 +303,16 @@ pub(crate) fn trust_device(label: &str) -> String {
         salt: String::new(),
         key: String::new(),
         last_used: now_secs(),
+        ask: trust == Trust::Trusted,
+        vid: vid.to_string(),
     };
     let device = with_login_key(device, &token);
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load_devices();
+    // A device that is trusted again replaces its old entry (same install).
+    if !vid.is_empty() {
+        list.retain(|d| d.vid != vid);
+    }
     if list.len() >= 32 {
         list.remove(0);
     }
@@ -250,24 +321,22 @@ pub(crate) fn trust_device(label: &str) -> String {
     token
 }
 
-/// Password login that also presented a device token: is it a trusted device? Entries from
-/// before v0.9 get their login key now, so the device can log in without the password next time.
-pub(crate) fn is_trusted(token: &str) -> bool {
-    let Some(hash) = token_hash(token) else { return false };
+/// Password login that also presented a device token from before v0.9: is it a known device?
+/// Such entries get their login key now, so the device can log in without the password next time.
+pub(crate) fn legacy_trust(token: &str) -> Option<Trust> {
+    let hash = token_hash(token)?;
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load_devices();
-    let Some(pos) = list.iter().position(|d| remote_friend_common::constant_time_eq(d.hash.as_bytes(), hash.as_bytes()))
-    else {
-        return false;
-    };
+    let pos = list.iter().position(|d| remote_friend_common::constant_time_eq(d.hash.as_bytes(), hash.as_bytes()))?;
     let mut d = list[pos].clone();
     if d.key.is_empty() {
         d = with_login_key(d, token);
     }
     d.last_used = now_secs();
+    let trust = d.trust();
     list[pos] = d;
     save_devices(&list);
-    true
+    Some(trust)
 }
 
 /// Key material for a device login, by public device id.
@@ -279,7 +348,8 @@ pub(crate) fn device_login_key(id: &str) -> Option<DeviceKey> {
     let d = load_devices().into_iter().find(|d| !d.id.is_empty() && d.id == id)?;
     let salt = hex::decode(&d.salt).ok()?.try_into().ok()?;
     let key = hex::decode(&d.key).ok()?.try_into().ok()?;
-    Some(DeviceKey { salt, key, label: d.label, temporary: false })
+    let trust = d.trust();
+    Some(DeviceKey { salt, key, label: d.label, temporary: false, trust })
 }
 
 /// A successful device login: remember when the device was last used.
@@ -296,17 +366,23 @@ pub fn trusted_count() -> usize {
     load_devices().len()
 }
 
-/// Trusted devices, most recently used first.
+/// Known devices (trusted and own), most recently used first.
 pub fn trusted_devices() -> Vec<TrustedDevice> {
     let mut list: Vec<TrustedDevice> = load_devices()
         .into_iter()
-        .map(|d| TrustedDevice { handle: d.hash, label: d.label, added: d.added, last_used: d.last_used.max(d.added) })
+        .map(|d| TrustedDevice {
+            mine: d.trust() == Trust::Mine,
+            handle: d.hash,
+            label: d.label,
+            added: d.added,
+            last_used: d.last_used.max(d.added),
+        })
         .collect();
     list.sort_by(|a, b| b.last_used.cmp(&a.last_used));
     list
 }
 
-/// Remove one trusted device (it will need the password and approval again).
+/// Remove one known device (it will need the password and approval again).
 pub fn remove_device(handle: &str) -> bool {
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load_devices();
@@ -319,12 +395,125 @@ pub fn remove_device(handle: &str) -> bool {
     removed
 }
 
-/// Forget all trusted devices. Returns how many were removed.
+/// Make a known device one of the user's own (connects without a question) or a trusted
+/// device again (asked every time).
+pub fn set_device_mine(handle: &str, mine: bool) -> bool {
+    let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = load_devices();
+    let Some(d) = list.iter_mut().find(|d| d.hash == handle) else { return false };
+    d.ask = !mine;
+    save_devices(&list);
+    true
+}
+
+/// Forget all known devices. Returns how many were removed.
 pub(crate) fn forget_devices() -> usize {
     let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let n = load_devices().len();
     let _ = std::fs::remove_file(devices_path());
     n
+}
+
+// ---- blocked devices ----
+//
+// A blocked device is refused without asking, even with the right password. It is recognised
+// by its install id (sent by every viewer since v0.14) or its device key id.
+// ~/.config/remotefriend/blocked_devices.json, 0600.
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Blocked {
+    /// Handle for the app (random).
+    handle: String,
+    label: String,
+    #[serde(default)]
+    vid: String,
+    #[serde(default)]
+    device: String,
+    added: u64,
+}
+
+/// A blocked device as shown in the app.
+#[derive(Clone, Debug)]
+pub struct BlockedDevice {
+    pub handle: String,
+    pub label: String,
+    pub added: u64,
+}
+
+fn blocked_path() -> std::path::PathBuf {
+    remote_friend_common::identity::config_dir().join("blocked_devices.json")
+}
+
+fn load_blocked() -> Vec<Blocked> {
+    std::fs::read(blocked_path()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
+}
+
+fn save_blocked(list: &[Blocked]) {
+    let data = serde_json::to_vec_pretty(list).unwrap_or_default();
+    if let Err(e) = remote_friend_common::identity::write_private(&blocked_path(), &data) {
+        tracing::warn!("could not write blocked device list: {e}");
+    }
+}
+
+/// Block a viewer by its install id and/or device key id; it is also forgotten as a known device.
+pub(crate) fn block(label: &str, vid: &str, device: &str) {
+    if vid.is_empty() && device.is_empty() {
+        return;
+    }
+    let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut devices = load_devices();
+    let before = devices.len();
+    devices.retain(|d| !((!vid.is_empty() && d.vid == vid) || (!device.is_empty() && d.id == device)));
+    if devices.len() != before {
+        save_devices(&devices);
+    }
+    let mut list = load_blocked();
+    if list.len() >= 256 {
+        list.remove(0);
+    }
+    list.push(Blocked {
+        handle: remote_friend_common::new_secret_hex()[..16].to_string(),
+        label: label.chars().take(80).collect(),
+        vid: vid.to_string(),
+        device: device.to_string(),
+        added: now_secs(),
+    });
+    save_blocked(&list);
+}
+
+/// Block a known device from the device list.
+pub fn block_device(handle: &str) -> bool {
+    let Some(d) = load_devices().into_iter().find(|d| d.hash == handle) else { return false };
+    block(&d.label, &d.vid, &d.id);
+    true
+}
+
+/// Is this viewer blocked?
+pub(crate) fn is_blocked(vid: &str, device: &str) -> bool {
+    load_blocked()
+        .iter()
+        .any(|b| (!vid.is_empty() && b.vid == vid) || (!device.is_empty() && b.device == device))
+}
+
+/// Blocked devices, newest first.
+pub fn blocked_devices() -> Vec<BlockedDevice> {
+    let mut list: Vec<BlockedDevice> =
+        load_blocked().into_iter().map(|b| BlockedDevice { handle: b.handle, label: b.label, added: b.added }).collect();
+    list.reverse();
+    list
+}
+
+/// Unblock a device: it can ask again (with the password).
+pub fn unblock(handle: &str) -> bool {
+    let _g = DEVICES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = load_blocked();
+    let before = list.len();
+    list.retain(|b| b.handle != handle);
+    let removed = list.len() != before;
+    if removed {
+        save_blocked(&list);
+    }
+    removed
 }
 
 // One-time grants: "switch sides" lets the computer we are controlling connect back to us
@@ -354,7 +543,7 @@ fn take_temporary(id: &str) -> Option<DeviceKey> {
     list.retain(|(_, _, t)| t.elapsed() < TEMPORARY_TTL);
     let pos = list.iter().position(|(i, _, _)| i == id)?;
     let (_, k, _) = list.remove(pos);
-    Some(DeviceKey { salt: k.salt, key: k.key, label: k.label, temporary: true })
+    Some(DeviceKey { salt: k.salt, key: k.key, label: k.label, temporary: true, trust: Trust::Mine })
 }
 
 // ---- resume token ----
@@ -399,6 +588,20 @@ pub(crate) fn consume_resume(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devices_from_before_trust_levels_stay_own_devices() {
+        let old: Device = serde_json::from_str(r#"{"hash":"h","label":"laptop","added":1,"id":"i","salt":"","key":""}"#).unwrap();
+        assert_eq!(old.trust(), Trust::Mine);
+        let trusted: Device = serde_json::from_str(r#"{"hash":"h","label":"ali","added":1,"ask":true}"#).unwrap();
+        assert_eq!(trusted.trust(), Trust::Trusted);
+    }
+
+    #[test]
+    fn only_allowing_decisions_allow() {
+        assert!(Decision::Once.allowed() && Decision::Trust.allowed() && Decision::Mine.allowed());
+        assert!(!Decision::Deny.allowed() && !Decision::Block.allowed());
+    }
 
     #[test]
     fn resume_tokens_are_single_use() {

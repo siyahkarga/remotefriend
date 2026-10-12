@@ -314,11 +314,47 @@ pub fn select_monitor(index: usize) -> bool {
     ok
 }
 
+/// May viewers switch to this screen by themselves? (Settings: `viewer_screens`, empty = all.)
+pub fn viewer_may_switch(index: usize) -> bool {
+    let allowed = remote_friend_common::identity::load_host_settings().viewer_screens;
+    allowed.is_empty() || allowed.contains(&index)
+}
+
+/// Let viewers switch to a screen by themselves, or only with this computer's user's OK.
+/// When the screen shown now is no longer open to viewers, an open one is shown instead.
+pub fn set_viewer_may_switch(index: usize, allowed: bool) {
+    let all: Vec<usize> = monitors().iter().map(|m| m.index).collect();
+    let mut s = remote_friend_common::identity::load_host_settings();
+    let mut open: Vec<usize> = all.iter().copied().filter(|i| s.viewer_screens.is_empty() || s.viewer_screens.contains(i)).collect();
+    open.retain(|i| *i != index);
+    if allowed {
+        open.push(index);
+    }
+    open.sort_unstable();
+    // At least one screen stays open; "all of them" is stored as empty.
+    if open.is_empty() {
+        return;
+    }
+    s.viewer_screens = if open.len() == all.len() { Vec::new() } else { open.clone() };
+    remote_friend_common::identity::save_host_settings(&s);
+    if !open.contains(&current_monitor()) {
+        select_monitor(open[0]);
+    } else {
+        monitor_watch().send_modify(|g| *g += 1);
+    }
+}
+
 /// The monitor list and current choice, as sent to viewers.
 pub(crate) fn monitors_json() -> serde_json::Value {
     let list: Vec<serde_json::Value> = monitors()
         .iter()
-        .map(|m| serde_json::json!({"i": m.index, "name": m.name, "w": m.width, "h": m.height, "primary": m.primary}))
+        .map(|m| {
+            serde_json::json!({
+                "i": m.index, "name": m.name, "w": m.width, "h": m.height, "primary": m.primary,
+                // false: switching there needs the OK of this computer's user.
+                "open": viewer_may_switch(m.index),
+            })
+        })
         .collect();
     serde_json::json!({"t": "monitors", "list": list, "current": current_monitor()})
 }

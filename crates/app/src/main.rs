@@ -1,8 +1,9 @@
 //! RemoteFriend desktop app: share this computer and control other computers.
 //!
-//! One window, like AnyDesk/TeamViewer: the left side shows this computer's ID and
-//! password (others connect to it), the right side connects to another computer.
-//! The host engine runs in the background while the app is open.
+//! One window with a menu on the left: Home shows this computer's ID and password (others
+//! connect to it) next to "Connect to a computer"; Devices, History, Access keys and Settings
+//! are pages of the same window, never windows on top of each other. The host engine runs in
+//! the background while the app is open.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -11,31 +12,40 @@ mod autostart;
 mod history;
 mod keys_ui;
 mod net;
+mod notices;
 mod privacy;
+mod ui_dialogs;
 mod ui_home;
+mod ui_kit;
+mod ui_pages;
 mod update;
 mod viewer;
+mod welcome;
 
 use anyhow::Result;
-use egui::{Color32, RichText};
 use history::RecentEntry;
 use net::{LanEntry, Shared};
 use remote_friend_common::Packet;
-use remote_friend_host::{Answer, Decision, PromptKind};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{channel, Sender};
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-256.png");
-const ACCENT: Color32 = Color32::from_rgb(91, 132, 255);
-const OK: Color32 = Color32::from_rgb(47, 191, 113);
-const WARN: Color32 = Color32::from_rgb(245, 165, 36);
-const ERR: Color32 = Color32::from_rgb(229, 72, 77);
 
 enum Screen {
     Home,
     Viewer,
+}
+
+/// Pages of the main window (the menu on the left).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Page {
+    Home,
+    Devices,
+    History,
+    Keys,
+    Settings,
 }
 
 pub(crate) struct App {
@@ -64,7 +74,10 @@ pub(crate) struct App {
     // "This computer"
     host_error: Arc<Mutex<Option<String>>>,
     show_password: bool,
-    settings_open: bool,
+    /// The page shown in the main window.
+    page: Page,
+    /// Devices page: "make it my device" waits for confirmation (handle, name).
+    confirm_mine: Option<(String, String)>,
     settings_server: String,
     settings_web: String,
     settings_key: String,
@@ -74,6 +87,18 @@ pub(crate) struct App {
     /// A newer version on blobidea.com (filled by update::start).
     update: Arc<Mutex<Option<update::Update>>>,
     update_dismissed: Option<String>,
+    /// Downloading / installing an update.
+    update_progress: Arc<Mutex<update::Progress>>,
+    /// Automatic install: when the 30-second notice started.
+    update_countdown: Option<Instant>,
+    /// The welcome screen (sign in with email for an access key), while it is shown.
+    welcome: Option<welcome::Welcome>,
+    /// Server notices for its owner (new free keys, warnings).
+    notices: Arc<Mutex<notices::Notices>>,
+    /// "While you were away" was shown in this run.
+    notices_prompted: bool,
+    /// A notice's action waits for its second click.
+    notice_confirm: Option<u64>,
     /// Settings → Server → Manage access keys (server owner only).
     keys_ui: keys_ui::KeysUi,
     lan_enabled: bool,
@@ -107,9 +132,8 @@ pub(crate) struct App {
     settings_private_apps: String,
     /// Password typed for the current connection (saved once the computer accepts it).
     pending_password: String,
-    /// Settings tab, and the small History / Trusted devices windows.
+    /// Settings tab.
     settings_tab: u8,
-    history_open: bool,
     /// Screen list, re-read every few seconds.
     monitors: (Vec<remote_friend_host::MonitorInfo>, Option<Instant>),
 }
@@ -118,39 +142,6 @@ fn load_icon() -> egui::IconData {
     let img = image::load_from_memory(ICON_PNG).expect("embedded icon").to_rgba8();
     let (w, h) = img.dimensions();
     egui::IconData { rgba: img.into_raw(), width: w, height: h }
-}
-
-fn setup_style(ctx: &egui::Context) {
-    use egui::{FontId, TextStyle};
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.style_mut(|s| {
-        s.text_styles = [
-            (TextStyle::Heading, FontId::proportional(20.0)),
-            (TextStyle::Body, FontId::proportional(15.0)),
-            (TextStyle::Button, FontId::proportional(14.5)),
-            (TextStyle::Small, FontId::proportional(12.0)),
-            (TextStyle::Monospace, FontId::monospace(14.5)),
-        ]
-        .into();
-        s.spacing.item_spacing = egui::vec2(8.0, 7.0);
-        s.spacing.button_padding = egui::vec2(12.0, 6.0);
-        s.spacing.interact_size.y = 30.0;
-        let v = &mut s.visuals;
-        v.panel_fill = Color32::from_rgb(19, 21, 26);
-        v.window_fill = Color32::from_rgb(28, 31, 38);
-        v.faint_bg_color = Color32::from_rgb(28, 31, 38);
-        v.extreme_bg_color = Color32::from_rgb(14, 16, 20);
-        v.window_corner_radius = 14.into();
-        v.window_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(48, 52, 62));
-        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 44, 52));
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(40, 44, 54);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(52, 57, 70);
-        v.selection.bg_fill = ACCENT;
-        v.hyperlink_color = ACCENT;
-        for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.corner_radius = 8.into();
-        }
-    });
 }
 
 fn main() -> Result<()> {
@@ -195,6 +186,10 @@ fn main() -> Result<()> {
     });
 
     let server_settings = remote_friend_host::server_settings();
+    // A new install without a key starts with the welcome screen.
+    let first_run = !remote_friend_common::identity::load_host_settings().welcome_done
+        && server_settings.use_server
+        && server_settings.key.trim().is_empty();
     let app = App {
         screen: Screen::Home,
         host_field: std::env::args().nth(1).unwrap_or_default(),
@@ -217,7 +212,8 @@ fn main() -> Result<()> {
         thumbs: HashMap::new(),
         host_error,
         show_password: false,
-        settings_open: false,
+        page: Page::Home,
+        confirm_mine: None,
         settings_server: server_settings.server,
         settings_web: server_settings.web_url,
         settings_key: server_settings.key,
@@ -225,6 +221,12 @@ fn main() -> Result<()> {
         settings_key_visible: false,
         update: Arc::new(Mutex::new(None)),
         update_dismissed: None,
+        update_progress: Arc::new(Mutex::new(update::Progress::Idle)),
+        update_countdown: None,
+        welcome: first_run.then(welcome::Welcome::new),
+        notices: Default::default(),
+        notices_prompted: false,
+        notice_confirm: None,
         keys_ui: keys_ui::KeysUi::default(),
         lan_enabled: remote_friend_host::lan_enabled(),
         lan_changed: false,
@@ -247,15 +249,20 @@ fn main() -> Result<()> {
         settings_private_apps: String::new(),
         pending_password: String::new(),
         settings_tab: 0,
-        history_open: false,
     };
 
+    #[cfg(debug_assertions)]
+    let app = {
+        let mut app = app;
+        debug_page(&mut app);
+        app
+    };
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RemoteFriend")
             .with_app_id("remotefriend")
-            .with_inner_size([1060.0, 680.0])
-            .with_min_inner_size([480.0, 480.0])
+            .with_inner_size([1120.0, 720.0])
+            .with_min_inner_size([520.0, 500.0])
             .with_icon(load_icon()),
         ..Default::default()
     };
@@ -263,8 +270,9 @@ fn main() -> Result<()> {
         "RemoteFriend",
         opts,
         Box::new(|cc| {
-            setup_style(&cc.egui_ctx);
+            ui_kit::setup_style(&cc.egui_ctx);
             update::start(app.update.clone(), cc.egui_ctx.clone());
+            notices::start(app.notices.clone(), cc.egui_ctx.clone());
             Ok(Box::new(app))
         }),
     )
@@ -273,7 +281,15 @@ fn main() -> Result<()> {
 }
 
 impl eframe::App for App {
+    /// Opaque: the default clear colour is see-through, which let the desktop shine through
+    /// half-transparent strips.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        ui_kit::BG.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(debug_assertions)]
+        debug_screenshot(ctx);
         // Switching sides: the computer we were connected to accepted; control it now.
         if let Some(t) = remote_friend_host::take_switch() {
             if matches!(self.screen, Screen::Viewer) {
@@ -287,6 +303,7 @@ impl eframe::App for App {
         // Incoming connection requests must be answerable from any screen.
         self.prompts_ui(ctx);
         match self.screen {
+            Screen::Home if self.welcome.is_some() => self.welcome_ui(ctx),
             Screen::Home => self.home_ui(ctx),
             Screen::Viewer => self.viewer_ui(ctx),
         }
@@ -312,51 +329,6 @@ impl App {
         if n > 0 {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
-    }
-
-    /// Closing ends remote access: ask first (also when a viewer tries to close it remotely).
-    fn close_guard(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
-            let snap = remote_friend_host::snapshot();
-            if snap.sessions > 0 || snap.online || matches!(self.screen, Screen::Viewer) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.close_confirm = true;
-            }
-        }
-        if !self.close_confirm {
-            return;
-        }
-        let sessions = remote_friend_host::sessions::count();
-        egui::Modal::new(egui::Id::new("close_confirm")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(RichText::new("Close RemoteFriend?").size(19.0).strong());
-            ui.add_space(4.0);
-            if sessions > 0 {
-                ui.label(format!(
-                    "{sessions} device(s) are connected to this computer right now. Closing ends their session."
-                ));
-            }
-            if matches!(self.screen, Screen::Viewer) {
-                ui.label("Your connection to the remote computer ends too.");
-            }
-            ui.label("While RemoteFriend is closed, this computer cannot be reached remotely.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Minimize instead").clicked() {
-                    self.close_confirm = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                }
-                let close = egui::Button::new(RichText::new("Close RemoteFriend").color(Color32::WHITE)).fill(ERR);
-                if ui.add(close).clicked() {
-                    self.close_confirm = false;
-                    self.allow_close = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                if ui.button("Cancel").clicked() {
-                    self.close_confirm = false;
-                }
-            });
-        });
     }
 
     /// Connect button: start the network thread and switch to the viewer.
@@ -455,6 +427,34 @@ impl App {
         self.screen = Screen::Viewer;
     }
 
+    /// The welcome screen; a key it got is saved and the computer reconnects with it.
+    fn welcome_ui(&mut self, ctx: &egui::Context) {
+        self.load_logo(ctx);
+        let Some(welcome) = self.welcome.as_mut() else { return };
+        match welcome.ui(ctx, self.logo.as_ref()) {
+            welcome::Outcome::Stay => {}
+            welcome::Outcome::Key(key) => {
+                let s = remote_friend_host::server_settings();
+                remote_friend_host::set_server(&s.server, &s.web_url, &key, true);
+                self.settings_key = key;
+                self.settings_use_server = true;
+                mark_welcome_done();
+            }
+            welcome::Outcome::Close => {
+                self.welcome = None;
+                mark_welcome_done();
+            }
+        }
+    }
+
+    pub(crate) fn load_logo(&mut self, ctx: &egui::Context) {
+        if self.logo.is_none() {
+            let img = image::load_from_memory(ICON_PNG).expect("embedded icon").to_rgba8();
+            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img);
+            self.logo = Some(ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR));
+        }
+    }
+
     pub(crate) fn tx(&self) -> Option<Sender<Packet>> {
         self.tx_out.clone()
     }
@@ -481,77 +481,77 @@ impl App {
     }
 }
 
-impl App {
-    /// Connection requests / server trust questions from the host engine.
-    fn prompts_ui(&mut self, ctx: &egui::Context) {
-        let seq = remote_friend_host::prompt_sequence();
-        if seq != self.last_prompt_seq {
-            self.last_prompt_seq = seq;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
-        }
-        let prompts = remote_friend_host::pending_prompts();
-        let Some(p) = prompts.first() else { return };
-        ctx.request_repaint_after(Duration::from_millis(250));
-        egui::Modal::new(egui::Id::new(("prompt", p.id))).show(ctx, |ui| {
-            ui.set_width(440.0);
-            match &p.kind {
-                PromptKind::Connection { peer, can_remember } => {
-                    ui.label(RichText::new("Connection request").size(19.0).strong());
-                    ui.add_space(4.0);
-                    ui.label(format!("{peer} wants to view and control this computer."));
-                    ui.small("The correct password was entered. Allow only if you expect this connection.");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let allow = egui::Button::new(RichText::new("Allow").strong().color(Color32::WHITE)).fill(OK);
-                        if ui.add(allow).clicked() {
-                            remote_friend_host::answer(p.id, Answer::Connection(Decision::Once));
-                        }
-                        if *can_remember && ui.button("Always allow this device").clicked() {
-                            remote_friend_host::answer(p.id, Answer::Connection(Decision::Always));
-                        }
-                        let deny = egui::Button::new(RichText::new("Deny").color(Color32::WHITE)).fill(ERR);
-                        if ui.add(deny).clicked() {
-                            remote_friend_host::answer(p.id, Answer::Connection(Decision::Deny));
-                        }
-                    });
-                    ui.small(format!("Denied automatically in {} s", p.seconds_left));
-                }
-                PromptKind::SwitchSides { label } => {
-                    ui.label(RichText::new("Switch sides?").size(19.0).strong());
-                    ui.add_space(4.0);
-                    ui.label(format!("{label} offers to switch: you would control their computer, and they stop controlling this one."));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let yes = egui::Button::new(RichText::new("Switch").strong().color(Color32::WHITE)).fill(OK);
-                        if ui.add(yes).clicked() {
-                            remote_friend_host::answer(p.id, Answer::Switch(true));
-                        }
-                        if ui.button("No").clicked() {
-                            remote_friend_host::answer(p.id, Answer::Switch(false));
-                        }
-                    });
-                    ui.small(format!("Declined automatically in {} s", p.seconds_left));
-                }
-                PromptKind::TrustServer { addr, fingerprint } => {
-                    ui.label(RichText::new("First connection to the server").size(19.0).strong());
-                    ui.label(format!("Server: {addr}"));
-                    ui.label("Certificate fingerprint:");
-                    ui.add(egui::Label::new(RichText::new(fingerprint).monospace().size(12.0)).wrap());
-                    ui.small("It must match the fingerprint printed at the end of the server setup. It is remembered after you trust it.");
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new("Trust").strong().color(Color32::WHITE)).fill(OK)).clicked() {
-                            remote_friend_host::answer(p.id, Answer::Trust(true));
-                        }
-                        if ui.button("Cancel").clicked() {
-                            remote_friend_host::answer(p.id, Answer::Trust(false));
-                        }
-                    });
-                }
-            }
+/// Development aid: RF_SCREENSHOT=out.png saves the window after RF_SCREENSHOT_FRAMES frames
+/// (default 40) and quits. Not in release builds.
+#[cfg(debug_assertions)]
+fn debug_screenshot(ctx: &egui::Context) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    let Ok(path) = std::env::var("RF_SCREENSHOT") else { return };
+    let n = FRAMES.fetch_add(1, Ordering::Relaxed);
+    let wait: u32 = std::env::var("RF_SCREENSHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    if n == wait {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+    }
+    ctx.request_repaint();
+    let shot = ctx.input(|i| {
+        i.raw.events.iter().find_map(|e| match e {
+            egui::Event::Screenshot { image, .. } => Some(image.clone()),
+            _ => None,
+        })
+    });
+    if let Some(img) = shot {
+        let [w, h] = img.size;
+        let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+        let _ = image::save_buffer(&path, &rgba, w as u32, h as u32, image::ColorType::Rgba8);
+        std::process::exit(0);
+    }
+}
+
+/// Development aid: RF_PAGE=devices|history|keys|settings[:tab] opens that page first.
+#[cfg(debug_assertions)]
+fn debug_page(app: &mut App) {
+    let page = std::env::var("RF_PAGE").unwrap_or_default();
+    let (name, tab) = page.split_once(':').unwrap_or((page.as_str(), "0"));
+    app.page = match name {
+        "devices" => Page::Devices,
+        "history" => Page::History,
+        "keys" => Page::Keys,
+        "settings" => Page::Settings,
+        _ => Page::Home,
+    };
+    app.settings_tab = tab.parse().unwrap_or(0);
+    if let Ok(target) = std::env::var("RF_AUTOCONNECT") {
+        app.host_field = target;
+        app.pass_field = std::env::var("RF_AUTOPASS").unwrap_or_default();
+        app.connect();
+    }
+    if let Ok(step) = std::env::var("RF_DEMO_WELCOME") {
+        app.welcome = Some(welcome::Welcome::demo(&step));
+    }
+    if std::env::var("RF_DEMO_UPDATE").is_ok() {
+        *app.update.lock().unwrap() = Some(update::Update {
+            version: "0.14.1".into(),
+            security: false,
+            install: Some(update::Installer { file: "demo".into(), size: 1, sha256: String::new(), needs_password: true }),
         });
+    }
+    if std::env::var("RF_DEMO_NOTICES").is_ok() {
+        let event = |id: u64, kind: &str, text: &str, action: &str| serde_json::json!({"id": id, "time": "2026-10-12 21:40", "kind": kind, "text": text, "seen": false, "action": action, "key": "k1"});
+        *app.notices.lock().unwrap() = notices::Notices {
+            unseen: 2,
+            events: vec![
+                event(2, "warning", "One internet address connected to 10 different computers today (it is stopped at 40). Who it is cannot be known: connections are encrypted and need no account. The computers belong to: ali@example.com (2), Bayram, your own key (1). Ask them whether they expected it; if not, block the address.", "block"),
+                event(1, "key", "New free key for ali@example.com (2 computers, until 2027-10-12).", "revoke"),
+            ],
+            mail: true,
+            signup: true,
+            loaded: true,
+            ..Default::default()
+        };
+    }
+    if std::env::var("RF_DEMO_PROMPT").is_ok() {
+        remote_friend_host::demo_prompt(std::env::var("RF_DEMO_PROMPT").unwrap_or_default() == "trusted");
     }
 }
 
@@ -581,6 +581,14 @@ pub(crate) fn open_url(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(windows)]
     let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+}
+
+fn mark_welcome_done() {
+    let mut s = remote_friend_common::identity::load_host_settings();
+    if !s.welcome_done {
+        s.welcome_done = true;
+        remote_friend_common::identity::save_host_settings(&s);
+    }
 }
 
 /// Start a fresh copy of the app and quit (used to ask for screen permission again).

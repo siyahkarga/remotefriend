@@ -319,6 +319,10 @@ pub enum RvMsg {
     Admin { key: String, request: String },
     /// server -> owner: JSON answer to `Admin`.
     AdminReply(String),
+    /// Anyone -> server: free access key by email ({cmd:"code"|"verify", ...}). Since v0.14.
+    Signup { request: String },
+    /// server -> app: JSON answer to `Signup`.
+    SignupReply(String),
 }
 
 pub fn rv_encode(m: &RvMsg) -> anyhow::Result<Vec<u8>> {

@@ -48,7 +48,7 @@ pub async fn serve(http_addr: String, name: String) -> Result<()> {
         .route("/info", get(info))
         .route("/ws", get(ws_handler))
         .with_state(WsState { slots: Arc::new(tokio::sync::Semaphore::new(max_sessions)), name });
-    let listener = tokio::net::TcpListener::bind(&http_addr)
+    let listener = crate::server::bind_retry(&http_addr)
         .await
         .with_context(|| format!("cannot open web port {http_addr}"))?;
     tracing::info!("web server: {http_addr}");
@@ -267,7 +267,7 @@ async fn web_e2e_handshake(io: &mut impl TextIo, source: &str) -> Result<Option<
             crate::auth::record(source, true);
             io.send_text(serde_json::json!({"t": "e2e3", "mac": b64(&mac_h)}).to_string()).await?;
             let login = match device {
-                Some((id, key)) => Login::Device { id, label: key.label, temporary: key.temporary },
+                Some((id, key)) => Login::Device { id, label: key.label, temporary: key.temporary, trust: key.trust },
                 None => {
                     crate::auth::password_login();
                     Login::Password
@@ -481,21 +481,22 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
         }
     }
     use crate::approval::Decision;
-    let auth = AuthMsg { device, resume, ..Default::default() };
-    let decision = match crate::core::quick_decision(&Login::Password, &auth, &who) {
-        Some(d) => d,
-        None => {
+    let vid = field("vid", 64);
+    let vid = if vid.len() >= 16 && vid.chars().all(|c| c.is_ascii_alphanumeric()) { vid } else { String::new() };
+    let auth = AuthMsg { device, resume, vid, ..Default::default() };
+    let decision = match crate::core::pre_decision(&Login::Password, &auth, &who, &who, false) {
+        crate::core::Pre::Decided(d) => d,
+        crate::core::Pre::Ask(req) => {
             let _ = io.send_text(r#"{"t":"wait"}"#.into()).await;
-            let w = who.clone();
-            tokio::task::spawn_blocking(move || crate::approval::ask(&w, true)).await.unwrap_or(Decision::Deny)
+            tokio::task::spawn_blocking(move || crate::approval::ask(&req)).await.unwrap_or(Decision::Deny)
         }
     };
-    if decision == Decision::Deny {
+    let issued = crate::core::apply(decision, &Login::Password, &auth, &who);
+    if !decision.allowed() {
         let _ = io.send_text(reject_json("the remote computer denied the connection")).await;
         crate::auth::session_ended(true, false);
         return;
     }
-    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&who));
     let (inbox_tx, inbox) = mpsc::channel::<String>(256);
     let (out, out_rx) = outbox();
     let writer = spawn_ws_writer(io.sink, out_rx, None);
@@ -576,21 +577,20 @@ async fn secure_session(
     let Ok(Some(first)) = tokio::time::timeout(Duration::from_secs(30), inbox.recv()).await else { return };
     let Some(auth) = AuthMsg::parse(&first) else { return };
     let label = crate::core::viewer_label(&login, &auth, peer);
-    let decision = match crate::core::quick_decision(&login, &auth, &label) {
-        Some(d) => d,
-        None => {
+    let decision = match crate::core::pre_decision(&login, &auth, &label, peer, false) {
+        crate::core::Pre::Decided(d) => d,
+        crate::core::Pre::Ask(req) => {
             let _ = out.ctrl.send(r#"{"t":"wait"}"#.into()).await;
-            let who = if label == peer { peer.to_string() } else { format!("{label} ({peer})") };
-            tokio::task::spawn_blocking(move || crate::approval::ask(&who, true)).await.unwrap_or(Decision::Deny)
+            tokio::task::spawn_blocking(move || crate::approval::ask(&req)).await.unwrap_or(Decision::Deny)
         }
     };
-    if decision == Decision::Deny {
+    let issued = crate::core::apply(decision, &login, &auth, &label);
+    if !decision.allowed() {
         let _ = out.ctrl.send(reject_json("the remote computer denied the connection")).await;
         crate::auth::session_ended(login.used_password(), false);
         tokio::time::sleep(Duration::from_millis(300)).await;
         return;
     }
-    let issued = (decision == Decision::Always).then(|| crate::approval::trust_device(&label));
     let trusted = matches!(login, Login::Device { .. });
     let handle = crate::sessions::register(&label, peer, crate::sessions::Via::Browser, trusted, login.used_password());
     run_session(inbox, out, jpeg, handle, issued, direct).await;
@@ -720,7 +720,7 @@ async fn run_session(
     out: Outbox,
     jpeg: bool,
     handle: crate::sessions::SessionHandle,
-    issued_device: Option<String>,
+    issued_device: Option<crate::core::Issued>,
     direct: Option<remote_friend_common::e2e::DirectPair>,
 ) {
     #[cfg(target_os = "linux")]
@@ -817,7 +817,9 @@ async fn run_session(
 }
 
 /// First message of every session (browser and app).
-pub(crate) fn welcome_json(jpeg: bool, issued_device: Option<String>, handle: &crate::sessions::SessionHandle) -> serde_json::Value {
+pub(crate) fn welcome_json(jpeg: bool, issued: Option<crate::core::Issued>, handle: &crate::sessions::SessionHandle) -> serde_json::Value {
+    let ask = issued.as_ref().is_some_and(|i| i.ask);
+    let issued_device = issued.map(|i| i.token);
     serde_json::json!({
         "t": "welcome",
         "v": remote_friend_common::PROTOCOL_VERSION,
@@ -831,6 +833,8 @@ pub(crate) fn welcome_json(jpeg: bool, issued_device: Option<String>, handle: &c
         "resume": crate::approval::grant_resume(),
         // If the operator chose "always": the device stores this and logs in with it from now on.
         "device": issued_device,
+        // ...and whether the operator is still asked each time it connects.
+        "ask": ask,
         // The computer can send its sound ({t:"audio", on, codec} turns it on).
         "audio": true,
         // The pointer is already part of the picture: the viewer doesn't draw its own.

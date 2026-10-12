@@ -25,8 +25,16 @@ Download for your system from the [RemoteFriend page on blobidea.com](https://bl
 | Other Linux | [RemoteFriend-linux-x86_64.tar.gz](https://blobidea.com/downloads/remotefriend/RemoteFriend-linux-x86_64.tar.gz) | Extract, then run `./install.sh` (no root needed). |
 
 Then open **RemoteFriend** from your applications menu. The installers are not code-signed
-yet, which is why Windows and macOS ask for confirmation once. RemoteFriend tells you when a
-new version is out (*Settings → General* turns the check off).
+yet, which is why Windows and macOS ask for confirmation once. RemoteFriend updates itself:
+when a new version is out it shows **Update now**, and — when nobody is connected — installs it
+by itself after a 30-second notice (*Settings → General*). Updates are signed; anything that
+does not match the signature is not installed. On Linux (.deb) the desktop asks for your password.
+
+**Reachable from anywhere:** the first time RemoteFriend opens it asks for your email address and
+then the 6-digit code it sends you — that's all; your computer can now be reached over the
+internet. Free for 2 computers, for 1 year; on your second computer (or after reinstalling) sign
+in with the same address. Connecting *to* other computers needs nothing, so *Skip for now* is fine
+too (later: Home → *Sign in with email*).
 
 ## Use it
 
@@ -37,32 +45,49 @@ new version is out (*Settings → General* turns the check off).
      click **Connect**.
    - **Phone / any browser:** open the address shown next to 📱 in RemoteFriend
      (shown once the computer is online), type the ID and password.
-3. On the shared computer, a window asks: **Allow**, **Always allow this device** or **Deny**.
-   With *Always allow*, that phone, browser or computer connects from then on **without the
-   password and without asking** — no one needs to be at the computer. Recent computers that
-   trust this device show “✔ connects without password”.
+3. On the shared computer, a window asks: **Allow**, **Always allow** or **Deny** (or **Block**).
+   With *Always allow*, that phone, browser or computer becomes **trusted**: from then on it
+   connects **without the password**, even after the password changed — the computer's user
+   still confirms each connection (*Allow / Deny*). Recent computers that trust this device show
+   “trusted”.
+
+**Devices** (menu on the left) lists who may connect without the password:
+
+| | Password | Asked every time |
+|---|---|---|
+| **My devices** — your own laptop, phone… | no | **no**: they connect even when nobody is at the computer |
+| **Trusted** — people you share with often | no | yes |
+| everyone else | yes | yes |
+| **Blocked** | — | refused without asking |
+
+A device becomes one of *My devices* only on this page (*Trusted → Make it my device*), never
+from the question window, so nobody can talk you into it during a call.
 
 The **password changes each time RemoteFriend starts** (*Settings → Security*: after every
-session, or never). The app and the phone page remember the password for a computer until it
-changes, so a dropped connection or a reload doesn't ask again. Trusted devices don't need it.
+session, or never); only devices connecting for the first time need it. The app and the phone
+page remember the password for a computer until it changes.
 
 ## On the shared computer
 
 While someone is connected, the RemoteFriend window shows:
 
-- **Shared screen**: a live preview of what viewers see, and buttons to switch to another
-  monitor at any time (viewers can switch too, if they may control the computer). On Wayland,
-  pick all screens you want to offer in the desktop's sharing dialog (*Choose screens…*).
+- **Screens** (with several monitors): which one viewers see now (**Show** another one at any
+  time), and a switch per screen: **on** = viewers with mouse & keyboard may switch to it by
+  themselves, **off** = they can only ask, and you answer *Show* or *Keep the current screen*.
+  Viewers see the list too, with the screens that need asking marked. On Wayland, pick all
+  screens you want to offer in the desktop's sharing dialog (*Choose…*). A live preview shows
+  what viewers see.
 - **Connected now**: every viewer with its device name, since when, and checkboxes for what it
   may do — **mouse & keyboard, sound, files, clipboard** — plus **Disconnect** and, for another
   RemoteFriend app, **Switch sides** (you control their computer instead; they are asked first).
 - **✋ Take back control**: stops mouse and keyboard of every viewer until you allow it again.
-- **Recent connections** and **Trusted devices** (remove one to require password and approval again).
+- **History** and **Devices** in the menu on the left.
 
 **What viewers see** (choose in the window): **Safe view** (default) hides RemoteFriend itself —
 the window is minimized and, on Windows/macOS, left out of the picture — and blacks out private
-apps such as password managers (list in *Settings → Private apps*; needs window positions, so
-on Wayland only RemoteFriend is hidden). **Everything (full control)** shows the screen exactly
+apps such as password managers (list in *Settings → Privacy*; needs window positions, so
+on Wayland only RemoteFriend is hidden). When only a browser tab is private (its title matches),
+the tab bar and address bar stay visible so viewers can switch tabs. **Everything** shows the screen exactly
 as you see it. Apps that protect themselves from every screen capture (e.g. Signal's “Screen
 security”) stay black in both modes until that option is turned off in the app. Closing
 RemoteFriend asks first, because the computer is unreachable while it is closed.
@@ -139,7 +164,9 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
   there only as hashes, and a revoked or expired key takes its computers offline within seconds.
 - New devices need the **password** and **approval on the shared computer**. Devices allowed with
   *Always allow* get their own 256-bit device key and log in end-to-end encrypted without the
-  password; the computer can remove them one by one.
+  password; they are still asked about unless the computer's user made them one of *My devices*
+  (only possible on the Devices page). Devices can be removed or blocked one by one; a blocked
+  device is refused without a question, even with the right password.
 - The password (format `abcde-23456`, ~50 bits; case and dashes don't matter) changes at every
   start of RemoteFriend by default (or after every session, or never — *Settings → Security*).
 - The computer's user sees who is connected, can disconnect them, take back control, and turn

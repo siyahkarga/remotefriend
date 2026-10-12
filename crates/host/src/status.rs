@@ -132,12 +132,14 @@ pub(crate) fn ui_prompts() -> bool {
 
 #[derive(Clone, Debug)]
 pub enum PromptKind {
-    /// Someone with the correct password wants to connect.
-    Connection { peer: String, can_remember: bool },
+    /// Someone with the correct password (or a trusted device) wants to connect.
+    Connection(crate::approval::Request),
     /// First connection to a relay server whose certificate is not yet trusted.
     TrustServer { addr: String, fingerprint: String },
     /// The viewer offers to switch sides: this computer's user would control theirs.
     SwitchSides { label: String },
+    /// A viewer asks to see a screen it may not switch to by itself.
+    ShowScreen { label: String, screen: String },
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +155,7 @@ pub enum Answer {
     Connection(crate::approval::Decision),
     Trust(bool),
     Switch(bool),
+    Screen(bool),
 }
 
 struct Pending {

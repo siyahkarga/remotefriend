@@ -22,7 +22,10 @@ mod video;
 mod wayland;
 mod web;
 
-pub use approval::{grant_temporary, remove_device, trusted_devices, Decision, TrustedDevice};
+pub use approval::{
+    block_device, blocked_devices, grant_temporary, remove_device, set_device_mine, trusted_devices, unblock, BlockedDevice,
+    Decision, Request, TrustedDevice,
+};
 pub use server::{lan_enabled, reconnect_server, run, RunOptions};
 pub use status::{
     answer, duration_text, enable_ui_prompts, local_time, notice, pending_prompts, prompt_sequence, snapshot, take_switch,
@@ -31,7 +34,7 @@ pub use status::{
 };
 
 pub(crate) use server::host_name;
-pub use video::{current_monitor, monitors, preview, select_monitor, MonitorInfo};
+pub use video::{current_monitor, monitors, preview, select_monitor, set_viewer_may_switch, viewer_may_switch, MonitorInfo};
 pub use files::{cancel as cancel_incoming_file, save_download_chunk};
 
 /// Logging to stderr: "info" by default; harmless D-Bus/portal warnings are hidden.
@@ -96,6 +99,15 @@ pub fn manage_access_keys(request: serde_json::Value) -> Result<serde_json::Valu
     rt.block_on(server::admin_request(&request)).map_err(|e| format!("{e:#}"))
 }
 
+/// Free access key by email from the relay (blocking; call from a thread).
+pub fn signup(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(server::signup_request(&request)).map_err(|e| format!("{e:#}"))
+}
+
 /// Save relay settings and reconnect. An empty server means the default one; `use_server`
 /// off keeps the computer on the local network.
 pub fn set_server(server: &str, web_url: &str, register_key: &str, use_server: bool) {
@@ -135,4 +147,19 @@ pub fn retry_screen_permission() -> bool {
 /// Folder where received files are saved.
 pub fn receive_dir() -> std::path::PathBuf {
     files::receive_dir()
+}
+
+/// Development aid for screenshots of the question window (debug builds only).
+#[cfg(debug_assertions)]
+pub fn demo_prompt(trusted: bool) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let req = approval::Request {
+            name: if trusted { "Ali's laptop".into() } else { "mizur".into() },
+            detail: "RemoteFriend app · internet · 83.135.241.220".into(),
+            trusted,
+            can_block: true,
+        };
+        let _ = status::ask_ui(status::PromptKind::Connection(req), std::time::Duration::from_secs(30));
+    });
 }

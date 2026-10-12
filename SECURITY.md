@@ -46,7 +46,13 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
   be turned off) and shows a red notice when the installed version has a known security problem.
 - The relay keeps no record of who connects: its logs contain no IP addresses, computer IDs or
   names and stay in RAM; the computer name is not even kept in memory. On disk it stores only
-  the computer IDs with their computer keys and access key, and the access keys as hashes.
+  the computer IDs with their computer keys and access key, the access keys as hashes (free keys
+  with the email address they were made for) and the owner's notices (no IPs, no IDs). Abuse
+  counters (sign-up codes per address and email, different computers contacted per address) are
+  kept in memory only, for 24 hours (since v0.14).
+- Updates (since v0.14) are installed only from a manifest signed with the release key
+  (Ed25519, kept on the release PC, never on a server); the installer must match the size and
+  SHA-256 in that manifest before it runs. A compromised website can therefore not push code.
 - The app (client, terminal host, phone page) is open source under the GPL-3.0; the relay is not.
 
 ## High-risk issues fixed in v0.5.6

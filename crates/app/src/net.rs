@@ -60,7 +60,8 @@ pub(crate) struct Shared {
     /// Round trip time (ms) measured with pings.
     pub rtt: u32,
     /// Screens of the remote computer: (index, label), and the one shown.
-    pub monitors: Vec<(usize, String)>,
+    /// The computer's screens: (index, "Screen 2 · 1920×1080", the viewer may switch there by itself).
+    pub monitors: Vec<(usize, String, bool)>,
     pub monitor: usize,
     /// Traffic flows directly (peer-to-peer), not through the relay server.
     pub direct: bool,
@@ -362,6 +363,8 @@ where
         "switch": me.online && !me.id.is_empty(),
         // With a typed password, a saved token still skips the approval question.
         "device": if device_login { None } else { device.clone() },
+        // This install's random id: lets the computer's owner block it if needed.
+        "vid": crate::history::viewer_id(),
     });
     write_packet_secure(&mut wr, &mut tx, &Packet::Control(auth.to_string())).await?;
     // Accept / Reject / WaitingForApproval
@@ -684,7 +687,12 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
             let token = str_of("device");
             if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
                 sh.issued_device = Some(token);
-                sh.banner("This computer now trusts this device: next time no password is needed.");
+                let ask = v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false);
+                sh.banner(if ask {
+                    "This computer now trusts this device: no password next time (its owner still confirms)."
+                } else {
+                    "This computer now trusts this device: next time no password is needed."
+                });
             }
             if let Some(p) = v.get("perms") {
                 sh.perms = parse_perms(p);
@@ -693,7 +701,15 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
                 parse_monitors(m, &mut sh);
             }
         }
-        Some("monitors") => parse_monitors(&v, &mut sh),
+        Some("monitors") => {
+            let before = sh.monitor;
+            parse_monitors(&v, &mut sh);
+            if sh.monitor != before {
+                let shown = format!("Now showing screen {}", sh.monitor + 1);
+                sh.banner(shown);
+            }
+        }
+        Some("monitor_no") => sh.banner("The computer's user kept the current screen."),
         Some("perms") => {
             let new = parse_perms(&v);
             let old = sh.perms;
@@ -783,7 +799,14 @@ fn parse_monitors(v: &serde_json::Value, sh: &mut Shared) {
             let i = m.get("i")?.as_u64()? as usize;
             let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("Screen");
             let (w, h) = (m.get("w").and_then(|x| x.as_u64()).unwrap_or(0), m.get("h").and_then(|x| x.as_u64()).unwrap_or(0));
-            Some((i, format!("{} ({w}×{h})", name)))
+            // Computers before v0.14 don't say: every screen was open then.
+            let open = m.get("open").and_then(|x| x.as_bool()).unwrap_or(true);
+            let label = if name.starts_with("Screen ") {
+                format!("Screen {} · {w}×{h}", i + 1)
+            } else {
+                format!("Screen {} · {name} · {w}×{h}", i + 1)
+            };
+            Some((i, label, open))
         })
         .collect();
     sh.monitor = v.get("current").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
