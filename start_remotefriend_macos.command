@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Terminal host (alternative). Most people should install RemoteFriend-macOS.dmg instead.
-# RemoteFriend one-click install + start (macOS, Apple Silicon and Intel).
+# RemoteFriends one-click install + start (macOS, Apple Silicon and Intel).
 # Double-click in Finder. Updates when a new release is out and asks for the server once.
 #
 # On first run macOS asks for two permissions (System Settings > Privacy & Security):

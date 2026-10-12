@@ -109,14 +109,14 @@ pub struct HostSettings {
     /// Old setting (v0.9): keep the same password. Replaced by `password_change`.
     #[serde(default)]
     pub fixed_password: bool,
-    /// When the password changes: "start" (each time RemoteFriend starts, default),
+    /// When the password changes: "start" (each time RemoteFriends starts, default),
     /// "session" (after every session that used it) or "never".
     #[serde(default)]
     pub password_change: String,
     /// Never try direct (peer-to-peer) connections; everything goes through the server.
     #[serde(default)]
     pub direct_off: bool,
-    /// Viewers see everything; otherwise RemoteFriend and private apps are hidden (safe view).
+    /// Viewers see everything; otherwise RemoteFriends and private apps are hidden (safe view).
     #[serde(default)]
     pub full_view: bool,
     /// Name parts of private apps hidden in the safe view (empty: the built-in list).

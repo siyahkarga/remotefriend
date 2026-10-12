@@ -212,7 +212,7 @@ pub(crate) fn desktop_notify(title: &str, msg: &str) {
     let (title, msg) = (clean(title), clean(msg));
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("notify-send")
-        .args(["-a", "RemoteFriend", &title, &msg])
+        .args(["-a", "RemoteFriends", &title, &msg])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();

@@ -841,7 +841,7 @@ pub(crate) fn welcome_json(jpeg: bool, issued: Option<crate::core::Issued>, hand
         "cursor": video::cursor_in_video(),
         "perms": handle.perms().to_json(handle.blocked()),
         "monitors": video::monitors_json(),
-        // Safe view: some windows (RemoteFriend, private apps) are hidden from viewers.
+        // Safe view: some windows (RemoteFriends, private apps) are hidden from viewers.
         "safe": !crate::privacy::full_view(),
     })
 }

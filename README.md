@@ -1,4 +1,4 @@
-# RemoteFriend
+# RemoteFriends
 
 Remote desktop for your own computers. Share a computer with one click and control it from
 another computer or **any phone browser** — no app needed on the phone. Video is H.264,
@@ -15,22 +15,22 @@ supported, and every session is end-to-end encrypted. Free software under the
 
 ## Install
 
-Download for your system from the [RemoteFriend page on blobidea.com](https://blobidea.com/products/remotefriend):
+Download for your system from the [RemoteFriends page on blobidea.com](https://blobidea.com/products/remotefriend):
 
 | System | Download | Install |
 |---|---|---|
 | Windows | [RemoteFriend-Setup.exe](https://blobidea.com/downloads/remotefriend/RemoteFriend-Setup.exe) | Run it. If SmartScreen appears: **More info → Run anyway**. |
-| macOS | [RemoteFriend-macOS.dmg](https://blobidea.com/downloads/remotefriend/RemoteFriend-macOS.dmg) | Drag RemoteFriend to Applications. If macOS refuses to open it: *System Settings → Privacy & Security* → **Open Anyway** (macOS 14 and older: right-click → Open). |
+| macOS | [RemoteFriend-macOS.dmg](https://blobidea.com/downloads/remotefriend/RemoteFriend-macOS.dmg) | Drag RemoteFriends to Applications. If macOS refuses to open it: *System Settings → Privacy & Security* → **Open Anyway** (macOS 14 and older: right-click → Open). |
 | Ubuntu 24.04+ / Debian 13+ | [RemoteFriend-linux-amd64.deb](https://blobidea.com/downloads/remotefriend/RemoteFriend-linux-amd64.deb) | Double-click it, or `sudo apt install ./RemoteFriend-linux-amd64.deb` |
 | Other Linux | [RemoteFriend-linux-x86_64.tar.gz](https://blobidea.com/downloads/remotefriend/RemoteFriend-linux-x86_64.tar.gz) | Extract, then run `./install.sh` (no root needed). |
 
-Then open **RemoteFriend** from your applications menu. The installers are not code-signed
-yet, which is why Windows and macOS ask for confirmation once. RemoteFriend updates itself:
+Then open **RemoteFriends** from your applications menu. The installers are not code-signed
+yet, which is why Windows and macOS ask for confirmation once. RemoteFriends updates itself:
 when a new version is out it shows **Update now**, and — when nobody is connected — installs it
 by itself after a 30-second notice (*Settings → General*). Updates are signed; anything that
 does not match the signature is not installed. On Linux (.deb) the desktop asks for your password.
 
-**Reachable from anywhere:** the first time RemoteFriend opens it asks for your email address and
+**Reachable from anywhere:** the first time RemoteFriends opens it asks for your email address and
 then the 6-digit code it sends you — that's all; your computer can now be reached over the
 internet. Free for 2 computers, for 1 year; on your second computer (or after reinstalling) sign
 in with the same address. Connecting *to* other computers needs nothing, so *Skip for now* is fine
@@ -38,12 +38,12 @@ too (later: Home → *Sign in with email*).
 
 ## Use it
 
-1. Open RemoteFriend on the computer you want to share. The left side shows **Your ID** and
+1. Open RemoteFriends on the computer you want to share. The left side shows **Your ID** and
    **Password**. Keep the app open while you want remote access.
 2. On the other device:
-   - **Computer:** open RemoteFriend, type the ID (or the local IP address) and password,
+   - **Computer:** open RemoteFriends, type the ID (or the local IP address) and password,
      click **Connect**.
-   - **Phone / any browser:** open the address shown next to 📱 in RemoteFriend
+   - **Phone / any browser:** open the address shown next to 📱 in RemoteFriends
      (shown once the computer is online), type the ID and password.
 3. On the shared computer, a window asks: **Allow**, **Always allow** or **Deny** (or **Block**).
    With *Always allow*, that phone, browser or computer becomes **trusted**: from then on it
@@ -63,13 +63,13 @@ too (later: Home → *Sign in with email*).
 A device becomes one of *My devices* only on this page (*Trusted → Make it my device*), never
 from the question window, so nobody can talk you into it during a call.
 
-The **password changes each time RemoteFriend starts** (*Settings → Security*: after every
+The **password changes each time RemoteFriends starts** (*Settings → Security*: after every
 session, or never); only devices connecting for the first time need it. The app and the phone
 page remember the password for a computer until it changes.
 
 ## On the shared computer
 
-While someone is connected, the RemoteFriend window shows:
+While someone is connected, the RemoteFriends window shows:
 
 - **Screens** (with several monitors): which one viewers see now (**Show** another one at any
   time), and a switch per screen: **on** = viewers with mouse & keyboard may switch to it by
@@ -79,18 +79,18 @@ While someone is connected, the RemoteFriend window shows:
   what viewers see.
 - **Connected now**: every viewer with its device name, since when, and checkboxes for what it
   may do — **mouse & keyboard, sound, files, clipboard** — plus **Disconnect** and, for another
-  RemoteFriend app, **Switch sides** (you control their computer instead; they are asked first).
+  RemoteFriends app, **Switch sides** (you control their computer instead; they are asked first).
 - **✋ Take back control**: stops mouse and keyboard of every viewer until you allow it again.
 - **History** and **Devices** in the menu on the left.
 
-**What viewers see** (choose in the window): **Safe view** (default) hides RemoteFriend itself —
+**What viewers see** (choose in the window): **Safe view** (default) hides RemoteFriends itself —
 the window is minimized and, on Windows/macOS, left out of the picture — and blacks out private
 apps such as password managers (list in *Settings → Privacy*; needs window positions, so
-on Wayland only RemoteFriend is hidden). When only a browser tab is private (its title matches),
+on Wayland only RemoteFriends is hidden). When only a browser tab is private (its title matches),
 the tab bar and address bar stay visible so viewers can switch tabs. **Everything** shows the screen exactly
 as you see it. Apps that protect themselves from every screen capture (e.g. Signal's “Screen
 security”) stay black in both modes until that option is turned off in the app. Closing
-RemoteFriend asks first, because the computer is unreachable while it is closed.
+RemoteFriends asks first, because the computer is unreachable while it is closed.
 
 ## Direct connections (peer-to-peer)
 
@@ -108,7 +108,7 @@ public address.
 Toolbar: Disconnect, sound on/off, **Keys** (Ctrl+Alt+Del, Win/⌘, Alt+Tab, Alt+F4, Task
 Manager, lock, Print Screen…), quality, **Screen** (when the computer has several), full screen,
 **Files** and **Switch sides**. *Files* sends files (progress, Cancel; the computer's Downloads/
-RemoteFriend folder, and you are told the exact path) and browses the remote computer's folders
+RemoteFriends folder, and you are told the exact path) and browses the remote computer's folders
 to download files (progress, Cancel, saved to your Downloads/RemoteFriend). The phone page has
 the same file panel.
 Copy and paste work both ways: Ctrl+C on the remote computer puts the text on your clipboard,
@@ -116,13 +116,13 @@ Ctrl+V pastes your clipboard there (Cmd and Ctrl are translated between Mac and 
 
 First start on **Linux Wayland**: the desktop asks to share the screen. Turn **ON “Allow Remote
 Interaction”** and click **Share**. It is remembered. First start on **macOS**: allow
-RemoteFriend under *System Settings → Privacy & Security → Screen Recording* and
+RemoteFriends under *System Settings → Privacy & Security → Screen Recording* and
 *Accessibility*, then restart the app.
 
 ## Reachable from anywhere: the server and access keys
 
 Within the same network everything works without a server. Over the internet, devices meet at
-the RemoteFriend relay run by blobidea (built into the downloads from blobidea.com, with its
+the RemoteFriends relay run by blobidea (built into the downloads from blobidea.com, with its
 certificate pinned). The relay only forwards encrypted data and is not part of this repository;
 builds from this source have no built-in server unless `RF_DEFAULT_SERVER`,
 `RF_DEFAULT_SERVER_FP` and `RF_DEFAULT_WEB_URL` are set when compiling.
@@ -132,7 +132,7 @@ builds from this source have no built-in server unless `RF_DEFAULT_SERVER`,
   *Settings → Server → Access key*. Keys come from the server owner; each key has its own
   computer limit and can expire or be revoked. Without a key the computer still works on the
   local network and can still connect to others.
-- *Settings → Server* can also point RemoteFriend at another relay, or turn the server off
+- *Settings → Server* can also point RemoteFriends at another relay, or turn the server off
   (local network only).
 - The server's owner manages the keys in *Settings → Server → Manage access keys…* (create with
   Copy and Email buttons, revoke, delete); this needs the server's owner key.
@@ -168,7 +168,7 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
   (only possible on the Devices page). Devices can be removed or blocked one by one; a blocked
   device is refused without a question, even with the right password.
 - The password (format `abcde-23456`, ~50 bits; case and dashes don't matter) changes at every
-  start of RemoteFriend by default (or after every session, or never — *Settings → Security*).
+  start of RemoteFriends by default (or after every session, or never — *Settings → Security*).
 - The computer's user sees who is connected, can disconnect them, take back control, and turn
   mouse/keyboard, sound, files and clipboard on or off per viewer.
 - Wrong passwords are rate limited per source (5 per minute, then 1/2/4/8/16-minute lockouts) plus a
@@ -177,7 +177,7 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
   *Settings → Allow direct connections from the local network* turns it on (the desktop app is
   encrypted there too; the plain-http browser page on the local network is not).
 - Every release comes with `SHA256SUMS.txt` on the download page.
-- **Found a security problem?** Please write to **support@blobidea.com** (subject “RemoteFriend
+- **Found a security problem?** Please write to **support@blobidea.com** (subject “RemoteFriends
   security”) instead of opening a public issue. Details: [SECURITY.md](SECURITY.md).
 
 ## Troubleshooting
@@ -186,16 +186,16 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
 |---|---|
 | “Cannot reach server” in the app | Check your internet connection and Settings → Server (empty = the default server). |
 | “No access key” / “this server needs an access key” | Enter the access key you got in Settings → Server → Access key. Connecting to other computers works without one. |
-| Phone shows “ID not found” | The shared computer must be running RemoteFriend and show “Online”. |
+| Phone shows “ID not found” | The shared computer must be running RemoteFriends and show “Online”. |
 | Black screen on Wayland | Click **Ask again** in the app and allow screen sharing. |
 | Mouse/keyboard do nothing on Wayland | “Allow Remote Interaction” was off: click **Ask again** and turn it on. wlroots desktops (Sway, Hyprland) can only control XWayland windows. |
-| Black screen / no control on macOS | Grant Screen Recording and Accessibility, then restart RemoteFriend. |
+| Black screen / no control on macOS | Grant Screen Recording and Accessibility, then restart RemoteFriends. |
 | Browser video is slow (“JPEG mode”) | Open the server's page over **HTTPS** (the 📱 address) in a current Chrome, Edge or Safari. |
 | “version mismatch” | Update the app on both computers. |
 | “This device is no longer trusted” | The computer removed this device (or forgot all devices): enter the current password once. |
 | A computer drops off (“ID not found”) after sleep or a network change | Dead links are noticed within about a minute and the computer reconnects; update the app if it is older than v0.9. |
 | No sound on the phone | Tap the 🔊 button (it shows 🔇 when off) and turn up the phone volume; on iPhone, also turn off silent mode. |
-| No sound from a Mac | Sound needs macOS 14.6 or newer; allow **System Audio Recording** for RemoteFriend in System Settings → Privacy & Security. |
+| No sound from a Mac | Sound needs macOS 14.6 or newer; allow **System Audio Recording** for RemoteFriends in System Settings → Privacy & Security. |
 
 ## Advanced
 
@@ -227,7 +227,7 @@ from the relay, which blobidea keeps current).
 
 ## License
 
-RemoteFriend (the app, the terminal host and the phone page) is free software: you can
+RemoteFriends (the app, the terminal host and the phone page) is free software: you can
 redistribute it and/or modify it under the terms of the GNU General Public License as published
 by the Free Software Foundation, either version 3 of the License, or (at your option) any later
 version. It is distributed in the hope that it will be useful, but **without any warranty**;

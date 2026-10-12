@@ -1,4 +1,4 @@
-; RemoteFriend Windows installer (per user, no administrator rights needed).
+; RemoteFriends Windows installer (per user, no administrator rights needed).
 ; Build: makensis /DVERSION=x.y.z /DSRC=<folder with exes> remotefriend.nsi
 
 Unicode True
@@ -11,16 +11,16 @@ Unicode True
   !define SRC "..\..\target\release"
 !endif
 
-Name "RemoteFriend"
+Name "RemoteFriends"
 OutFile "RemoteFriend-Setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\RemoteFriend"
 RequestExecutionLevel user
-BrandingText "RemoteFriend ${VERSION}"
+BrandingText "RemoteFriends ${VERSION}"
 
 !define MUI_ICON "..\..\assets\icon.ico"
 !define MUI_UNICON "..\..\assets\icon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\remotefriend.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Start RemoteFriend"
+!define MUI_FINISHPAGE_RUN_TEXT "Start RemoteFriends"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
@@ -31,7 +31,7 @@ BrandingText "RemoteFriend ${VERSION}"
 
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\RemoteFriend"
 
-Section "RemoteFriend"
+Section "RemoteFriends"
   ; An update must replace files of a running copy.
   nsExec::Exec 'taskkill /IM remotefriend.exe /F'
   Sleep 500
@@ -39,12 +39,15 @@ Section "RemoteFriend"
   File "${SRC}\remotefriend.exe"
   File "${SRC}\remote-friend-host.exe"
   File "..\..\assets\icon.ico"
-  CreateShortcut "$SMPROGRAMS\RemoteFriend.lnk" "$INSTDIR\remotefriend.exe" "" "$INSTDIR\icon.ico"
-  CreateShortcut "$DESKTOP\RemoteFriend.lnk" "$INSTDIR\remotefriend.exe" "" "$INSTDIR\icon.ico"
+  ; Before 0.14.1 the shortcuts were called RemoteFriend.
+  Delete "$SMPROGRAMS\RemoteFriend.lnk"
+  Delete "$DESKTOP\RemoteFriend.lnk"
+  CreateShortcut "$SMPROGRAMS\RemoteFriends.lnk" "$INSTDIR\remotefriend.exe" "" "$INSTDIR\icon.ico"
+  CreateShortcut "$DESKTOP\RemoteFriends.lnk" "$INSTDIR\remotefriend.exe" "" "$INSTDIR\icon.ico"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "RemoteFriend"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "RemoteFriends"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "RemoteFriend"
+  WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "blobidea"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\icon.ico"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
@@ -60,6 +63,8 @@ Section "Uninstall"
   Delete "$INSTDIR\icon.ico"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
+  Delete "$SMPROGRAMS\RemoteFriends.lnk"
+  Delete "$DESKTOP\RemoteFriends.lnk"
   Delete "$SMPROGRAMS\RemoteFriend.lnk"
   Delete "$DESKTOP\RemoteFriend.lnk"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RemoteFriend"

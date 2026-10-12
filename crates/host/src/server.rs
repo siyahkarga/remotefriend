@@ -74,7 +74,7 @@ pub struct RunOptions {
 }
 
 /// Runs the host until the process exits. Errors only on startup problems
-/// (e.g. the native port is already used by another RemoteFriend).
+/// (e.g. the native port is already used by another RemoteFriends).
 pub async fn run(opts: RunOptions) -> Result<()> {
     enable_dpi_awareness();
     remote_friend_common::tls::init_crypto();
@@ -101,7 +101,7 @@ pub async fn run(opts: RunOptions) -> Result<()> {
     let native_port = env_port("RF_NATIVE_PORT", remote_friend_common::DEFAULT_PORT);
     let addr = format!("{native_bind}:{native_port}");
     let listener = bind_retry(&addr).await.with_context(|| {
-        format!("cannot listen on {addr} (is RemoteFriend already running? set RF_NATIVE_PORT to use another port)")
+        format!("cannot listen on {addr} (is RemoteFriends already running? set RF_NATIVE_PORT to use another port)")
     })?;
 
     let host_id = remote_friend_common::identity::load_or_create_host_id();
@@ -190,7 +190,7 @@ fn print_banner(
 ) {
     status::say("");
     status::say(&format!("  ┌────────────────────────────────────────────────────────┐"));
-    status::say(&format!("    RemoteFriend  ·  {pc_name}"));
+    status::say(&format!("    RemoteFriends  ·  {pc_name}"));
     status::say(&format!("  ├────────────────────────────────────────────────────────┤"));
     status::say(&format!("    Computer ID : {}", remote_friend_common::format_id(host_id)));
     if from_env {
@@ -329,7 +329,7 @@ where
     }
 }
 
-/// Opens a listening port. While it is in use — a RemoteFriend that is just restarting still
+/// Opens a listening port. While it is in use — a RemoteFriends that is just restarting still
 /// holds it for a moment — it tries again for a few seconds.
 pub(crate) async fn bind_retry(addr: &str) -> std::io::Result<TcpListener> {
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
@@ -370,7 +370,7 @@ where
     };
     if h.version != remote_friend_common::PROTOCOL_VERSION {
         let msg = format!(
-            "version mismatch (computer {}, app {}): update RemoteFriend on both",
+            "version mismatch (computer {}, app {}): update RemoteFriends on both",
             remote_friend_common::PROTOCOL_VERSION,
             h.version
         );

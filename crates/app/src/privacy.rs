@@ -1,4 +1,4 @@
-//! Keep the RemoteFriend window out of the shared picture while someone is connected, so
+//! Keep the RemoteFriends window out of the shared picture while someone is connected, so
 //! a viewer cannot see the password or settings. Windows 10 (2004+) and macOS support
 //! this; on Linux the window is only minimized when a session starts.
 
@@ -33,7 +33,7 @@ pub(crate) fn exclude_from_capture(frame: &eframe::Frame, on: bool) {
 }
 
 /// A Linux Wayland desktop: apps can't learn where other windows are, so the safe view can
-/// hide only RemoteFriend itself.
+/// hide only RemoteFriends itself.
 pub(crate) fn wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
 }

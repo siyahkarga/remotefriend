@@ -1,4 +1,4 @@
-//! RemoteFriend host engine as a library: used by the desktop app (`remotefriend`) and by
+//! RemoteFriends host engine as a library: used by the desktop app (`remotefriend`) and by
 //! the terminal host (`remote-friend-host`).
 //!
 //! Start it with [`run`] on a tokio runtime; read state with [`snapshot`] and answer
@@ -156,7 +156,7 @@ pub fn demo_prompt(trusted: bool) {
         std::thread::sleep(std::time::Duration::from_millis(300));
         let req = approval::Request {
             name: if trusted { "Ali's laptop".into() } else { "mizur".into() },
-            detail: "RemoteFriend app · internet · 83.135.241.220".into(),
+            detail: "RemoteFriends app · internet · 83.135.241.220".into(),
             trusted,
             can_block: true,
         };

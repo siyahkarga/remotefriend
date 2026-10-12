@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>RemoteFriend</string>
-  <key>CFBundleDisplayName</key><string>RemoteFriend</string>
+  <key>CFBundleName</key><string>RemoteFriends</string>
+  <key>CFBundleDisplayName</key><string>RemoteFriends</string>
   <key>CFBundleIdentifier</key><string>io.remotefriend.app</string>
   <key>CFBundleExecutable</key><string>remotefriend</string>
   <key>CFBundleIconFile</key><string>icon</string>
@@ -14,6 +14,6 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>RemoteFriend sends this computer's sound to the device that is controlling it.</string>
+  <string>RemoteFriends sends this computer's sound to the device that is controlling it.</string>
 </dict>
 </plist>

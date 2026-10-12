@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=RemoteFriend
+Name=RemoteFriends
 GenericName=Remote Desktop
 Comment=Share this computer or control another one
 Exec=remotefriend

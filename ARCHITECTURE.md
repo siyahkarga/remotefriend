@@ -1,4 +1,4 @@
-# How RemoteFriend works
+# How RemoteFriends works
 
 ```text
  Viewer (phone browser or desktop app)                 Shared computer (desktop app)

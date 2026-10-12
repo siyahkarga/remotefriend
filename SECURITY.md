@@ -1,8 +1,8 @@
-# RemoteFriend Security Notes
+# RemoteFriends Security Notes
 
 ## Reporting a vulnerability
 
-Please write to **support@blobidea.com** with the subject “RemoteFriend security” instead of
+Please write to **support@blobidea.com** with the subject “RemoteFriends security” instead of
 opening a public issue. Describe what you found, how to reproduce it and which version you used;
 do not include passwords, access keys, host secrets, TLS private keys, screenshots or real
 personal files. We answer within 7 days, fix confirmed problems as fast as we can and credit you
@@ -12,7 +12,7 @@ version shows a red “security update” notice. Contact details are also publi
 
 ## Threat model
 
-RemoteFriend gives a client that knows the password, and that the host approves, access to the screen, input and file transfer. In practice this is as powerful as sitting at the computer. Don't share the password, don't leave the host running unattended, and don't enable `REMOTE_FRIEND_AUTO_ACCEPT=1` for everyday use.
+RemoteFriends gives a client that knows the password, and that the host approves, access to the screen, input and file transfer. In practice this is as powerful as sitting at the computer. Don't share the password, don't leave the host running unattended, and don't enable `REMOTE_FRIEND_AUTO_ACCEPT=1` for everyday use.
 
 ## Which links are encrypted?
 
@@ -89,7 +89,7 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
 
 ## v0.11.0: password policy, remembered passwords, one pointer
 
-- The password changes **when RemoteFriend starts** by default; "after every session" and
+- The password changes **when RemoteFriends starts** by default; "after every session" and
   "never" remain options. Approval of new devices is unchanged.
 - Viewers remember the last password that worked for a computer: the app in `recents.json`
   (0600), the browser in local storage. A wrong password deletes it. Trusted-device keys are
@@ -111,7 +111,7 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
   download files the logged-in user can read; the computer shows who downloads what. Uploads keep
   their real file name (`Downloads/RemoteFriend`, numbered on conflict) and can be canceled
   (the partial file is deleted).
-- **Safe view** (default) hides RemoteFriend and blacks out windows of private apps in the picture
+- **Safe view** (default) hides RemoteFriends and blacks out windows of private apps in the picture
   (Windows, macOS, X11 — Wayland gives no window positions). It is a privacy aid, not a security
   boundary: a viewer with mouse and keyboard can still open those apps' data in other ways.
 
@@ -129,7 +129,7 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
   never written to disk.
 - The computer's user sees every session and can disconnect it, pause all input ("Take back
   control") or turn off mouse/keyboard, sound, files and clipboard per viewer; the viewer is told.
-- While a session runs, the RemoteFriend window is minimized and (Windows, macOS) excluded from
+- While a session runs, the RemoteFriends window is minimized and (Windows, macOS) excluded from
   screen capture; closing it asks first.
 - Dead connections are detected: TCP keepalive on every link, relay heartbeat echoes (a computer
   reconnects after 70 s without an answer), a 90 s idle limit on relayed sessions and a 45 s idle
@@ -175,7 +175,7 @@ access) is not encrypted; there has been no independent security audit.
 - Keep local network access off unless you need it; never forward ports `33200` and `33201` to the internet.
 - Treat your access key like a password; if it leaks, ask the server owner to revoke it and get a new one.
 - Remove trusted devices you no longer use (*Settings → Security*).
-- Keep RemoteFriend up to date; a red notice in the app means a security fix.
+- Keep RemoteFriends up to date; a red notice in the app means a security fix.
 - If `~/.config/remotefriend/host_secret` is lost, the same ID cannot register again; the server
   owner has to remove the old entry.
 

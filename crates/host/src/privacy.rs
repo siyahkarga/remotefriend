@@ -1,6 +1,6 @@
 //! What viewers see: "safe" (default) or "full".
 //!
-//! Safe: the RemoteFriend window is kept out of the picture (the app minimizes it and, on
+//! Safe: the RemoteFriends window is kept out of the picture (the app minimizes it and, on
 //! Windows/macOS, excludes it from capture) and windows of private apps — password managers
 //! and anything the user adds — are blacked out. Only the visible part of such a window is
 //! covered, so windows in front of it stay visible. This needs window positions, which
@@ -35,7 +35,7 @@ pub fn set_full_view(full: bool) {
     crate::status::notice(if full {
         "Viewers now see everything (full control)."
     } else {
-        "Safe view: RemoteFriend and private apps are hidden from viewers."
+        "Safe view: RemoteFriends and private apps are hidden from viewers."
     });
 }
 

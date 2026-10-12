@@ -54,13 +54,13 @@ fn notify_desktop(req: &Request) {
     let name: String = req.name.chars().filter(|c| !matches!(c, '"' | '\\' | '\'' | '`' | '$')).collect();
     let who = if req.trusted { format!("{name} (trusted)") } else { name };
     let msg = if status::ui_prompts() {
-        format!("{who} wants to connect to this computer. Open RemoteFriend to answer.")
+        format!("{who} wants to connect to this computer. Open RemoteFriends to answer.")
     } else {
-        format!("{who} wants to connect to this computer. Answer in the RemoteFriend terminal.")
+        format!("{who} wants to connect to this computer. Answer in the RemoteFriends terminal.")
     };
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("notify-send")
-        .args(["-a", "RemoteFriend", "-i", "remotefriend", "Connection request", &msg])
+        .args(["-a", "RemoteFriends", "-i", "remotefriend", "Connection request", &msg])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -99,7 +99,7 @@ impl Decision {
 pub struct Request {
     /// Device name, e.g. "mizur" or "Chrome on Android".
     pub name: String,
-    /// How it connects, e.g. "RemoteFriend app · internet · 83.135.241.220".
+    /// How it connects, e.g. "RemoteFriends app · internet · 83.135.241.220".
     pub detail: String,
     /// A trusted device: it needed no password, only Allow / Deny are asked.
     pub trusted: bool,
@@ -188,7 +188,7 @@ fn prompt_line(question: &str, timeout: Duration) -> Option<String> {
 // When the operator chooses "Always allow", the device receives a 256-bit token. The
 // computer stores (~/.config/remotefriend/trusted_devices.json, 0600) its SHA-256 plus a
 // salted PBKDF2 key of it, which lets the device log in end-to-end encrypted without the
-// computer's password (that one changes when RemoteFriend starts). Entries from before v0.9
+// computer's password (that one changes when RemoteFriends starts). Entries from before v0.9
 // only have the hash; they are upgraded the next time the device logs in with the password.
 // Entries from before v0.14 have no `ask` field: they connected without a question then, so
 // they stay the user's own devices.

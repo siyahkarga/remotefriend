@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
         println!("  --new-password    renew the saved password (the old one stops working)");
         println!("  --forget-devices  forget all permanently allowed devices");
         println!();
-        println!("Prefer the desktop app (RemoteFriend) unless you need a terminal.");
+        println!("Prefer the desktop app (RemoteFriends) unless you need a terminal.");
         return Ok(());
     }
     if args.iter().any(|a| a == "--forget-devices") {

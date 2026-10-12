@@ -176,14 +176,14 @@ impl App {
         let viewing = matches!(self.screen, Screen::Viewer);
         dialog("close_confirm").show(ctx, |ui| {
             ui.set_width(440.0);
-            heading(ui, "⏻", ERR, "Close RemoteFriend?", |ui| {
+            heading(ui, "⏻", ERR, "Close RemoteFriends?", |ui| {
                 if sessions > 0 {
                     kit::note(ui, format!("{sessions} device(s) are connected to this computer right now. Closing ends their session."));
                 }
                 if viewing {
                     kit::note(ui, "Your connection to the remote computer ends too.");
                 }
-                kit::note(ui, "While RemoteFriend is closed, this computer cannot be reached remotely.");
+                kit::note(ui, "While RemoteFriends is closed, this computer cannot be reached remotely.");
             });
             ui.add_space(14.0);
             kit::split(ui, 32.0, |_| {}, |ui| {

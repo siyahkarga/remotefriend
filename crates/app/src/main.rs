@@ -1,4 +1,4 @@
-//! RemoteFriend desktop app: share this computer and control other computers.
+//! RemoteFriends desktop app: share this computer and control other computers.
 //!
 //! One window with a menu on the left: Home shows this computer's ID and password (others
 //! connect to it) next to "Connect to a computer"; Devices, History, Access keys and Settings
@@ -259,7 +259,7 @@ fn main() -> Result<()> {
     };
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("RemoteFriend")
+            .with_title("RemoteFriends")
             .with_app_id("remotefriend")
             .with_inner_size([1120.0, 720.0])
             .with_min_inner_size([520.0, 500.0])
@@ -267,7 +267,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RemoteFriend",
+        "RemoteFriends",
         opts,
         Box::new(|cc| {
             ui_kit::setup_style(&cc.egui_ctx);
@@ -315,7 +315,7 @@ impl App {
     /// picture (Windows, macOS), so viewers can't read the password or change settings.
     fn privacy(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let n = remote_friend_host::sessions::count();
-        // Full view: viewers see everything, RemoteFriend included.
+        // Full view: viewers see everything, RemoteFriends included.
         let safe = !remote_friend_host::privacy::full_view();
         if safe && n > 0 && self.last_sessions == 0 && matches!(self.screen, Screen::Home) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));

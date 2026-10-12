@@ -83,7 +83,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let text = match snap.notices.last() {
                         Some(n) => format!("{}  {}", n.time, n.text),
-                        None => "Keep RemoteFriend open to allow remote access.".to_string(),
+                        None => "Keep RemoteFriends open to allow remote access.".to_string(),
                     };
                     kit::line(ui, RichText::new(text).size(12.0).color(FAINT));
                 });
@@ -120,7 +120,7 @@ impl App {
                     if !compact {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.label(RichText::new("RemoteFriend").size(16.0).color(TEXT).strong());
+                            ui.label(RichText::new("RemoteFriends").size(16.0).color(TEXT).strong());
                             ui.label(RichText::new(format!("version {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(FAINT));
                         });
                     }
@@ -227,26 +227,26 @@ impl App {
                             use crate::update::Progress;
                             let text = match &progress {
                                 Progress::Downloading(got, total) if *total > 0 => {
-                                    format!("Downloading RemoteFriend {}… {} %", update.version, got * 100 / total)
+                                    format!("Downloading RemoteFriends {}… {} %", update.version, got * 100 / total)
                                 }
-                                Progress::Downloading(..) => format!("Downloading RemoteFriend {}…", update.version),
+                                Progress::Downloading(..) => format!("Downloading RemoteFriends {}…", update.version),
                                 Progress::Checking => "Checking the download…".to_string(),
                                 Progress::Installing if update.install.as_ref().is_some_and(|i| i.needs_password) => {
                                     "Installing — enter your computer's password in the window that opens.".to_string()
                                 }
-                                Progress::Installing => "Installing… RemoteFriend restarts by itself.".to_string(),
+                                Progress::Installing => "Installing… RemoteFriends restarts by itself.".to_string(),
                                 Progress::Failed(e) => format!("The update failed: {e}"),
                                 Progress::Idle => match countdown {
                                     Some(t) => format!(
-                                        "RemoteFriend {} is installed automatically in {} s.",
+                                        "RemoteFriends {} is installed automatically in {} s.",
                                         update.version,
                                         NOTICE.saturating_sub(t.elapsed()).as_secs()
                                     ),
                                     None if update.security => format!(
-                                        "Security update: RemoteFriend {} fixes a security problem in this version. Please install it soon.",
+                                        "Security update: RemoteFriends {} fixes a security problem in this version. Please install it soon.",
                                         update.version
                                     ),
-                                    None => format!("RemoteFriend {} is available.", update.version),
+                                    None => format!("RemoteFriends {} is available.", update.version),
                                 },
                             };
                             ui.add(egui::Label::new(RichText::new(text).color(TEXT).strong()).wrap());
@@ -322,8 +322,8 @@ impl App {
                 ui.label(RichText::new("Sharing this computer is not available").color(TEXT).strong());
                 kit::note(ui, err);
                 if err.contains("already running") || err.contains("33200") {
-                    kit::note(ui, "Another RemoteFriend seems to be running (maybe in a terminal). Close it, then restart this app.");
-                    if ui.add(kit::secondary("Restart RemoteFriend")).clicked() {
+                    kit::note(ui, "Another RemoteFriends seems to be running (maybe in a terminal). Close it, then restart this app.");
+                    if ui.add(kit::secondary("Restart RemoteFriends")).clicked() {
                         restart_app();
                     }
                 }
@@ -371,7 +371,7 @@ impl App {
         });
         if !snap.password_from_env {
             let policy = match remote_friend_host::password_policy() {
-                remote_friend_host::PasswordPolicy::OnStart => "Changes when RemoteFriend starts.",
+                remote_friend_host::PasswordPolicy::OnStart => "Changes when RemoteFriends starts.",
                 remote_friend_host::PasswordPolicy::AfterSession => "Changes after every session.",
                 remote_friend_host::PasswordPolicy::Never => "Stays the same until you change it.",
             };
@@ -447,9 +447,9 @@ impl App {
         let mut full = remote_friend_host::privacy::full_view();
         let wayland = crate::privacy::wayland();
         let safe_tip = if wayland {
-            "RemoteFriend is minimized while someone watches. This Linux desktop doesn't let apps hide other windows."
+            "RemoteFriends is minimized while someone watches. This Linux desktop doesn't let apps hide other windows."
         } else {
-            "RemoteFriend and private apps (Settings → Privacy) are hidden"
+            "RemoteFriends and private apps (Settings → Privacy) are hidden"
         };
         if kit::segmented(
             ui,
@@ -459,7 +459,7 @@ impl App {
             remote_friend_host::privacy::set_full_view(full);
         }
         if wayland && !full {
-            kit::note(ui, "On this Linux desktop (Wayland) only RemoteFriend itself can be hidden; other windows stay visible.");
+            kit::note(ui, "On this Linux desktop (Wayland) only RemoteFriends itself can be hidden; other windows stay visible.");
         }
 
         self.sessions_ui(ui);
@@ -556,7 +556,7 @@ impl App {
                 if crate::privacy::wayland()
                     && ui
                         .add(kit::quiet("Choose…"))
-                        .on_hover_text("Open the desktop's sharing dialog again to pick screens (RemoteFriend restarts)")
+                        .on_hover_text("Open the desktop's sharing dialog again to pick screens (RemoteFriends restarts)")
                         .clicked()
                     && !remote_friend_host::retry_screen_permission()
                 {

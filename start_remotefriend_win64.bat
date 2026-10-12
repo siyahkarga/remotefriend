@@ -1,7 +1,7 @@
 @echo off
 REM Terminal host (alternative). Most people should run RemoteFriend-Setup.exe instead.
 chcp 65001 >nul
-REM RemoteFriend one-click install + start (Windows 64-bit).
+REM RemoteFriends one-click install + start (Windows 64-bit).
 REM Updates the programs when a new release is out, asks for the server once
 REM (saved in settings.local.bat), opens the firewall and starts the host.
 cd /d "%~dp0"
@@ -46,7 +46,7 @@ REM Save settings (asked only once)
 )> settings.local.bat
 
 REM Firewall rule (needs administrator rights; silently skipped otherwise)
-netsh advfirewall firewall add rule name="RemoteFriend" dir=in action=allow protocol=TCP localport=33200,33201 >nul 2>nul
+netsh advfirewall firewall add rule name="RemoteFriends" dir=in action=allow protocol=TCP localport=33200,33201 >nul 2>nul
 
 echo.
 .\remote-friend-host.exe

@@ -121,7 +121,7 @@ jobs:
           # Ad-hoc signature (required to run on Apple Silicon; not notarized).
           codesign --force --deep --sign - "$APP"
           ln -s /Applications dmg/Applications
-          hdiutil create -volname RemoteFriend -srcfolder dmg -ov -format UDZO dist/RemoteFriend-macOS.dmg
+          hdiutil create -volname RemoteFriends -srcfolder dmg -ov -format UDZO dist/RemoteFriend-macOS.dmg
           lipo -create target/aarch64-apple-darwin/release/remote-friend-host target/x86_64-apple-darwin/release/remote-friend-host -output dist/remote-friend-host-macos
           codesign --force --sign - dist/remote-friend-host-macos
           cp start_remotefriend_macos.command dist/

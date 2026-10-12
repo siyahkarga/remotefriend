@@ -66,7 +66,7 @@ pub struct SessionInfo {
     pub trusted: bool,
     pub perms: Perms,
     pub transfer: Option<Transfer>,
-    /// The viewer is a RemoteFriend app that can switch sides.
+    /// The viewer is a RemoteFriends app that can switch sides.
     pub can_switch: bool,
     /// Traffic flows directly (peer-to-peer), not through the relay server.
     pub direct: bool,

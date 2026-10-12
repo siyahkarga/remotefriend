@@ -4,8 +4,8 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../../assets/icon.ico");
-        res.set("ProductName", "RemoteFriend");
-        res.set("FileDescription", "RemoteFriend");
+        res.set("ProductName", "RemoteFriends");
+        res.set("FileDescription", "RemoteFriends");
         if let Err(e) = res.compile() {
             println!("cargo:warning=could not embed the icon: {e}");
         }

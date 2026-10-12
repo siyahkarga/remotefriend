@@ -371,7 +371,7 @@ impl App {
                     }
                     (Some(_), false, Some(e)) if e.starts_with("registration rejected: ") => {
                         let reason = e.trim_start_matches("registration rejected: ");
-                        let reason = reason.split(" (RemoteFriend:").next().unwrap_or(reason);
+                        let reason = reason.split(" (RemoteFriend").next().unwrap_or(reason);
                         kit::dot(ui, WARN, format!("The server says: {reason}"));
                     }
                     (Some(_), false, Some(e)) => {
@@ -433,7 +433,7 @@ impl App {
                 let mut policy = remote_friend_host::password_policy();
                 let mut changed = false;
                 for (value, title, description) in [
-                    (P::OnStart, "Changes when RemoteFriend starts", "Recommended"),
+                    (P::OnStart, "Changes when RemoteFriends starts", "Recommended"),
                     (P::AfterSession, "Changes after every session", "For giving the password to people you help once"),
                     (P::Never, "Stays the same", "Until you press “New password”"),
                 ] {
@@ -479,14 +479,14 @@ impl App {
             }
             ui.add_space(4.0);
             if full {
-                kit::note(ui, "Viewers see the screen exactly as you do, RemoteFriend included.");
+                kit::note(ui, "Viewers see the screen exactly as you do, RemoteFriends included.");
             } else {
-                kit::note(ui, "RemoteFriend and the private apps below are hidden from viewers.");
+                kit::note(ui, "RemoteFriends and the private apps below are hidden from viewers.");
                 if crate::privacy::wayland() {
                     kit::callout(ui, WARN, |ui| {
                         kit::note(
                             ui,
-                            "This Linux desktop (Wayland) doesn't tell apps where windows are, so only RemoteFriend itself can be hidden (it is minimized while someone watches). Other windows stay visible.",
+                            "This Linux desktop (Wayland) doesn't tell apps where windows are, so only RemoteFriends itself can be hidden (it is minimized while someone watches). Other windows stay visible.",
                         );
                     });
                 }
@@ -555,7 +555,7 @@ impl App {
                         ui,
                         32.0,
                         |ui| {
-                            ui.label(RichText::new("Restart RemoteFriend to apply this.").color(TEXT));
+                            ui.label(RichText::new("Restart RemoteFriends to apply this.").color(TEXT));
                         },
                         |ui| {
                             if ui.add(kit::primary("Restart now")).clicked() {
@@ -571,7 +571,7 @@ impl App {
     fn settings_general(&mut self, ui: &mut egui::Ui) {
         kit::card(ui, |ui| {
             let mut auto = self.autostart;
-            kit::setting_row(ui, "Start RemoteFriend when I log in", "So this computer can be reached after a restart.", |ui| {
+            kit::setting_row(ui, "Start RemoteFriends when I log in", "So this computer can be reached after a restart.", |ui| {
                 if kit::switch(ui, &mut auto).changed() {
                     match autostart::set(auto) {
                         Ok(()) => self.autostart = auto,
@@ -614,7 +614,7 @@ impl App {
         });
         ui.add_space(12.0);
         kit::card(ui, |ui| {
-            ui.label(RichText::new(format!("RemoteFriend {}", env!("CARGO_PKG_VERSION"))).color(TEXT).strong());
+            ui.label(RichText::new(format!("RemoteFriends {}", env!("CARGO_PKG_VERSION"))).color(TEXT).strong());
             ui.horizontal_wrapped(|ui| {
                 kit::link(ui, "blobidea.com/products/remotefriend", crate::update::DOWNLOAD_PAGE);
                 ui.label(RichText::new("·").color(FAINT));

@@ -36,7 +36,7 @@ pub(crate) struct AuthMsg {
     pub resume: String,
     /// Device name for the computer's session list ("Chrome on Android", a computer name).
     pub name: String,
-    /// A RemoteFriend app that can switch sides.
+    /// A RemoteFriends app that can switch sides.
     pub can_switch: bool,
     /// Random id of the viewer's install (app or browser), so it can be blocked (v0.14+).
     pub vid: String,
@@ -80,7 +80,7 @@ pub(crate) enum Pre {
     Ask(Request),
 }
 
-/// Readable "how" for a request: "RemoteFriend app · internet · 83.135.241.220".
+/// Readable "how" for a request: "RemoteFriends app · internet · 83.135.241.220".
 pub(crate) fn describe_peer(peer: &str, app: bool) -> String {
     let internet = peer.contains("(via internet)");
     let addr = peer.trim_end_matches(" (via internet)").trim_start_matches("app ").trim();
@@ -89,7 +89,7 @@ pub(crate) fn describe_peer(peer: &str, app: bool) -> String {
         Some((ip, port)) if !ip.contains(':') && port.chars().all(|c| c.is_ascii_digit()) => ip,
         _ => addr,
     };
-    let kind = if app { "RemoteFriend app" } else { "web browser" };
+    let kind = if app { "RemoteFriends app" } else { "web browser" };
     let path = if internet { "internet" } else { "local network" };
     if addr.is_empty() { format!("{kind} · {path}") } else { format!("{kind} · {path} · {addr}") }
 }
@@ -362,7 +362,7 @@ impl Core {
                 self.handle.set_transfer(None);
                 self.send(serde_json::json!({"t": "file_done", "id": id, "name": name, "path": path}));
                 crate::status::notice(format!("Received {name} from {}: {path}", self.label));
-                crate::status::desktop_notify("RemoteFriend: file received", &format!("{name} saved to {path}"));
+                crate::status::desktop_notify("RemoteFriends: file received", &format!("{name} saved to {path}"));
             }
             Ok(None) => {
                 if let Some(inc) = self.incoming.get_mut(&id) {
@@ -646,7 +646,7 @@ impl Core {
         });
     }
 
-    /// The viewer (a RemoteFriend app) offers its own computer: {t:"switch", id, token, reply}.
+    /// The viewer (a RemoteFriends app) offers its own computer: {t:"switch", id, token, reply}.
     /// `reply` = it answers our request, otherwise this computer's user is asked first.
     fn on_switch(&mut self, v: &serde_json::Value) {
         let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -710,9 +710,9 @@ mod tests {
 
     #[test]
     fn requests_describe_how_the_viewer_connects() {
-        assert_eq!(describe_peer("app 83.135.241.220:5481 (via internet)", true), "RemoteFriend app · internet · 83.135.241.220");
+        assert_eq!(describe_peer("app 83.135.241.220:5481 (via internet)", true), "RemoteFriends app · internet · 83.135.241.220");
         assert_eq!(describe_peer("83.135.241.223 (via internet)", false), "web browser · internet · 83.135.241.223");
-        assert_eq!(describe_peer("192.168.1.20:40000", true), "RemoteFriend app · local network · 192.168.1.20");
+        assert_eq!(describe_peer("192.168.1.20:40000", true), "RemoteFriends app · local network · 192.168.1.20");
         assert_eq!(describe_peer("fe80::1", false), "web browser · local network · fe80::1");
     }
 

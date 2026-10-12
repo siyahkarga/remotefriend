@@ -68,7 +68,7 @@ fn load_saved_password() -> Option<String> {
 /// When the password changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasswordPolicy {
-    /// Each time RemoteFriend starts (default).
+    /// Each time RemoteFriends starts (default).
     OnStart,
     /// After every session that used it.
     AfterSession,

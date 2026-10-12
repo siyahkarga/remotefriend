@@ -5,7 +5,7 @@
 //! (manifest.sig, made on the release PC by deploy/publish-website.sh). The installer for this
 //! system is downloaded from blobidea.com, checked against the size and SHA-256 in the signed
 //! manifest, and only then run:
-//! - Windows: the setup program, silently (it closes RemoteFriend), then RemoteFriend starts again.
+//! - Windows: the setup program, silently (it closes RemoteFriends), then RemoteFriends starts again.
 //! - macOS: the app in the disk image replaces this one, then it starts again.
 //! - Linux .deb: `pkexec apt-get install` (the desktop asks for the password), then a restart.
 //! - Linux tar.gz (~/.local): its install.sh, then a restart.
@@ -209,7 +209,7 @@ fn evaluate(manifest: &serde_json::Value, current: &str, kind: Option<Kind>) -> 
     Some(Update { version: version.to_string(), security, install })
 }
 
-/// How this copy of RemoteFriend was installed.
+/// How this copy of RemoteFriends was installed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     WindowsSetup,
@@ -292,7 +292,7 @@ fn run_installer(kind: Kind, file: &Path, dir: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     match kind {
         Kind::WindowsSetup => {
-            // The setup closes RemoteFriend itself; cmd waits for it and starts the new version.
+            // The setup closes RemoteFriends itself; cmd waits for it and starts the new version.
             let line = format!("\"\"{}\" /S & start \"\" \"{}\"\"", file.display(), exe.display());
             let mut cmd = Command::new("cmd");
             #[cfg(windows)]

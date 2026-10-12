@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>RemoteFriend</title>
+<title>RemoteFriends</title>
 <style>
   :root {
     --bg:#f4f6fb; --card:#ffffff; --line:#dde2ee; --txt:#141824; --dim:#5d6578; --field:#f7f8fc;
@@ -139,7 +139,7 @@
   <form class="card" id="form" autocomplete="on" novalidate>
     <div class="brand">
       <div class="logo"><svg width="22" height="22"><use href="#i-monitor"/></svg></div>
-      <div><h1>RemoteFriend</h1><p id="sub">Remote desktop</p></div>
+      <div><h1>RemoteFriends</h1><p id="sub">Remote desktop</p></div>
     </div>
     <div id="idPane">
       <label for="idInput">Computer ID</label>
@@ -156,7 +156,7 @@
     <button class="primary" id="connectBtn" type="submit">Connect</button>
     <button class="ghost-btn" id="cancelBtn" type="button" hidden>Cancel</button>
     <div id="msg" class="msg" hidden></div>
-    <p class="hint" id="hint">The ID and password are shown in RemoteFriend on that computer.</p>
+    <p class="hint" id="hint">The ID and password are shown in RemoteFriends on that computer.</p>
     <div class="recents" id="recents" hidden><h2>Recent</h2><div id="recentList"></div></div>
   </form>
 </section>
@@ -469,7 +469,7 @@ function applyRole() {
   if (role === 'host') {
     $('idPane').hidden = true;
     $('sub').textContent = hostName ? 'Connecting to: ' + hostName : 'Connect to this computer';
-    $('hint').innerHTML = 'The password is shown in the RemoteFriend window on that computer. Someone there must approve the connection.';
+    $('hint').innerHTML = 'The password is shown in the RemoteFriends window on that computer. Someone there must approve the connection.';
     $('recents').hidden = true;
   } else {
     $('idPane').hidden = false;
@@ -618,7 +618,7 @@ function onClosed(sock) {
 function onMessage(ev) {
   if (typeof ev.data !== 'string') {
     if (sec && sec.ready) { receiveSecure(ev.data); return; }
-    if (!connected) { ws._reason = 'RemoteFriend on the remote computer is outdated. Update it.'; ws.close(); return; }
+    if (!connected) { ws._reason = 'RemoteFriends on the remote computer is outdated. Update it.'; ws.close(); return; }
     onFrame(ev.data);
     return;
   }
@@ -627,7 +627,7 @@ function onMessage(ev) {
   if (hasSubtle) {
     if (m.t === 'e2e1') { e2eStart(m); return; }
     if (m.t === 'e2e3') { e2eFinish(m); return; }
-    if (m.t === 'welcome' && !(sec && sec.ready)) { secFail('RemoteFriend on the remote computer is outdated (no encryption). Update it.'); return; }
+    if (m.t === 'welcome' && !(sec && sec.ready)) { secFail('RemoteFriends on the remote computer is outdated (no encryption). Update it.'); return; }
     if (m.t !== 'wait' && m.t !== 'reject') return;
   }
   handleJson(m);
@@ -758,7 +758,7 @@ function renderInfo() {
     ['Frame rate', fps + ' fps'],
     ['Data rate', kbps + ' kbit/s'],
     ['Latency (RTT)', rtt ? rtt + ' ms' : '—'],
-    ['View', safeView ? 'Safe: RemoteFriend and private apps are hidden' : 'Everything'],
+    ['View', safeView ? 'Safe: RemoteFriends and private apps are hidden' : 'Everything'],
     ['Path', p2p && p2p.open ? 'Direct (peer-to-peer), end-to-end encrypted' : 'Via the server, end-to-end encrypted'],
     ['Sound', soundReq ? 'On (' + (aCodec === 'opus' ? 'Opus' : 'PCM') + ')' : hostAudio ? 'Off' : 'Not available'],
   ];

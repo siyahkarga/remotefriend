@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RemoteFriend terminal host (alternative to the desktop app; Linux x86_64, X11 and Wayland).
+# RemoteFriends terminal host (alternative to the desktop app; Linux x86_64, X11 and Wayland).
 # Most people should install the app instead: https://blobidea.com/products/remotefriend
 # Usage: ./start_remotefriend_linux.sh
 # Updates the programs when a new release is out, asks for the server once

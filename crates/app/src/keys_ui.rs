@@ -239,13 +239,13 @@ fn email_ok(email: &str) -> bool {
 
 fn email_url(name: &str, email: &str, key: &str) -> String {
     let body = format!(
-        "Hi {name},\n\nhere is your RemoteFriend access key:\n\n    {key}\n\n\
-         1. Download RemoteFriend: https://blobidea.com/products/remotefriend\n\
+        "Hi {name},\n\nhere is your RemoteFriends access key:\n\n    {key}\n\n\
+         1. Download RemoteFriends: https://blobidea.com/products/remotefriend\n\
          2. Open it, go to Settings > Server > Access key, paste the key and click \"Save and reconnect\".\n\n\
          The key is personal, please keep it to yourself.\n"
     );
     let to = percent(email.trim()).replace("%40", "@");
-    format!("mailto:{to}?subject={}&body={}", percent("Your RemoteFriend access key"), percent(&body))
+    format!("mailto:{to}?subject={}&body={}", percent("Your RemoteFriends access key"), percent(&body))
 }
 
 fn percent(s: &str) -> String {
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn email_link_is_encoded() {
         let url = email_url("Ali Veli", "", "RF-ABCDE-FGHJK");
-        assert!(url.starts_with("mailto:?subject=Your%20RemoteFriend%20access%20key&body=Hi%20Ali%20Veli"));
+        assert!(url.starts_with("mailto:?subject=Your%20RemoteFriends%20access%20key&body=Hi%20Ali%20Veli"));
         assert!(email_url("Ali", "ali@example.com", "RF-X").starts_with("mailto:ali@example.com?subject="));
         assert!(email_ok("") && email_ok(" ali@example.com ") && !email_ok("ali") && !email_ok("a b@c.d") && !email_ok("a@b"));
         assert!(url.contains("RF-ABCDE-FGHJK") && !url.contains(' ') && !url.contains('\n'));

@@ -356,8 +356,8 @@ pub fn parse_hello(hello: &[u8]) -> Result<HostHello<'_>> {
     }
     match hello[4] {
         VERSION if hello.len() == 11 + SALT_LEN + PUB_LEN => {}
-        1 => bail!("the remote computer runs an older RemoteFriend: update it"),
-        v if v > VERSION => bail!("the remote computer runs a newer RemoteFriend: update this app"),
+        1 => bail!("the remote computer runs an older RemoteFriends: update it"),
+        v if v > VERSION => bail!("the remote computer runs a newer RemoteFriends: update this app"),
         _ => bail!("malformed handshake"),
     }
     let iterations = u32::from_be_bytes(hello[6..10].try_into().expect("4 bytes"));

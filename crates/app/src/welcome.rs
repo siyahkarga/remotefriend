@@ -124,7 +124,7 @@ impl Welcome {
                                 ui.image((logo.id(), egui::vec2(64.0, 64.0)));
                             }
                             ui.add_space(8.0);
-                            ui.label(RichText::new("Welcome to RemoteFriend").size(24.0).color(TEXT).strong());
+                            ui.label(RichText::new("Welcome to RemoteFriends").size(24.0).color(TEXT).strong());
                         });
                         ui.add_space(14.0);
                         kit::card(ui, |ui| self.step_ui(ui, busy, &mut outcome));

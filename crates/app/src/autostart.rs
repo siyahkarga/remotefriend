@@ -1,4 +1,4 @@
-//! "Start RemoteFriend when I log in" (per user, no admin rights needed).
+//! "Start RemoteFriends when I log in" (per user, no admin rights needed).
 //!
 //! - Linux: ~/.config/autostart/remotefriend.desktop
 //! - macOS: ~/Library/LaunchAgents/io.remotefriend.app.plist
@@ -39,7 +39,7 @@ pub fn set(enabled: bool) -> Result<(), String> {
         }
         std::fs::create_dir_all(path.parent().expect("has parent")).map_err(|e| e.to_string())?;
         let body = format!(
-            "[Desktop Entry]\nType=Application\nName=RemoteFriend\nExec=\"{}\"\nIcon=remotefriend\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=RemoteFriends\nExec=\"{}\"\nIcon=remotefriend\nX-GNOME-Autostart-enabled=true\n",
             exe.display()
         );
         return std::fs::write(&path, body).map_err(|e| e.to_string());
