@@ -89,6 +89,8 @@ static PUT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 /// Where the watcher expects the pointer: where a viewer put it, or where the computer's user
 /// last moved it to (so that their further moves are noticed too).
 static EXPECT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// When a viewer's move was last put through (a reading right after it may still be stale).
+static INJECTED: Mutex<Option<Instant>> = Mutex::new(None);
 static LOCAL_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_REMOTE: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -135,21 +137,32 @@ fn watch_local_user() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
         let _ = std::thread::Builder::new().name("rf-local-user".into()).spawn(|| {
-            let mut misses = 0;
+            // Recent readings where the pointer wasn't where it should be. A viewer may move
+            // it 60 times a second, so the person's own moves show only between those: the
+            // pointer is read often, and two such readings within a short time are enough.
+            let mut misses: Vec<Instant> = Vec::new();
             loop {
                 let busy = LAST_REMOTE.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed() < Duration::from_secs(30));
                 if !busy {
-                    misses = 0;
+                    misses.clear();
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
-                std::thread::sleep(Duration::from_millis(30));
-                let (Some((x, y)), Some((px, py))) = (pointer(), *EXPECT.lock().unwrap_or_else(|e| e.into_inner())) else { continue };
-                // Twice in a row, so a move we are making right now isn't mistaken for theirs.
-                misses = if (x - px).abs() > 6 || (y - py).abs() > 6 { misses + 1 } else { 0 };
-                if misses >= 2 {
-                    misses = 0;
-                    *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((x, y));
+                std::thread::sleep(Duration::from_millis(8));
+                let expected = *EXPECT.lock().unwrap_or_else(|e| e.into_inner());
+                let Some((x, y)) = pointer() else { continue };
+                // A viewer's move landing during the reading, or just before it: not a miss.
+                let settled = INJECTED.lock().unwrap_or_else(|e| e.into_inner()).is_none_or(|t| t.elapsed() > Duration::from_millis(6));
+                let Some((px, py)) = expected.filter(|e| Some(*e) == *EXPECT.lock().unwrap_or_else(|e| e.into_inner())) else { continue };
+                if !settled || ((x - px).abs() <= 6 && (y - py).abs() <= 6) {
+                    continue;
+                }
+                let now = Instant::now();
+                misses.retain(|t| now.duration_since(*t) < Duration::from_millis(200));
+                misses.push(now);
+                *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((x, y));
+                if misses.len() >= 2 {
+                    misses.clear();
                     let was = local_user_active();
                     *LOCAL_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + LOCAL_GRACE);
                     if !was {
@@ -268,6 +281,7 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("SetCursorPos: {e}"))?;
                 *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((px, py));
                 *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((px, py));
+                *INJECTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             }
             // macOS: capture is in pixels (Retina), the pointer in points.
             #[cfg(not(windows))]
@@ -277,6 +291,7 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
                 enigo.move_mouse(lx, ly, Coordinate::Abs)?;
                 *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((lx, ly));
                 *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((lx, ly));
+                *INJECTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             }
         }
         InputEvent::MouseDown { button } => enigo.button(map_btn(button), Direction::Press)?,
