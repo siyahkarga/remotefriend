@@ -535,7 +535,16 @@ impl App {
             }
             let apps = self.open_apps.0.clone();
             let mut changed = None;
+            let full = remote_friend_host::privacy::full_view();
             kit::titled_card(ui, "Open apps", "Switch an app on to black out its windows for viewers in the safe view.", |ui| {
+                if full {
+                    kit::callout(ui, WARN, |ui| {
+                        kit::note(ui, "Viewers see everything right now (Everything is chosen above), so no app is hidden.");
+                        if ui.add(kit::primary("Switch to Safe view")).clicked() {
+                            remote_friend_host::privacy::set_full_view(false);
+                        }
+                    });
+                }
                 if apps.is_empty() {
                     kit::empty(ui, "No app windows found.");
                 }
@@ -555,6 +564,10 @@ impl App {
             });
             if let Some((name, hidden)) = changed {
                 remote_friend_host::privacy::set_app_hidden(&name, hidden);
+                // Hiding an app only works in the safe view: switch to it rather than do nothing.
+                if hidden && full {
+                    remote_friend_host::privacy::set_full_view(false);
+                }
                 self.settings_private_apps = remote_friend_host::privacy::private_apps().join(", ");
                 self.open_apps.1 = None;
                 self.flash(if hidden { format!("{name} is hidden from viewers") } else { format!("Viewers see {name}") });

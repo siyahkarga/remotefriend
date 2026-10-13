@@ -126,6 +126,10 @@ pub struct HostSettings {
     /// The user edited the private-app list: an empty list then means no private apps.
     #[serde(default)]
     pub private_apps_set: bool,
+    /// The server owner's notices up to this id were shown once ("while you were away" doesn't
+    /// show them again, whatever the server says).
+    #[serde(default)]
+    pub notices_shown_upto: u64,
     /// Don't ask blobidea.com for new versions.
     #[serde(default)]
     pub no_update_check: bool,

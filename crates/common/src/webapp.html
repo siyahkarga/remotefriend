@@ -700,6 +700,7 @@ function handleJson(m) {
       if (was === 'wait' && ['shared', 'disk', 'all'].includes(filesLevel)) listDir('');
       break;
     }
+    case 'note': if (m.text) toast(m.text, 7000); break;
     case 'host_busy': if (m.on) toast('The computer\'s user is using the mouse — yours waits until they stop', 2500); break;
     case 'fdata': onFileData(m); break;
     case 'get_err': download = null; showDownload(); toast('Download failed: ' + (m.msg || ''), 5000); break;

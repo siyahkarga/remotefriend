@@ -21,6 +21,12 @@ pub(crate) struct Win {
     pub own: bool,
     /// Hides what is behind it. False for the menu bar, the Dock and see-through overlays.
     pub opaque: bool,
+    /// The desktop or the taskbar (Windows: they belong to File Explorer's process, but hiding
+    /// File Explorer must not black out the whole desktop).
+    pub shell: bool,
+    /// The app keeps this window out of every screen capture (Signal's "Screen security",
+    /// password managers): viewers would see what is behind it.
+    pub excluded: bool,
 }
 
 /// Windows that are on screen now, topmost first. Empty if the system can't tell.
@@ -57,11 +63,23 @@ mod imp {
         all.iter()
             .filter(|w| !w.is_minimized().unwrap_or(false))
             .filter_map(|w| {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowDisplayAffinity};
                 let (x, y) = (w.x().ok()?, w.y().ok()?);
                 let (ww, hh) = (w.width().ok()? as i32, w.height().ok()? as i32);
                 let pid = w.pid().unwrap_or(0);
                 let app = names.entry(pid).or_insert_with(|| w.app_name().unwrap_or_default()).clone();
-                Some(Win { x, y, w: ww, h: hh, app, title: w.title().unwrap_or_default(), own: pid == own, opaque: true })
+                let hwnd = HWND(w.id().unwrap_or(0) as usize as *mut core::ffi::c_void);
+                let mut buf = [0u16; 64];
+                // SAFETY: plain Win32 queries about a window handle; bad handles just fail.
+                let n = unsafe { GetClassNameW(hwnd, &mut buf) }.max(0) as usize;
+                let class = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+                let shell = matches!(class.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "WorkerW" | "Progman");
+                let mut affinity = 0u32;
+                // WDA_MONITOR (1) shows black, WDA_EXCLUDEFROMCAPTURE (0x11) leaves it out.
+                let excluded = unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.is_ok() && affinity != 0 && pid != own;
+                let title = w.title().unwrap_or_default();
+                Some(Win { x, y, w: ww, h: hh, app, title, own: pid == own, opaque: true, shell, excluded })
             })
             .collect()
     }
@@ -125,6 +143,9 @@ mod imp {
             }
             // Layer 0 holds normal windows; above it are the menu bar, the Dock, menus and overlays.
             let layer = number(d, "kCGWindowLayer").unwrap_or(0.0);
+            let own_window = number(d, "kCGWindowOwnerPID") == Some(own);
+            // Sharing state 0: the window is left out of screen captures (NSWindowSharingNone).
+            let excluded = !own_window && layer == 0.0 && number(d, "kCGWindowSharingState") == Some(0.0);
             let (x0, y0) = (r.origin.x.floor(), r.origin.y.floor());
             out.push(Win {
                 x: x0 as i32,
@@ -133,8 +154,10 @@ mod imp {
                 h: ((r.origin.y + r.size.height).ceil() - y0) as i32,
                 app: string(d, "kCGWindowOwnerName"),
                 title: string(d, "kCGWindowName"),
-                own: number(d, "kCGWindowOwnerPID") == Some(own),
+                own: own_window,
                 opaque: layer == 0.0 && alpha >= 0.99,
+                shell: false,
+                excluded,
             });
         }
         out
@@ -299,6 +322,8 @@ mod imp {
                 title,
                 own: pid.ok().and_then(|r| u32s(&r).first().copied()) == Some(own),
                 opaque: true,
+                shell: false,
+                excluded: false,
             });
         }
         // The stacking list goes bottom to top.

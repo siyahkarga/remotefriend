@@ -84,10 +84,19 @@ pub(crate) fn release_all() {
 /// After the computer's user moved the mouse, viewers' input waits this long.
 const LOCAL_GRACE: Duration = Duration::from_millis(1500);
 
-/// Where we last put the pointer (in the platform's screen coordinates).
+/// Where a viewer last put the pointer (in the platform's screen coordinates).
 static PUT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// Where the watcher expects the pointer: where a viewer put it, or where the computer's user
+/// last moved it to (so that their further moves are noticed too).
+static EXPECT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static LOCAL_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_REMOTE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The pointer is where a viewer last put it: their own pointer shows it already, so it isn't
+/// drawn into the picture (that would lag behind theirs and make every move a new frame).
+pub(crate) fn put_by_viewer(x: i32, y: i32) -> bool {
+    PUT.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|(px, py)| (x - px).abs() <= 2 && (y - py).abs() <= 2)
+}
 
 /// The computer's user is using the mouse: viewers' input waits.
 pub(crate) fn local_user_active() -> bool {
@@ -135,12 +144,12 @@ fn watch_local_user() {
                     continue;
                 }
                 std::thread::sleep(Duration::from_millis(30));
-                let (Some((x, y)), Some((px, py))) = (pointer(), *PUT.lock().unwrap_or_else(|e| e.into_inner())) else { continue };
+                let (Some((x, y)), Some((px, py))) = (pointer(), *EXPECT.lock().unwrap_or_else(|e| e.into_inner())) else { continue };
                 // Twice in a row, so a move we are making right now isn't mistaken for theirs.
                 misses = if (x - px).abs() > 6 || (y - py).abs() > 6 { misses + 1 } else { 0 };
                 if misses >= 2 {
                     misses = 0;
-                    *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((x, y));
+                    *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((x, y));
                     let was = local_user_active();
                     *LOCAL_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + LOCAL_GRACE);
                     if !was {
@@ -258,6 +267,7 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
                 unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(px, py) }
                     .map_err(|e| anyhow::anyhow!("SetCursorPos: {e}"))?;
                 *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((px, py));
+                *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((px, py));
             }
             // macOS: capture is in pixels (Retina), the pointer in points.
             #[cfg(not(windows))]
@@ -266,6 +276,7 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
                 let ly = g.mon_y + (y as f32 / g.scale).round() as i32;
                 enigo.move_mouse(lx, ly, Coordinate::Abs)?;
                 *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((lx, ly));
+                *EXPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((lx, ly));
             }
         }
         InputEvent::MouseDown { button } => enigo.button(map_btn(button), Direction::Press)?,

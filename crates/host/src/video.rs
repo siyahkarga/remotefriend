@@ -200,9 +200,10 @@ fn portal_capture() -> bool {
     crate::wayland::is_wayland() && std::env::var("RF_WAYLAND_XCAP").map(|v| v != "1").unwrap_or(true)
 }
 
-/// Is the mouse pointer drawn into the picture? The portal embeds it; on X11, Windows and
-/// macOS the screenshot leaves it out, so it is drawn in (`draw_pointer`) where the system
-/// tells where it is.
+/// Does the picture always show the pointer, so viewers hide theirs? Only the Wayland portal's
+/// embedded pointer. On X11, Windows and macOS the screenshot leaves it out; it is drawn in
+/// (`draw_pointer`) only where a viewer didn't put it — moved by the computer's user, or
+/// before a viewer touched it — and viewers keep their own, immediate pointer.
 pub(crate) fn cursor_in_video() -> bool {
     if test_pattern() {
         return false;
@@ -211,7 +212,7 @@ pub(crate) fn cursor_in_video() -> bool {
     if portal_capture() {
         return crate::wayland::cursor_embedded();
     }
-    crate::input::pointer().is_some()
+    false
 }
 
 /// Draw an arrow pointer into a captured monitor image at the computer's pointer position
@@ -523,7 +524,7 @@ impl Capturer {
         let (window_scale, bars) = if cfg!(target_os = "macos") { (scale, 1.0) } else { (1.0, scale) };
         crate::privacy::mask(&mut data, w, h, mon.x().unwrap_or(0), mon.y().unwrap_or(0), window_scale, bars);
         // The computer's pointer (window units on macOS are points, like the pointer).
-        if let Some((px, py)) = crate::input::pointer() {
+        if let Some((px, py)) = crate::input::pointer().filter(|(x, y)| !crate::input::put_by_viewer(*x, *y)) {
             let to_px = |v: i32, origin: i32| ((v - origin) as f32 * window_scale).round() as i32;
             let (ix, iy) = (to_px(px, mon.x().unwrap_or(0)), to_px(py, mon.y().unwrap_or(0)));
             if ix >= 0 && iy >= 0 && (ix as u32) < w && (iy as u32) < h {

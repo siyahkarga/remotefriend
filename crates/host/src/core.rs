@@ -271,6 +271,8 @@ pub(crate) struct Core {
     pub flow: Flow,
     pub sound: Sound,
     monitors: tokio::sync::watch::Receiver<u64>,
+    /// Explanations for viewers (an app hides its window from screen sharing).
+    notes: tokio::sync::watch::Receiver<Option<String>>,
     ctrl: mpsc::Sender<String>,
     clip: Option<broadcast::Receiver<String>>,
     incoming: std::collections::HashMap<u64, Incoming>,
@@ -306,11 +308,13 @@ impl Core {
         let label = handle.label();
         let clip = handle.perms().clipboard.then(crate::clipboard::subscribe);
         let monitors = crate::video::monitor_changes();
+        let notes = crate::privacy::notes();
         Self {
             handle,
             flow,
             sound: Sound::default(),
             monitors,
+            notes,
             ctrl,
             clip,
             incoming: Default::default(),
@@ -354,6 +358,13 @@ impl Core {
             text = next_clip(&mut self.clip) => match text {
                 Some(text) => Event::Send(serde_json::json!({"t": "clip", "text": text}).to_string()),
                 None => Event::Nothing,
+            },
+            r = self.notes.changed() => match r {
+                Ok(()) => match self.notes.borrow_and_update().clone() {
+                    Some(text) => Event::Send(serde_json::json!({"t": "note", "text": text}).to_string()),
+                    None => Event::Nothing,
+                },
+                Err(_) => std::future::pending().await,
             },
             r = self.monitors.changed() => match r {
                 Ok(()) => Event::Send(crate::video::monitors_json().to_string()),

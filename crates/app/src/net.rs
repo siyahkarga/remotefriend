@@ -850,6 +850,7 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
             let msg = format!("File not sent: {}", str_of("msg"));
             sh.banner(msg);
         }
+        Some("note") => sh.banner(str_of("text")),
         Some("host_busy") => {
             if v.get("on").and_then(|x| x.as_bool()) == Some(true) {
                 sh.banner("The computer's user is using the mouse: yours waits until they stop");

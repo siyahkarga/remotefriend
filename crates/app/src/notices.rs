@@ -79,7 +79,9 @@ pub(crate) fn mark_seen(slot: Arc<Mutex<Notices>>) {
         }
     }
     std::thread::spawn(move || {
-        let _ = remote_friend_host::manage_access_keys(json!({ "cmd": "events_seen" }));
+        if let Err(e) = remote_friend_host::manage_access_keys(json!({ "cmd": "events_seen" })) {
+            tracing::warn!("could not mark the server's notices read: {e}");
+        }
     });
 }
 

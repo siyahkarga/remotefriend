@@ -245,19 +245,30 @@ impl App {
         if !n.loaded {
             return;
         }
-        if n.unseen == 0 {
+        // Only notices this computer hasn't shown yet.
+        let shown_upto = remote_friend_common::identity::load_host_settings().notices_shown_upto;
+        let fresh: Vec<&serde_json::Value> =
+            n.events.iter().filter(|e| e["seen"] != true && e["id"].as_u64().unwrap_or(0) > shown_upto).collect();
+        if fresh.is_empty() {
             self.notices_prompted = true;
             return;
         }
-        let warnings = n.events.iter().filter(|e| e["seen"] != true && e["kind"] == "warning").count();
+        if let Some(max) = fresh.iter().filter_map(|e| e["id"].as_u64()).max() {
+            let mut s = remote_friend_common::identity::load_host_settings();
+            if s.notices_shown_upto < max {
+                s.notices_shown_upto = max;
+                remote_friend_common::identity::save_host_settings(&s);
+            }
+        }
+        let warnings = fresh.iter().filter(|e| e["kind"] == "warning").count();
         let (icon, color) = if warnings > 0 { ("⚠", WARN) } else { ("🔑", ACCENT) };
         dialog("notices").show(ctx, |ui| {
             ui.set_width(480.0);
             heading(ui, icon, color, "While you were away", |ui| {
-                kit::note(ui, format!("Your server has {} new notice(s).", n.unseen));
+                kit::note(ui, format!("Your server has {} new notice(s).", fresh.len()));
             });
             ui.add_space(10.0);
-            for e in n.events.iter().filter(|e| e["seen"] != true).take(5) {
+            for e in fresh.iter().take(5) {
                 let mark = if e["kind"] == "warning" { "⚠ " } else { "" };
                 ui.add(
                     egui::Label::new(RichText::new(format!("{mark}{}", e["text"].as_str().unwrap_or_default())).color(TEXT)).wrap(),

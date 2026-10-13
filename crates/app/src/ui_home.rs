@@ -504,6 +504,9 @@ impl App {
         ) {
             remote_friend_host::privacy::set_full_view(full);
         }
+        if full {
+            kit::note(ui, "Nothing is hidden from viewers now: hidden apps (Settings, Privacy) only work in Safe view.");
+        }
         if wayland && !full {
             kit::note(ui, "On this Linux desktop (Wayland) private apps can't be hidden: close them while someone watches, or log in with an X11 (Xorg) session.");
         }

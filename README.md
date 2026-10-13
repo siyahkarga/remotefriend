@@ -80,8 +80,9 @@ its permissions, Disconnect and file progress, the shared screen, *Open RemoteFr
 Wayland it runs as a small helper on XWayland, the only way it can choose its place and stay on
 top there.
 
-Viewers see the computer's **pointer** in the picture (also when you move it); over the picture
-the desktop viewer hides its own, so there is one pointer.
+Viewers keep their own, immediate pointer. The computer's **pointer** is drawn into the picture
+when it isn't where a viewer put it — when you move it, or before a viewer touched it — so they
+always see where yours is. (Wayland draws it into the picture all the time.)
 
 Files on their way show the same everywhere: the name, a thin bar, the percentage, and how much
 is done and left. They travel inside the session's end-to-end encryption — directly between the
@@ -117,8 +118,10 @@ through. When only a browser tab is private (its title matches), the tab bar and
 visible so viewers can switch tabs. Linux **Wayland** desktops don't tell apps where windows are:
 there private apps can't be blacked out (use an X11 session for that) and RemoteFriends itself
 stays visible (the password shows as dots; viewers can't use it). **Everything** shows the screen exactly
-as you see it. Apps that protect themselves from every screen capture (e.g. Signal's “Screen
-security”) stay black in both modes until that option is turned off in the app. Closing
+as you see it; hidden apps only work in Safe view (the app says so, and hiding an app switches
+to it). Apps that protect themselves from every screen capture (e.g. Signal's “Screen
+security”) can't be shown by any program; viewers see a striped box where such a window is,
+and you and they are told which app it is. Closing
 RemoteFriends asks first, because the computer is unreachable while it is closed.
 
 ## Direct connections (peer-to-peer)

@@ -11,6 +11,10 @@
 //! RemoteFriends can keep itself out of view (the app shows a neutral screen instead).
 //!
 //! Full: everything is shown, as if sitting at the computer (RemoteFriends included).
+//!
+//! In both views a window whose app keeps it out of screen captures (Signal's "Screen
+//! security") is shown as a striped box, and the computer's user and the viewers are told
+//! once which app does that — otherwise it just seems to vanish.
 
 use crate::winlist::Win;
 use remote_friend_common::InputEvent;
@@ -176,43 +180,80 @@ struct Shape {
     w: i32,
     h: i32,
     private: bool,
+    /// Its app keeps it out of the capture: shown as stripes.
+    excluded: bool,
     opaque: bool,
     /// Left visible at the top of a private window (a browser's tab strip and address bar).
     keep_top: i32,
 }
 
-/// Which windows are private. `bars` is the size of the browser bars per BROWSER_BARS unit.
-fn shapes(wins: &[Win], patterns: &[String], bars: f32) -> Vec<Shape> {
+/// Which windows are private (`full`: none, everything is shown). `bars` is the size of the
+/// browser bars per BROWSER_BARS unit.
+fn shapes(wins: &[Win], patterns: &[String], bars: f32, full: bool) -> Vec<Shape> {
     wins.iter()
         .map(|w| {
             let app = w.app.to_lowercase();
             let title = w.title.to_lowercase();
-            let bar = w.title == SESSION_BAR_TITLE;
-            let whole_window = !bar && (w.own || app.contains("remotefriend") || title == "remotefriends" || listed(&app, patterns));
-            let by_title = !bar && listed(&title, patterns);
+            // The session bar, the desktop and the taskbar are never hidden.
+            let keep = full || w.title == SESSION_BAR_TITLE || w.shell;
+            let whole_window = !keep && (w.own || app.contains("remotefriend") || title == "remotefriends" || listed(&app, patterns));
+            let by_title = !keep && listed(&title, patterns);
             // Only the page of a browser tab is private: its bars stay visible.
             let keep_top = if !whole_window && by_title && is_browser(&app) {
                 ((BROWSER_BARS * bars).round() as i32).min(w.h / 3)
             } else {
                 0
             };
-            Shape { x: w.x, y: w.y, w: w.w, h: w.h, private: whole_window || by_title, opaque: w.opaque, keep_top }
+            let excluded = w.excluded && !w.own;
+            Shape { x: w.x, y: w.y, w: w.w, h: w.h, private: whole_window || by_title, excluded, opaque: w.opaque, keep_top }
         })
         .collect()
+}
+
+/// Apps whose windows hide from screen captures, already mentioned in this run.
+static TOLD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn notes_tx() -> &'static tokio::sync::watch::Sender<Option<String>> {
+    static TX: OnceLock<tokio::sync::watch::Sender<Option<String>>> = OnceLock::new();
+    TX.get_or_init(|| tokio::sync::watch::channel(None).0)
+}
+
+/// Short explanations for every viewer (each session forwards them as {t:"note"}).
+pub(crate) fn notes() -> tokio::sync::watch::Receiver<Option<String>> {
+    notes_tx().subscribe()
+}
+
+/// Say once per app when it keeps its window out of screen captures.
+fn tell_excluded(wins: &[Win]) {
+    for w in wins.iter().filter(|w| w.excluded && !w.own) {
+        let name = if w.app.trim().is_empty() { w.title.trim().to_string() } else { w.app.trim().to_string() };
+        {
+            let mut told = TOLD.lock().unwrap_or_else(|e| e.into_inner());
+            if told.contains(&name) {
+                continue;
+            }
+            told.push(name.clone());
+        }
+        crate::status::notice(format!(
+            "{name} hides its window from screen sharing (its own setting, e.g. Signal: Settings, Privacy, Screen security). Viewers see a striped box there."
+        ));
+        notes_tx().send_replace(Some(format!("{name} hides its window from screen sharing; you see a striped box where it is.")));
+    }
 }
 
 /// The windows of the previous frame, to cover a window that moved where it was before too.
 static LAST: Mutex<Option<(Instant, Vec<Shape>)>> = Mutex::new(None);
 
-/// Safe view: black out the visible parts of private windows in a captured monitor image
-/// (RGBA, `width`×`height`, monitor origin at `mon_x`/`mon_y`, `scale` pixels per window
-/// unit, `bars` = display scale in window units for the browser bars).
+/// Black out the visible parts of private windows (safe view) and stripe the windows their
+/// apps keep out of the capture, in a captured monitor image (RGBA, `width`×`height`, monitor
+/// origin at `mon_x`/`mon_y`, `scale` pixels per window unit, `bars` = display scale in
+/// window units for the browser bars).
 pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: i32, scale: f32, bars: f32) {
-    if full_view() {
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return;
-    }
-    let now = shapes(&crate::winlist::list(), &patterns(), bars);
+    let full = full_view();
+    let wins = crate::winlist::list();
+    tell_excluded(&wins);
+    let patterns = if full { Vec::new() } else { patterns() };
+    let now = shapes(&wins, &patterns, bars, full);
     let before = {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         let before = last.take().filter(|(t, _)| t.elapsed() < Duration::from_secs(1)).map(|(_, s)| s);
@@ -228,6 +269,7 @@ pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: 
                 x1: to_px(s.x + s.w, mon_x),
                 y1: to_px(s.y + s.h, mon_y),
                 private: s.private,
+                excluded: s.excluded,
                 opaque: s.opaque,
                 keep_top: (s.keep_top as f32 * scale).round() as i32,
             })
@@ -248,20 +290,23 @@ struct Rect {
     x1: i32,
     y1: i32,
     private: bool,
+    /// Left out of the capture by its app: stripes.
+    excluded: bool,
     /// Hides what is behind it (see-through overlays and the menu bar don't).
     opaque: bool,
     /// Rows at the top that stay visible (a browser's bars).
     keep_top: i32,
 }
 
-/// Black out the visible parts of the private rectangles (topmost first). Whole windows hide
-/// what is behind them, including a browser's visible bars.
+/// Black out the visible parts of the private rectangles and stripe the excluded ones
+/// (topmost first). Whole windows hide what is behind them, including a browser's bars.
 fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[Rect]) {
     for (i, r) in rects.iter().enumerate() {
-        let Rect { x0, y0, x1, y1, private, keep_top, .. } = *r;
-        if !private {
+        let Rect { x0, y0, x1, y1, private, excluded, .. } = *r;
+        if !private && !excluded {
             continue;
         }
+        let keep_top = if private { r.keep_top } else { 0 };
         for y in (y0 + keep_top).max(0)..y1.min(height as i32) {
             // This row of the window minus the windows in front of it.
             let mut spans = vec![(x0.max(0), x1.min(width as i32))];
@@ -277,8 +322,9 @@ fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[Rect]) {
             }
             for (s0, s1) in spans {
                 let row = y as usize * width as usize * 4;
-                for px in rgba[row + s0 as usize * 4..row + s1 as usize * 4].chunks_exact_mut(4) {
-                    px.copy_from_slice(&[24, 24, 28, 255]);
+                for (k, px) in rgba[row + s0 as usize * 4..row + s1 as usize * 4].chunks_exact_mut(4).enumerate() {
+                    let color = if private || ((s0 as usize + k + y as usize) / 14) % 2 == 0 { [24, 24, 28, 255] } else { [46, 46, 54, 255] };
+                    px.copy_from_slice(&color);
                 }
             }
         }
@@ -290,7 +336,7 @@ mod tests {
     use super::*;
 
     fn r(x0: i32, y0: i32, x1: i32, y1: i32, private: bool) -> Rect {
-        Rect { x0, y0, x1, y1, private, opaque: true, keep_top: 0 }
+        Rect { x0, y0, x1, y1, private, excluded: false, opaque: true, keep_top: 0 }
     }
 
     #[test]
@@ -329,7 +375,35 @@ mod tests {
     }
 
     fn win(app: &str, title: &str, own: bool) -> Win {
-        Win { x: 0, y: 0, w: 800, h: 600, app: app.into(), title: title.into(), own, opaque: true }
+        Win { x: 0, y: 0, w: 800, h: 600, app: app.into(), title: title.into(), own, opaque: true, shell: false, excluded: false }
+    }
+
+    #[test]
+    fn hiding_file_explorer_leaves_the_desktop_and_taskbar_alone() {
+        let patterns = vec!["windows explorer".to_string()];
+        let taskbar = Win { shell: true, ..win("Windows Explorer", "", false) };
+        let s = shapes(&[win("Windows Explorer", "Downloads", false), taskbar], &patterns, 1.0, false);
+        assert!(s[0].private);
+        assert!(!s[1].private);
+    }
+
+    #[test]
+    fn everything_hides_nothing_but_still_marks_self_hiding_windows() {
+        let patterns: Vec<String> = DEFAULT_PRIVATE_APPS.iter().map(|s| s.to_string()).collect();
+        let signal = Win { excluded: true, ..win("Signal", "Signal", false) };
+        let s = shapes(&[win("KeePassXC", "x", false), signal, win("remotefriend", "RemoteFriends", true)], &patterns, 1.0, true);
+        assert!(!s[0].private && !s[2].private);
+        assert!(s[1].excluded && !s[1].private);
+    }
+
+    #[test]
+    fn self_hiding_windows_get_stripes() {
+        let (w, h) = (100u32, 40u32);
+        let mut img = vec![255u8; (w * h * 4) as usize];
+        paint(&mut img, w, h, &[Rect { excluded: true, ..r(0, 0, 100, 40, false) }]);
+        let px = |x: u32, y: u32| img[((y * w + x) * 4) as usize];
+        assert_ne!(px(1, 1), 255);
+        assert_ne!(px(1, 1), px(20, 1)); // two shades
     }
 
     #[test]
@@ -342,7 +416,7 @@ mod tests {
             win("remotefriend", "RemoteFriends", true),
             win("firefox", "remotefriend - GitHub", false),
         ];
-        let s = shapes(&list, &patterns, 1.0);
+        let s = shapes(&list, &patterns, 1.0, false);
         assert!(s[0].private && s[0].keep_top == 0);
         assert!(s[1].private && s[1].keep_top == 88); // only the page of the tab
         assert!(!s[2].private);

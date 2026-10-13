@@ -162,7 +162,7 @@ pub(crate) fn show(ctx: &egui::Context) {
         return;
     }
     ctx.show_viewport_deferred(egui::ViewportId::from_hash_of("rf-session-bar"), builder(), |ctx, _| {
-        ctx.request_repaint_after(Duration::from_millis(500));
+        ctx.request_repaint_after(Duration::from_secs(1));
         for cmd in bar(ctx, &current()) {
             run(cmd, ctx);
         }
@@ -271,7 +271,7 @@ pub(crate) fn helper_main() -> anyhow::Result<()> {
             kit::SIDEBAR.to_normalized_gamma_f32()
         }
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            ctx.request_repaint_after(Duration::from_millis(250));
+            ctx.request_repaint_after(Duration::from_millis(500));
             let Some(state) = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
             let mut out = std::io::stdout().lock();
             for cmd in bar(ctx, &state) {
@@ -362,11 +362,10 @@ fn bar(ctx: &egui::Context, state: &BarState) -> Vec<BarCmd> {
         if drag.drag_started() {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
-        let t = ctx.input(|i| i.time) as f32;
+        // A steady dot: an animation would make the shared picture change all the time.
         let dot = |ui: &mut egui::Ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            let glow = 0.55 + 0.45 * (t * 2.5).sin().abs();
-            ui.painter().circle_filled(rect.center(), 5.0, (if state.blocked { WARN } else { OK }).gamma_multiply(glow));
+            ui.painter().circle_filled(rect.center(), 5.0, if state.blocked { WARN } else { OK });
         };
         if mode == MODE_PILL {
             ui.horizontal_centered(|ui| {
