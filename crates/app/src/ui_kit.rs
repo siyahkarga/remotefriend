@@ -262,6 +262,83 @@ pub(crate) fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> Response {
         .on_hover_text(tip)
 }
 
+/// Line icons drawn with the painter: the emoji font draws copy, eye and refresh badly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Icon {
+    Copy,
+    Eye,
+    EyeOff,
+    Refresh,
+    Close,
+    Check,
+}
+
+/// Draw `icon` centred in `rect` (it fills about 16×16 points).
+pub(crate) fn paint_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
+    use egui::{pos2, Pos2};
+    let c = rect.center();
+    let stroke = Stroke::new(1.6_f32, color);
+    let at = |x: f32, y: f32| pos2(c.x + x, c.y + y);
+    let arc = |r: f32, from: f32, to: f32, cx: f32, cy: f32, ry: f32| -> Vec<Pos2> {
+        (0..=24)
+            .map(|i| {
+                let a = (from + (to - from) * i as f32 / 24.0).to_radians();
+                pos2(c.x + cx + r * a.cos(), c.y + cy + ry * a.sin())
+            })
+            .collect()
+    };
+    match icon {
+        Icon::Copy => {
+            // The sheet behind shows only where the front one doesn't cover it.
+            painter.add(egui::Shape::line(vec![at(-2.5, 3.0), at(-6.5, 3.0), at(-6.5, -7.0), at(2.5, -7.0), at(2.5, -3.5)], stroke));
+            painter.rect_stroke(egui::Rect::from_min_max(at(-2.5, -3.5), at(6.5, 7.0)), 2.0, stroke, egui::StrokeKind::Middle);
+        }
+        Icon::Eye | Icon::EyeOff => {
+            // Upper and lower lid as two open curves (a closed path spikes at the corners).
+            painter.add(egui::Shape::line(arc(7.5, 195.0, 345.0, 0.0, 2.5, 7.5), stroke));
+            painter.add(egui::Shape::line(arc(7.5, 15.0, 165.0, 0.0, -2.5, 7.5), stroke));
+            painter.circle_filled(c, 2.6, color);
+            if icon == Icon::EyeOff {
+                painter.line_segment([at(-7.0, 7.0), at(7.0, -7.0)], Stroke::new(1.8_f32, color));
+            }
+        }
+        Icon::Refresh => {
+            painter.add(egui::Shape::line(arc(6.0, -50.0, 250.0, 0.0, 0.0, 6.0), stroke));
+            let tip = at(6.0 * (-50f32).to_radians().cos(), 6.0 * (-50f32).to_radians().sin());
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip + egui::vec2(-4.2, -0.8), tip + egui::vec2(1.6, -3.6), tip + egui::vec2(0.8, 2.6)],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Close => {
+            painter.line_segment([at(-5.0, -5.0), at(5.0, 5.0)], stroke);
+            painter.line_segment([at(-5.0, 5.0), at(5.0, -5.0)], stroke);
+        }
+        Icon::Check => {
+            painter.add(egui::Shape::line(vec![at(-6.0, 0.5), at(-2.0, 4.5), at(6.5, -5.0)], Stroke::new(2.0_f32, color)));
+        }
+    }
+}
+
+/// A 28×28 icon button with a tooltip.
+pub(crate) fn icon(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
+    icon_colored(ui, icon, tip, None)
+}
+
+/// An icon button in a given colour (None: grey, lighter on hover).
+pub(crate) fn icon_colored(ui: &mut Ui, icon: Icon, tip: &str, color: Option<Color32>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, R_BTN, SURFACE_HI);
+        }
+        let color = color.unwrap_or(if resp.hovered() { TEXT } else { MUTED });
+        paint_icon(ui.painter(), rect, icon, color);
+    }
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Full-width button (Connect).
 pub(crate) fn wide(ui: &mut Ui, button: egui::Button<'_>, height: f32) -> Response {
     ui.add_sized([ui.available_width(), height], button)

@@ -43,8 +43,11 @@ too (later: Home → *Sign in with email*).
 2. On the other device:
    - **Computer:** open RemoteFriends, type the ID (or the local IP address) and password,
      click **Connect**.
-   - **Phone / any browser:** open the address shown next to 📱 in RemoteFriends
-     (shown once the computer is online), type the ID and password.
+   - **Phone / any browser:** open the **invite link** (copy it under *Invite link* in
+     RemoteFriends, shown once the computer is online, and send it): it opens with the ID and
+     password filled in and connects right away. They travel after “#”, which browsers never send
+     to the server, and are removed from the address bar. Pasting the link into the desktop
+     app's ID field fills in both fields as well.
 3. On the shared computer, a window asks: **Allow**, **Always allow** or **Deny** (or **Block**).
    With *Always allow*, that phone, browser or computer becomes **trusted**: from then on it
    connects **without the password**, even after the password changed — the computer's user
@@ -69,7 +72,11 @@ page remember the password for a computer until it changes.
 
 ## On the shared computer
 
-While someone is connected, the RemoteFriends window shows:
+While someone is connected, a small **session bar** stays on top of everything (even when the
+window is minimized): how many are connected, for how long, which screen they see, and **Open**,
+**Take back control** and **Disconnect**.
+
+The RemoteFriends window shows:
 
 - **Screens** (with several monitors): which one viewers see now (**Show** another one at any
   time), and a switch per screen: **on** = viewers with mouse & keyboard may switch to it by
@@ -77,17 +84,28 @@ While someone is connected, the RemoteFriends window shows:
   Viewers see the list too, with the screens that need asking marked. On Wayland, pick all
   screens you want to offer in the desktop's sharing dialog (*Choose…*). A live preview shows
   what viewers see.
-- **Connected now**: every viewer with its device name, since when, and checkboxes for what it
-  may do — **mouse & keyboard, sound, files, clipboard** — plus **Disconnect** and, for another
-  RemoteFriends app, **Switch sides** (you control their computer instead; they are asked first).
+- **Connected now**: every viewer with its device name, since when, how far it is trusted, and
+  buttons for what it may do — **Control** (mouse & keyboard), **Sound**, **Files**,
+  **Clipboard** — plus **Disconnect** and, for another RemoteFriends app, **Switch sides** (you
+  control their computer instead; they are asked first). Every file that came in or was taken
+  is listed under the viewer, with where it is.
 - **✋ Take back control**: stops mouse and keyboard of every viewer until you allow it again.
+- **You come first:** when you move your mouse, viewers' mouse and keyboard wait until you have
+  left it alone for 1.5 s (they are told). Windows, macOS and X11; Wayland doesn't tell apps
+  where the pointer is.
+- Viewers can never use RemoteFriends itself (their clicks and keys on its windows are ignored),
+  in either view; only your own devices may.
 - **History** and **Devices** in the menu on the left.
 
-**What viewers see** (choose in the window): **Safe view** (default) hides RemoteFriends itself —
-the window is minimized and, on Windows/macOS, left out of the picture — and blacks out private
-apps such as password managers (list in *Settings → Privacy*; needs window positions, so
-on Wayland only RemoteFriends is hidden). When only a browser tab is private (its title matches),
-the tab bar and address bar stay visible so viewers can switch tabs. **Everything** shows the screen exactly
+**What viewers see** (choose in the window): **Safe view** (default) keeps RemoteFriends itself
+out of the picture — the window stays open for you, but viewers see it blacked out (Windows/macOS
+also leave it out of the capture) — and blacks out
+private apps such as password managers (*Settings → Privacy*: switch apps on in **Open apps** or
+type words of their names). Windows are followed for every frame, so a moving window doesn't show
+through. When only a browser tab is private (its title matches), the tab bar and address bar stay
+visible so viewers can switch tabs. Linux **Wayland** desktops don't tell apps where windows are:
+there private apps can't be blacked out (use an X11 session for that), and while someone watches
+RemoteFriends shows only who is connected until you open it. **Everything** shows the screen exactly
 as you see it. Apps that protect themselves from every screen capture (e.g. Signal's “Screen
 security”) stay black in both modes until that option is turned off in the app. Closing
 RemoteFriends asks first, because the computer is unreachable while it is closed.
@@ -107,10 +125,23 @@ public address.
 
 Toolbar: Disconnect, sound on/off, **Keys** (Ctrl+Alt+Del, Win/⌘, Alt+Tab, Alt+F4, Task
 Manager, lock, Print Screen…), quality, **Screen** (when the computer has several), full screen,
-**Files** and **Switch sides**. *Files* sends files (progress, Cancel; the computer's Downloads/
-RemoteFriends folder, and you are told the exact path) and browses the remote computer's folders
-to download files (progress, Cancel, saved to your Downloads/RemoteFriend). The phone page has
-the same file panel.
+**Files** and **Switch sides**. The file panel says what the computer lets you reach, then has
+**Send to that computer** (with where the file goes) and **Get from that computer** (its folders;
+downloads are saved to your Downloads/RemoteFriend). The phone page has the same file panel.
+
+What a viewer reaches on the shared computer depends on how far it is trusted:
+
+| | Sees and sends to | Asked |
+|---|---|---|
+| allowed once (password) | only the **shared folder**, Downloads/RemoteFriend | no |
+| **Trusted** | the user's folders and data disks, **without system folders and hidden files** | once per session, at the first file action (*Allow for this session* / *Only the shared folder*) |
+| **My devices** | everything | no |
+
+Every path is checked on the shared computer (links that lead elsewhere included), and its user
+sees every file that comes or goes.
+
+If the shared computer closes RemoteFriends, viewers are told so and go back to the start; a
+computer that stops answering for 15 s ends the session too.
 Copy and paste work both ways: Ctrl+C on the remote computer puts the text on your clipboard,
 Ctrl+V pastes your clipboard there (Cmd and Ctrl are translated between Mac and PC).
 
@@ -169,8 +200,11 @@ with sound on, and nothing is sent while the computer is silent. The desktop app
   device is refused without a question, even with the right password.
 - The password (format `abcde-23456`, ~50 bits; case and dashes don't matter) changes at every
   start of RemoteFriends by default (or after every session, or never — *Settings → Security*).
-- The computer's user sees who is connected, can disconnect them, take back control, and turn
-  mouse/keyboard, sound, files and clipboard on or off per viewer.
+- The computer's user sees who is connected (also in the session bar on top), can disconnect them,
+  take back control, and turn mouse/keyboard, sound, files and clipboard on or off per viewer.
+- **Files by trust:** a viewer allowed once reaches only the shared folder; a trusted device its
+  user's folders and data disks without system folders and hidden files, after a yes for that
+  session; only your own devices reach everything. Viewers can't use RemoteFriends itself.
 - Wrong passwords are rate limited per source (5 per minute, then 1/2/4/8/16-minute lockouts) plus a
   global cap; the server limits requests and open connections per IP (relay and nginx).
 - **Local network access is off by default**: the computer is only reachable through the server.

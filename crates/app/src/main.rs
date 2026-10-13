@@ -14,6 +14,7 @@ mod keys_ui;
 mod net;
 mod notices;
 mod privacy;
+mod session_bar;
 mod ui_dialogs;
 mod ui_home;
 mod ui_kit;
@@ -28,7 +29,7 @@ use net::{LanEntry, Shared};
 use remote_friend_common::Packet;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc::{channel, Sender};
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-256.png");
@@ -71,9 +72,21 @@ pub(crate) struct App {
     thumb_saved: bool,
     screen_tex: Option<egui::TextureHandle>,
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
+    /// "Connect to a computer": show the typed password instead of dots.
+    show_pass_field: bool,
     // "This computer"
     host_error: Arc<Mutex<Option<String>>>,
     show_password: bool,
+    /// This computer's ID shown as dots.
+    hide_id: bool,
+    /// What was copied last and when (the copy button shows "Copied" for a moment).
+    copied: Option<(String, Instant)>,
+    /// History: full network addresses instead of shortened ones.
+    show_addresses: bool,
+    /// Wayland, safe view: this computer's user opened RemoteFriends while someone watches.
+    curtain_open: bool,
+    /// Settings → Privacy: apps with a window on screen, re-read every few seconds.
+    open_apps: (Vec<remote_friend_host::privacy::OpenApp>, Option<Instant>),
     /// The page shown in the main window.
     page: Page,
     /// Devices page: "make it my device" waits for confirmation (handle, name).
@@ -115,8 +128,6 @@ pub(crate) struct App {
     close_confirm: bool,
     /// The user confirmed closing.
     allow_close: bool,
-    /// Sessions in the previous frame (to minimize the window when the first one starts).
-    last_sessions: usize,
     /// The window is currently excluded from screen capture.
     hidden_from_capture: bool,
     /// Viewer: the remote computer asks to switch sides (shown as a question).
@@ -210,8 +221,14 @@ fn main() -> Result<()> {
         thumb_saved: false,
         screen_tex: None,
         thumbs: HashMap::new(),
+        show_pass_field: false,
         host_error,
         show_password: false,
+        hide_id: false,
+        copied: None,
+        show_addresses: false,
+        curtain_open: false,
+        open_apps: (Vec::new(), None),
         page: Page::Home,
         confirm_mine: None,
         settings_server: server_settings.server,
@@ -238,7 +255,6 @@ fn main() -> Result<()> {
         sound_on: true,
         close_confirm: false,
         allow_close: false,
-        last_sessions: 0,
         hidden_from_capture: false,
         switch_question: false,
         switch_pending: false,
@@ -277,6 +293,11 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("window: {e}"))?;
+    // Tell everyone still connected that RemoteFriends was closed here, instead of leaving
+    // them with a frozen picture.
+    if remote_friend_host::sessions::end_all_closing() > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
     Ok(())
 }
 
@@ -287,9 +308,36 @@ impl eframe::App for App {
         ui_kit::BG.to_normalized_gamma_f32()
     }
 
+    /// A viewer's clicks and keys never operate RemoteFriends itself (only the owner's own
+    /// devices may): they reach this window when the viewer clicks or types where it is, and
+    /// could otherwise change settings, open files to themselves or trust their own device.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if remote_friend_host::sessions::count() == 0 || self.viewing_myself() {
+            return;
+        }
+        let (pointer, keys) = remote_friend_host::privacy::remote_input_recent();
+        if !pointer && !keys {
+            return;
+        }
+        raw.events.retain(|e| match e {
+            egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. } | egui::Event::Zoom(_) | egui::Event::Touch { .. } => {
+                !pointer
+            }
+            egui::Event::Key { .. }
+            | egui::Event::Text(_)
+            | egui::Event::Copy
+            | egui::Event::Cut
+            | egui::Event::Paste(_)
+            | egui::Event::Ime(_) => !keys,
+            _ => true,
+        });
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(debug_assertions)]
         debug_screenshot(ctx);
+        #[cfg(debug_assertions)]
+        self.debug_close(ctx);
         // Switching sides: the computer we were connected to accepted; control it now.
         if let Some(t) = remote_friend_host::take_switch() {
             if matches!(self.screen, Screen::Viewer) {
@@ -298,7 +346,8 @@ impl eframe::App for App {
             self.flash(format!("Switched sides: you now control {}", t.label));
             self.connect_to(t.id, String::new(), Some(t.token));
         }
-        self.privacy(ctx, frame);
+        self.privacy(frame);
+        session_bar::show(ctx);
         self.close_guard(ctx);
         // Incoming connection requests must be answerable from any screen.
         self.prompts_ui(ctx);
@@ -311,24 +360,29 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// While someone is connected: the window is minimized once and kept out of the shared
-    /// picture (Windows, macOS), so viewers can't read the password or change settings.
-    fn privacy(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    /// While someone is connected in the safe view the window stays where it is, so this
+    /// computer's user sees who is connected, but it is kept out of the shared picture:
+    /// excluded from capture (Windows, macOS) and blacked out by the host (macOS, X11). On
+    /// Wayland neither works, so the Home screen shows only who is connected (curtain_ui).
+    fn privacy(&mut self, frame: &eframe::Frame) {
         let n = remote_friend_host::sessions::count();
         // Full view: viewers see everything, RemoteFriends included.
-        let safe = !remote_friend_host::privacy::full_view();
-        if safe && n > 0 && self.last_sessions == 0 && matches!(self.screen, Screen::Home) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-        let hide = safe && n > 0;
+        let hide = !remote_friend_host::privacy::full_view() && n > 0;
         if hide != self.hidden_from_capture {
             privacy::exclude_from_capture(frame, hide);
             self.hidden_from_capture = hide;
         }
-        self.last_sessions = n;
-        if n > 0 {
-            ctx.request_repaint_after(Duration::from_millis(500));
+        if n == 0 {
+            self.curtain_open = false;
         }
+    }
+
+    /// Viewing this very computer (a test): its clicks come back as "remote" input.
+    fn viewing_myself(&self) -> bool {
+        let me = remote_friend_host::snapshot().id;
+        let digits: String = self.current_addr.chars().filter(|c| c.is_ascii_digit()).collect();
+        matches!(self.screen, Screen::Viewer)
+            && ((!me.is_empty() && digits == me) || self.current_addr.starts_with("127.") || self.current_addr.starts_with("localhost"))
     }
 
     /// Connect button: start the network thread and switch to the viewer.
@@ -478,6 +532,19 @@ impl App {
     fn copy(&mut self, ctx: &egui::Context, text: &str, what: &str) {
         ctx.copy_text(text.to_string());
         self.flash(format!("{what} copied"));
+        self.copied = Some((what.to_string(), Instant::now()));
+    }
+
+    /// A copy button: after a click it shows a tick and "Copied" for a moment.
+    pub(crate) fn copy_icon(&mut self, ui: &mut egui::Ui, text: &str, what: &str, tip: &str) {
+        let done = self.copied.as_ref().is_some_and(|(w, t)| w == what && t.elapsed().as_millis() < 1600);
+        if done {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            ui_kit::icon_colored(ui, ui_kit::Icon::Check, tip, Some(ui_kit::OK));
+            ui.label(egui::RichText::new("Copied").size(12.5).color(ui_kit::OK));
+        } else if ui_kit::icon(ui, ui_kit::Icon::Copy, tip).clicked() {
+            self.copy(ui.ctx(), text, what);
+        }
     }
 }
 
@@ -505,6 +572,21 @@ fn debug_screenshot(ctx: &egui::Context) {
         let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
         let _ = image::save_buffer(&path, &rgba, w as u32, h as u32, image::ColorType::Rgba8);
         std::process::exit(0);
+    }
+}
+
+impl App {
+    /// Development aid: RF_CLOSE_AFTER=seconds closes the window like the user would (after
+    /// confirming), so the goodbye to connected viewers can be tested.
+    #[cfg(debug_assertions)]
+    fn debug_close(&mut self, ctx: &egui::Context) {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let Some(secs) = std::env::var("RF_CLOSE_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+        if START.get_or_init(Instant::now).elapsed().as_secs() >= secs && !self.allow_close {
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
 }
 
@@ -550,7 +632,9 @@ fn debug_page(app: &mut App) {
             ..Default::default()
         };
     }
-    if std::env::var("RF_DEMO_PROMPT").is_ok() {
+    if std::env::var("RF_DEMO_PROMPT").is_ok_and(|v| v == "files") {
+        remote_friend_host::demo_files_prompt();
+    } else if std::env::var("RF_DEMO_PROMPT").is_ok() {
         remote_friend_host::demo_prompt(std::env::var("RF_DEMO_PROMPT").unwrap_or_default() == "trusted");
     }
 }

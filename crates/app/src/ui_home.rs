@@ -20,6 +20,48 @@ pub(crate) fn owner_key_like(key: &str) -> bool {
     key.len() >= 16 && key.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// A link that opens the browser viewer with this computer's ID and password filled in. They
+/// travel after "#", which browsers never send to the server.
+pub(crate) fn invite_link(web_url: &str, id: &str, password: &str) -> String {
+    let enc: String = password
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b == b'-' { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    format!("{}/#id={id}&pw={enc}", web_url.trim_end_matches('/'))
+}
+
+/// ID and password from a pasted invite link (or None if it isn't one).
+pub(crate) fn parse_invite(text: &str) -> Option<(String, String)> {
+    let (_, fragment) = text.trim().split_once('#')?;
+    let mut id = None;
+    let mut pw = String::new();
+    for pair in fragment.split('&') {
+        match pair.split_once('=') {
+            Some(("id", v)) => id = Some(v.chars().filter(|c| c.is_ascii_digit()).collect::<String>()),
+            Some(("pw", v)) => {
+                let bytes = v.as_bytes();
+                let mut out = Vec::new();
+                let mut i = 0;
+                while i < bytes.len() {
+                    match (bytes[i], bytes.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())) {
+                        (b'%', Some(b)) => {
+                            out.push(b);
+                            i += 3;
+                        }
+                        (b, _) => {
+                            out.push(b);
+                            i += 1;
+                        }
+                    }
+                }
+                pw = String::from_utf8_lossy(&out).into_owned();
+            }
+            _ => {}
+        }
+    }
+    id.filter(|i| i.len() == 9).map(|i| (i, pw))
+}
+
 /// Online / Local network / No access key / Offline, with a tooltip.
 fn server_status(snap: &remote_friend_host::Snapshot) -> (egui::Color32, &'static str, String) {
     let refused = snap.server_error.as_deref().and_then(|e| e.strip_prefix("registration rejected: "));
@@ -32,7 +74,7 @@ fn server_status(snap: &remote_friend_host::Snapshot) -> (egui::Color32, &'stati
     };
     let tip = match (&snap.server, &snap.server_error, refused) {
         (_, _, _) if snap.online => "Reachable from anywhere".to_string(),
-        (None, _, _) => "Reachable on the local network only (Settings → Server)".to_string(),
+        (None, _, _) => "Reachable on the local network only (Settings, Server)".to_string(),
         (Some(_), _, Some(reason)) => format!("The server says: {reason}. Other computers can still be reached from here."),
         (Some(_), Some(e), None) => format!("Cannot reach the server: {e}"),
         (Some(_), None, None) => "Connecting to the server".to_string(),
@@ -69,6 +111,11 @@ impl App {
         self.lan.lock().unwrap().retain(|e| e.last_seen.elapsed().as_secs() < 8);
         let snap = remote_friend_host::snapshot();
         self.load_logo(ctx);
+        ctx.request_repaint_after(Duration::from_millis(500));
+        if self.curtain_needed(&snap) {
+            self.curtain_ui(ctx, &snap);
+            return;
+        }
         // The access-key page belongs to the server owner only.
         if self.page == Page::Keys && !owner_key_like(&remote_friend_host::server_settings().key) {
             self.page = Page::Home;
@@ -99,7 +146,48 @@ impl App {
         });
         self.confirm_mine_ui(ctx);
         self.notices_ui(ctx);
-        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    /// Wayland, safe view, someone connected: apps can't keep their window out of the shared
+    /// picture there, so the window shows only who is connected until this computer's user
+    /// opens RemoteFriends (a viewer's click can't: see App::raw_input_hook).
+    fn curtain_needed(&self, snap: &remote_friend_host::Snapshot) -> bool {
+        crate::privacy::wayland() && snap.sessions > 0 && !self.curtain_open && !remote_friend_host::privacy::full_view()
+    }
+
+    fn curtain_ui(&mut self, ctx: &egui::Context, snap: &remote_friend_host::Snapshot) {
+        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(egui::Margin::same(20)).fill(kit::BG)).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(620.0);
+                    kit::card(ui, |ui| {
+                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                            ui.horizontal(|ui| {
+                                if let Some(logo) = &self.logo {
+                                    ui.image((logo.id(), egui::vec2(26.0, 26.0)));
+                                }
+                                Self::card_title(ui, "Someone is connected to this computer");
+                            });
+                            kit::note(
+                                ui,
+                                "Viewers can see this window: this Linux desktop (Wayland) doesn't let apps hide themselves. \
+                                 Your password and settings stay out of sight until you open RemoteFriends here.",
+                            );
+                            self.sessions_ui(ui);
+                            self.shared_screen_ui(ui, snap);
+                            ui.add_space(12.0);
+                            if ui
+                                .add(kit::secondary("Open RemoteFriends"))
+                                .on_hover_text("Viewers will see it too, but their clicks and keys can't change anything in it")
+                                .clicked()
+                            {
+                                self.curtain_open = true;
+                            }
+                        });
+                    });
+                });
+            });
+        });
     }
 
     /// The menu on the left: logo, pages, and the connection status at the bottom.
@@ -337,10 +425,13 @@ impl App {
 
         kit::section_label(ui, "YOUR ID");
         ui.horizontal(|ui| {
-            ui.label(RichText::new(remote_friend_common::format_id(&snap.id)).size(30.0).color(TEXT).monospace());
-            if kit::icon_button(ui, "📋", "Copy ID").clicked() {
-                self.copy(ui.ctx(), &snap.id, "ID");
+            let id = if self.hide_id { "••• ••• •••".to_string() } else { remote_friend_common::format_id(&snap.id) };
+            ui.label(RichText::new(id).size(30.0).color(TEXT).monospace());
+            let (icon, tip) = if self.hide_id { (kit::Icon::Eye, "Show the ID") } else { (kit::Icon::EyeOff, "Hide the ID") };
+            if kit::icon(ui, icon, tip).clicked() {
+                self.hide_id = !self.hide_id;
             }
+            self.copy_icon(ui, &snap.id, "ID", "Copy the ID");
         });
 
         kit::section_label(ui, "PASSWORD");
@@ -354,14 +445,12 @@ impl App {
             };
             ui.label(RichText::new(shown).size(21.0).color(TEXT).monospace());
             if !snap.password_from_env {
-                let (icon, tip) = if self.show_password { ("🙈", "Hide") } else { ("👁", "Show") };
-                if kit::icon_button(ui, icon, tip).clicked() {
+                let (icon, tip) = if self.show_password { (kit::Icon::EyeOff, "Hide the password") } else { (kit::Icon::Eye, "Show the password") };
+                if kit::icon(ui, icon, tip).clicked() {
                     self.show_password = !self.show_password;
                 }
-                if kit::icon_button(ui, "📋", "Copy password").clicked() {
-                    self.copy(ui.ctx(), &snap.password, "Password");
-                }
-                if kit::icon_button(ui, "🔄", "New password now (the old one stops working)").clicked()
+                self.copy_icon(ui, &snap.password, "Password", "Copy the password");
+                if kit::icon(ui, kit::Icon::Refresh, "New password now (the old one stops working)").clicked()
                     && remote_friend_host::renew_password().is_some()
                 {
                     self.show_password = true;
@@ -376,7 +465,7 @@ impl App {
                 remote_friend_host::PasswordPolicy::Never => "Stays the same until you change it.",
             };
             kit::note(ui, format!("{policy} Trusted devices don't need it."))
-                .on_hover_text("Settings → Security. Devices you chose “Always allow” for log in with their own key.");
+                .on_hover_text("Settings, Security. Devices you chose “Always allow” for log in with their own key.");
         }
 
         ui.add_space(12.0);
@@ -429,15 +518,18 @@ impl App {
                 });
             }
         }
-        // The phone address only matters once this computer is reachable (it has a valid key).
+        // The invite link only works once this computer is reachable (it has a valid key).
         if let Some(url) = snap.web_url.as_ref().filter(|_| snap.online) {
+            let link = invite_link(url, &snap.id, &snap.password);
+            kit::section_label(ui, "INVITE LINK");
             ui.horizontal(|ui| {
-                ui.label(RichText::new("📱").size(14.0).color(MUTED)).on_hover_text("Open this address on a phone or in any browser");
-                kit::link(ui, RichText::new(url.trim_start_matches("https://")).size(14.5), url);
-                if kit::icon_button(ui, "📋", "Copy address").clicked() {
-                    self.copy(ui.ctx(), url, "Address");
-                }
+                let shown = format!("{}/#id={}&pw=•••", url.trim_start_matches("https://").trim_end_matches('/'), snap.id);
+                kit::line(ui, RichText::new(shown).size(14.0).color(ACCENT)).on_hover_text(
+                    "Opens RemoteFriends in any browser (phone or computer) with this computer's ID and password filled in",
+                );
+                self.copy_icon(ui, &link, "Invite link", "Copy the invite link");
             });
+            kit::note(ui, "Send it to whoever should connect: no ID or password to type. You still approve them; it stops working when the password changes.");
         }
         if snap.auto_accept {
             kit::dot(ui, WARN, "Approval is off (REMOTE_FRIEND_AUTO_ACCEPT=1)");
@@ -447,9 +539,9 @@ impl App {
         let mut full = remote_friend_host::privacy::full_view();
         let wayland = crate::privacy::wayland();
         let safe_tip = if wayland {
-            "RemoteFriends is minimized while someone watches. This Linux desktop doesn't let apps hide other windows."
+            "While someone watches, RemoteFriends shows only who is connected. This Linux desktop doesn't let apps hide other windows."
         } else {
-            "RemoteFriends and private apps (Settings → Privacy) are hidden"
+            "RemoteFriends and private apps (Settings, Privacy) are blacked out; viewers can't use RemoteFriends"
         };
         if kit::segmented(
             ui,
@@ -459,7 +551,10 @@ impl App {
             remote_friend_host::privacy::set_full_view(full);
         }
         if wayland && !full {
-            kit::note(ui, "On this Linux desktop (Wayland) only RemoteFriends itself can be hidden; other windows stay visible.");
+            kit::note(ui, "On this Linux desktop (Wayland) private apps can't be hidden: close them while someone watches, or log in with an X11 (Xorg) session.");
+            if snap.sessions > 0 && ui.add(kit::quiet("Show viewers only who is connected")).clicked() {
+                self.curtain_open = false;
+            }
         }
 
         self.sessions_ui(ui);
@@ -490,7 +585,7 @@ impl App {
                 ui.set_width(ui.available_width());
                 let via = if s.via == sessions::Via::App { "app" } else { "browser" };
                 let path = if s.direct { "direct" } else { "via server" };
-                let trusted = if s.trusted { " · trusted" } else { "" };
+                let trusted = format!(" · {}", s.access.word());
                 let mut switch = false;
                 kit::split(
                     ui,
@@ -511,8 +606,8 @@ impl App {
                 let mut p = s.perms;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let toggle = |ui: &mut egui::Ui, on: &mut bool, icon: &str, tip: &str| {
-                        let text = RichText::new(icon).size(15.0).color(if *on { egui::Color32::WHITE } else { FAINT });
+                    let toggle = |ui: &mut egui::Ui, on: &mut bool, word: &str, tip: &str| {
+                        let text = RichText::new(word).size(13.5).color(if *on { egui::Color32::WHITE } else { FAINT });
                         let fill = if *on { kit::tint(ACCENT, 0.55) } else { kit::SURFACE };
                         if ui
                             .add(egui::Button::new(text).fill(fill).corner_radius(kit::R_BTN).min_size(egui::vec2(38.0, 30.0)))
@@ -522,10 +617,10 @@ impl App {
                             *on = !*on;
                         }
                     };
-                    toggle(ui, &mut p.control, "🖱", "Mouse & keyboard");
-                    toggle(ui, &mut p.sound, "🔊", "Sound");
-                    toggle(ui, &mut p.files, "📁", "Files");
-                    toggle(ui, &mut p.clipboard, "📋", "Clipboard");
+                    toggle(ui, &mut p.control, "Control", "Mouse & keyboard");
+                    toggle(ui, &mut p.sound, "Sound", "Sound");
+                    toggle(ui, &mut p.files, "Files", "Sending and taking files");
+                    toggle(ui, &mut p.clipboard, "Clipboard", "Shared clipboard");
                 });
                 if p != s.perms {
                     sessions::set_perms(s.id, p);
@@ -533,6 +628,18 @@ impl App {
                 if let Some(t) = &s.transfer {
                     let frac = if t.total > 0 { t.got as f32 / t.total as f32 } else { 0.0 };
                     ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Receiving {}", t.name)));
+                }
+                // Every file that came or went in this session, with where it is.
+                for f in &s.file_log {
+                    ui.horizontal(|ui| {
+                        let (arrow, verb, color) = if f.incoming { ("⬇", "received", OK) } else { ("⬆", "took", WARN) };
+                        kit::line(ui, RichText::new(format!("{arrow} {verb} {}", f.name)).size(12.5).color(color)).on_hover_text(&f.path);
+                        if f.incoming && ui.add(kit::quiet("Show")).on_hover_text(&f.path).clicked() {
+                            if let Some(folder) = std::path::Path::new(&f.path).parent() {
+                                crate::open_path(folder);
+                            }
+                        }
+                    });
                 }
             });
         }
@@ -630,7 +737,13 @@ impl App {
     fn connect_ui(&mut self, ui: &mut egui::Ui) {
         Self::card_title(ui, "Connect to a computer");
         kit::section_label(ui, "COMPUTER ID OR ADDRESS");
-        let id_resp = ui.add(kit::input(&mut self.host_field, "123 456 789").font(egui::TextStyle::Heading).desired_width(f32::INFINITY));
+        let id_resp = ui.add(kit::input(&mut self.host_field, "123 456 789 or an invite link").font(egui::TextStyle::Heading).desired_width(f32::INFINITY));
+        // A pasted invite link fills in both fields.
+        if let Some((id, pw)) = parse_invite(&self.host_field) {
+            self.host_field = id;
+            self.pass_field = pw;
+            self.flash("Invite link: ID and password filled in");
+        }
         kit::section_label(ui, "PASSWORD");
         let trusted = history::device_for(&self.recents, &self.host_field).is_some();
         let saved = history::password_for(&self.recents, &self.host_field).is_some();
@@ -641,7 +754,17 @@ impl App {
         } else {
             "shown on that computer"
         };
-        let pw_resp = ui.add(kit::input(&mut self.pass_field, hint).password(true).desired_width(f32::INFINITY));
+        let pw_resp = ui
+            .horizontal(|ui| {
+                let width = (ui.available_width() - 36.0).max(80.0);
+                let resp = ui.add(kit::input(&mut self.pass_field, hint).password(!self.show_pass_field).desired_width(width));
+                let (icon, tip) = if self.show_pass_field { (kit::Icon::EyeOff, "Hide the password") } else { (kit::Icon::Eye, "Show the password") };
+                if kit::icon(ui, icon, tip).clicked() {
+                    self.show_pass_field = !self.show_pass_field;
+                }
+                resp
+            })
+            .inner;
         let enter = (id_resp.lost_focus() || pw_resp.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(10.0);
         if kit::wide(ui, kit::primary("Connect"), 40.0).clicked() || enter {
@@ -737,5 +860,20 @@ impl App {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_invite_link_carries_id_and_password() {
+        let link = invite_link("https://remote.example.com/", "411747276", "ab3d9-x7Kq2");
+        assert_eq!(link, "https://remote.example.com/#id=411747276&pw=ab3d9-x7Kq2");
+        assert_eq!(parse_invite(&link), Some(("411747276".into(), "ab3d9-x7Kq2".into())));
+        assert_eq!(parse_invite(&invite_link("https://x", "123456789", "a b&c")), Some(("123456789".into(), "a b&c".into())));
+        assert_eq!(parse_invite("411 747 276"), None);
+        assert_eq!(parse_invite("https://x/#id=12"), None);
     }
 }

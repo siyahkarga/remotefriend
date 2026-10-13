@@ -52,6 +52,19 @@ pub(crate) struct Shared {
     pub download: Option<Transfer>,
     /// Where the last download was saved on this computer.
     pub downloaded: Option<String>,
+    /// What the computer lets us reach among its files: "shared", "disk", "all", "wait"
+    /// (its user is asked), "off", or "" (an older computer that doesn't say).
+    pub files_level: String,
+    /// The computer's shared folder (where files we send land when we may not choose).
+    pub files_shared: String,
+    /// Largest file we may send (0: the old default).
+    pub files_max: u64,
+    /// The access changed from "wait" to an answer: the file window lists the start again.
+    pub files_refresh: bool,
+    /// A folder listing was asked for and has not arrived yet (since when).
+    pub ls_asked: Option<Instant>,
+    /// Files sent in this session: (name, where it was saved on the computer), newest first.
+    pub sent: Vec<(String, String)>,
     /// The computer's user asks to control this computer (switch sides).
     pub switch_req: bool,
     /// The computer accepted switching sides: close this viewer.
@@ -67,6 +80,8 @@ pub(crate) struct Shared {
     pub direct: bool,
     /// The computer accepted the login (the typed password can be remembered).
     pub login_ok: bool,
+    /// The session started (stays set, unlike `login_ok`).
+    pub accepted: bool,
     /// The password was wrong (forget a saved one).
     pub wrong_password: bool,
     /// The computer draws its pointer into the picture (hide ours over it).
@@ -130,6 +145,12 @@ impl Shared {
             remote_dir: None,
             download: None,
             downloaded: None,
+            files_level: String::new(),
+            files_shared: String::new(),
+            files_max: 0,
+            files_refresh: false,
+            ls_asked: None,
+            sent: Vec::new(),
             switch_req: false,
             switch_ok: false,
             quality: String::new(),
@@ -138,6 +159,7 @@ impl Shared {
             monitor: 0,
             direct: false,
             login_ok: false,
+            accepted: false,
             wrong_password: false,
             cursor_in_video: false,
         }
@@ -375,6 +397,7 @@ where
                 let mut sh = shared.lock().unwrap();
                 sh.status = "Connected".into();
                 sh.login_ok = true;
+                sh.accepted = true;
                 break;
             }
             Packet::Reject(m) => {
@@ -470,6 +493,11 @@ where
     let mut first_frame = false;
     let mut player: Option<crate::audio::Player> = None;
     let mut player_failed = false;
+    // The computer answers our pings every 2 s: this long without anything means it is gone
+    // (closed, asleep, or its network dropped) even if no link reports an error.
+    const SILENCE: std::time::Duration = std::time::Duration::from_secs(15);
+    let mut last_rx = Instant::now();
+    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         let pkt = tokio::select! {
             _ = disconnect.changed() => {
@@ -481,13 +509,31 @@ where
                 Some(Ok(p)) => p,
                 Some(Err(e)) => {
                     let mut sh = shared.lock().unwrap();
-                    sh.status = format!("Connection lost: {e}");
+                    sh.status = if format!("{e:#}").contains("end of file") {
+                        "The computer closed the connection (RemoteFriends may have been closed there).".into()
+                    } else {
+                        format!("Connection lost: {e}")
+                    };
                     sh.failed = true;
                     break;
                 }
-                None => break,
+                None => {
+                    let mut sh = shared.lock().unwrap();
+                    sh.status = "The connection to the computer was closed (RemoteFriends may have been closed there).".into();
+                    sh.failed = true;
+                    break;
+                }
             },
             Some(p) = direct_in.recv() => p,
+            _ = watchdog.tick() => {
+                if last_rx.elapsed() > SILENCE {
+                    let mut sh = shared.lock().unwrap();
+                    sh.status = "The computer stopped answering (RemoteFriends may have been closed there, or its network dropped).".into();
+                    sh.failed = true;
+                    break;
+                }
+                continue;
+            }
             r = opt_future(&mut p2p_setup) => {
                 p2p_setup = None;
                 match r {
@@ -527,6 +573,7 @@ where
                 continue;
             }
         };
+        last_rx = Instant::now();
         if let Packet::Control(text) = &pkt {
             if text.contains("\"p2p_answer\"") {
                 if let (Some(tx), Ok(v)) = (p2p_answer.take(), serde_json::from_str::<serde_json::Value>(text)) {
@@ -555,7 +602,7 @@ where
                 Ok(Ok(Some(path))) => {
                     let mut sh = shared.lock().unwrap();
                     let name = sh.download.take().map(|d| d.name).unwrap_or_default();
-                    sh.banner(format!("✓ Downloaded {name} to {path}"));
+                    sh.banner(format!("Downloaded {name} to {path}"));
                     sh.downloaded = Some(path);
                 }
                 Ok(Ok(None)) => {
@@ -747,8 +794,19 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
         }
         Some("file_done") => {
             sh.upload = None;
-            let msg = format!("✓ Sent {} — saved on the remote computer as {}", str_of("name"), str_of("path"));
+            let msg = format!("Sent {}: saved on the remote computer as {}", str_of("name"), str_of("path"));
+            sh.sent.insert(0, (str_of("name"), str_of("path")));
+            sh.sent.truncate(5);
             sh.banner(msg);
+        }
+        Some("files_access") => {
+            let level = str_of("level");
+            if sh.files_level == "wait" && matches!(level.as_str(), "shared" | "disk" | "all") {
+                sh.files_refresh = true;
+            }
+            sh.files_level = level;
+            sh.files_shared = str_of("shared");
+            sh.files_max = v.get("max").and_then(|x| x.as_u64()).unwrap_or(0);
         }
         Some("ls") => {
             let entries = v
@@ -766,7 +824,21 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
                 .unwrap_or_default();
             let error = v.get("error").and_then(|x| x.as_str()).map(String::from);
             let parent = v.get("parent").and_then(|x| x.as_str()).map(String::from);
-            sh.remote_dir = Some(RemoteDir { path: str_of("path"), parent, entries, error });
+            sh.ls_asked = None;
+            if v.get("wait").and_then(|x| x.as_bool()) == Some(true) {
+                sh.files_level = "wait".into();
+            }
+            if let Some(level) = v.get("level").and_then(|x| x.as_str()) {
+                sh.files_level = level.to_string();
+            }
+            // An error keeps the folder that was shown (a refused folder doesn't empty the list).
+            match (error, sh.remote_dir.take()) {
+                (Some(e), Some(mut old)) if !old.path.is_empty() || !old.entries.is_empty() => {
+                    old.error = Some(e);
+                    sh.remote_dir = Some(old);
+                }
+                (error, _) => sh.remote_dir = Some(RemoteDir { path: str_of("path"), parent, entries, error }),
+            }
         }
         Some("get_err") => {
             sh.download = None;
@@ -777,6 +849,11 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
             sh.upload = None;
             let msg = format!("File not sent: {}", str_of("msg"));
             sh.banner(msg);
+        }
+        Some("host_busy") => {
+            if v.get("on").and_then(|x| x.as_bool()) == Some(true) {
+                sh.banner("The computer's user is using the mouse: yours waits until they stop");
+            }
         }
         Some("switch_req") => sh.switch_req = true,
         Some("switch_ok") => sh.switch_ok = true,

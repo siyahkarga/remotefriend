@@ -119,9 +119,13 @@ pub struct HostSettings {
     /// Viewers see everything; otherwise RemoteFriends and private apps are hidden (safe view).
     #[serde(default)]
     pub full_view: bool,
-    /// Name parts of private apps hidden in the safe view (empty: the built-in list).
+    /// Name parts of private apps hidden in the safe view (empty: the built-in list, unless
+    /// `private_apps_set`).
     #[serde(default)]
     pub private_apps: Vec<String>,
+    /// The user edited the private-app list: an empty list then means no private apps.
+    #[serde(default)]
+    pub private_apps_set: bool,
     /// Don't ask blobidea.com for new versions.
     #[serde(default)]
     pub no_update_check: bool,

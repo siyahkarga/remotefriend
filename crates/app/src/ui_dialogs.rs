@@ -140,6 +140,33 @@ impl App {
                     });
                     ui.label(RichText::new(format!("Declined automatically in {} s", p.seconds_left)).size(11.5).color(kit::FAINT));
                 }
+                PromptKind::FileAccess { label, shared } => {
+                    heading(ui, "📁", ACCENT, "Let them use your files?", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{label} (a trusted device) wants to browse the folders and disks of this computer, send files into them and take files from them."
+                                ))
+                                .color(TEXT),
+                            )
+                            .wrap(),
+                        );
+                        kit::note(ui, "System folders and hidden files stay out of reach. You see every file that comes and goes.");
+                        kit::note(ui, format!("Otherwise they can use only the shared folder: {shared}"));
+                    });
+                    ui.add_space(14.0);
+                    kit::countdown(ui, p.seconds_left as f32 / 60.0, ACCENT);
+                    ui.add_space(12.0);
+                    kit::split(ui, 32.0, |_| {}, |ui| {
+                        if ui.add(kit::primary("Allow for this session")).clicked() {
+                            answer(Answer::Files(true));
+                        }
+                        if ui.add(kit::secondary("Only the shared folder")).clicked() {
+                            answer(Answer::Files(false));
+                        }
+                    });
+                    ui.label(RichText::new(format!("Only the shared folder in {} s", p.seconds_left)).size(11.5).color(kit::FAINT));
+                }
                 PromptKind::TrustServer { addr, fingerprint } => {
                     heading(ui, "🔒", WARN, "First connection to the server", |ui| {
                         kit::line(ui, RichText::new(format!("Server: {addr}")).color(TEXT));

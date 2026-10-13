@@ -2,6 +2,7 @@
 
 use egui::{Align, Layout, RichText};
 use serde_json::json;
+use std::time::{Duration, Instant};
 
 use crate::ui_kit::{self as kit, ACCENT, ERR, FAINT, MUTED, OK, TEXT, WARN};
 use crate::{autostart, restart_app, App, Page};
@@ -34,11 +35,32 @@ fn field_label(ui: &mut egui::Ui, text: &str, tip: &str) {
     });
 }
 
-/// "app 83.135.241.220 (via internet)" -> "internet · 83.135.241.220".
-fn peer_text(peer: &str) -> String {
+/// "app 83.135.241.220:3375 (via internet)" -> "internet · 83.135.•••.•••", or with the
+/// whole address when `full`.
+fn peer_text(peer: &str, full: bool) -> String {
     let internet = peer.contains("(via internet)");
     let addr = peer.trim_end_matches(" (via internet)").trim_start_matches("app ").trim();
+    let addr = if full { addr.to_string() } else { short_addr(addr) };
     if internet { format!("internet · {addr}") } else { format!("local network · {addr}") }
+}
+
+/// An address without its port and with its second half hidden: enough to tell networks
+/// apart, without showing whoever sees this screen where a visitor connected from.
+fn short_addr(addr: &str) -> String {
+    let host = match addr.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None if addr.matches(':').count() == 1 => addr.split(':').next().unwrap_or(addr),
+        None => addr,
+    };
+    let v4: Vec<&str> = host.split('.').collect();
+    if v4.len() == 4 {
+        return format!("{}.{}.•••.•••", v4[0], v4[1]);
+    }
+    let v6: Vec<&str> = host.split(':').filter(|g| !g.is_empty()).collect();
+    if v6.len() > 2 {
+        return format!("{}:{}:•••", v6[0], v6[1]);
+    }
+    host.to_string()
 }
 
 impl App {
@@ -153,8 +175,18 @@ impl App {
                     ui.vertical(|ui| kit::page_header(ui, "History", "Who connected to this computer recently."));
                 },
                 |ui| {
-                    if !recent.is_empty() && ui.add(kit::secondary("Clear")).clicked() {
-                        sessions::clear_recent();
+                    if !recent.is_empty() {
+                        if ui.add(kit::secondary("Clear")).clicked() {
+                            sessions::clear_recent();
+                        }
+                        let (icon, tip) = if self.show_addresses {
+                            (kit::Icon::EyeOff, "Shorten the network addresses")
+                        } else {
+                            (kit::Icon::Eye, "Show the full network addresses")
+                        };
+                        if kit::icon(ui, icon, tip).clicked() {
+                            self.show_addresses = !self.show_addresses;
+                        }
                     }
                 },
             );
@@ -171,7 +203,7 @@ impl App {
                         if r.trusted { " · trusted" } else { "" },
                     );
                     kit::row(ui, |ui| kit::row_text(ui, &r.label, &detail), |ui| {
-                        kit::line(ui, RichText::new(peer_text(&r.peer)).size(12.0).color(FAINT));
+                        kit::line(ui, RichText::new(peer_text(&r.peer, self.show_addresses)).size(12.0).color(FAINT));
                     });
                 }
             });
@@ -468,6 +500,7 @@ impl App {
     }
 
     fn settings_privacy(&mut self, ui: &mut egui::Ui) {
+        let wayland = crate::privacy::wayland();
         kit::titled_card(ui, "What viewers see", "", |ui| {
             let mut full = remote_friend_host::privacy::full_view();
             if kit::segmented(
@@ -479,20 +512,55 @@ impl App {
             }
             ui.add_space(4.0);
             if full {
-                kit::note(ui, "Viewers see the screen exactly as you do, RemoteFriends included.");
+                kit::note(ui, "Viewers see the screen exactly as you do, RemoteFriends included. They still can't use RemoteFriends itself; only your own devices may.");
             } else {
-                kit::note(ui, "RemoteFriends and the private apps below are hidden from viewers.");
-                if crate::privacy::wayland() {
+                kit::note(
+                    ui,
+                    "RemoteFriends and the private apps below are blacked out for viewers. Their clicks and keys can't use RemoteFriends in either view; your own devices (“My devices” on the Devices page) may.",
+                );
+                if wayland {
                     kit::callout(ui, WARN, |ui| {
                         kit::note(
                             ui,
-                            "This Linux desktop (Wayland) doesn't tell apps where windows are, so only RemoteFriends itself can be hidden (it is minimized while someone watches). Other windows stay visible.",
+                            "This Linux desktop (Wayland) doesn't tell apps where windows are, so private apps can't be blacked out here, and while someone watches RemoteFriends shows only who is connected. To hide private apps, log in with an X11 (Xorg) session.",
                         );
                     });
                 }
             }
         });
         ui.add_space(12.0);
+        if !wayland {
+            if self.open_apps.1.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
+                self.open_apps = (remote_friend_host::privacy::open_apps(), Some(Instant::now()));
+            }
+            let apps = self.open_apps.0.clone();
+            let mut changed = None;
+            kit::titled_card(ui, "Open apps", "Switch an app on to black out its windows for viewers in the safe view.", |ui| {
+                if apps.is_empty() {
+                    kit::empty(ui, "No app windows found.");
+                }
+                for app in &apps {
+                    let mut hidden = app.hidden;
+                    let detail = if hidden { "hidden from viewers" } else { "viewers see it" };
+                    kit::row(
+                        ui,
+                        |ui| kit::row_text(ui, &app.name, detail),
+                        |ui| {
+                            if kit::switch(ui, &mut hidden).on_hover_text("Black out this app's windows for viewers").changed() {
+                                changed = Some((app.name.clone(), hidden));
+                            }
+                        },
+                    );
+                }
+            });
+            if let Some((name, hidden)) = changed {
+                remote_friend_host::privacy::set_app_hidden(&name, hidden);
+                self.settings_private_apps = remote_friend_host::privacy::private_apps().join(", ");
+                self.open_apps.1 = None;
+                self.flash(if hidden { format!("{name} is hidden from viewers") } else { format!("Viewers see {name}") });
+            }
+            ui.add_space(12.0);
+        }
         kit::titled_card(
             ui,
             "Private apps",
@@ -510,6 +578,8 @@ impl App {
                 if ui.add(kit::primary("Save list")).clicked() {
                     let list = self.settings_private_apps.split([',', '\n']).map(|s| s.trim().to_string()).collect();
                     remote_friend_host::privacy::set_private_apps(list);
+                    self.settings_private_apps = remote_friend_host::privacy::private_apps().join(", ");
+                    self.open_apps.1 = None;
                     self.flash("Private apps saved");
                 }
                 ui.add_space(4.0);
@@ -622,5 +692,19 @@ impl App {
             });
             kit::note(ui, "Security problems: support@blobidea.com");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses_are_shortened_unless_asked() {
+        assert_eq!(peer_text("app 83.135.241.219:3375 (via internet)", false), "internet · 83.135.•••.•••");
+        assert_eq!(peer_text("83.135.241.219:3375 (via internet)", true), "internet · 83.135.241.219:3375");
+        assert_eq!(peer_text("192.168.1.20", false), "local network · 192.168.•••.•••");
+        assert_eq!(short_addr("[2a02:810d:1234:5678::1]:4000"), "2a02:810d:•••");
+        assert_eq!(short_addr("Chrome on Android"), "Chrome on Android");
     }
 }

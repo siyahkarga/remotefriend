@@ -470,8 +470,8 @@ impl Capturer {
         let (w, h) = (img.width(), img.height());
         let mut data = img.into_raw();
         // Safe view: private windows are blacked out (window positions are in points on macOS).
-        let window_scale = if cfg!(target_os = "macos") { scale } else { 1.0 };
-        crate::privacy::mask(&mut data, w, h, mon.x().unwrap_or(0), mon.y().unwrap_or(0), window_scale);
+        let (window_scale, bars) = if cfg!(target_os = "macos") { (scale, 1.0) } else { (1.0, scale) };
+        crate::privacy::mask(&mut data, w, h, mon.x().unwrap_or(0), mon.y().unwrap_or(0), window_scale, bars);
         let hash = quick_hash(&data) ^ ((w as u64) << 32 | h as u64);
         if hash == self.last_hash {
             return Ok(None);

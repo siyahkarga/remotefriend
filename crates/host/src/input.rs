@@ -10,6 +10,7 @@ use anyhow::Result;
 use remote_friend_common::{InputEvent, MouseButton, RemoteKey};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Geometry of the captured monitor (enigo expects logical coordinates).
 #[derive(Clone, Copy)]
@@ -73,8 +74,97 @@ pub(crate) fn release_all() {
     }
 }
 
+// ---- the computer's own user comes first ----
+//
+// A viewer and the person at the computer share one pointer. When the person moves the mouse,
+// viewers' input waits until they have left it alone for LOCAL_GRACE. The pointer is watched:
+// if it is not where we last put it, someone at the computer moved it. Windows, macOS and
+// X11 tell where the pointer is; on Wayland nothing can be done here (the portal hides it).
+
+/// After the computer's user moved the mouse, viewers' input waits this long.
+const LOCAL_GRACE: Duration = Duration::from_millis(1500);
+
+/// Where we last put the pointer (in the platform's screen coordinates).
+static PUT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+static LOCAL_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static LAST_REMOTE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The computer's user is using the mouse: viewers' input waits.
+pub(crate) fn local_user_active() -> bool {
+    LOCAL_UNTIL.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| Instant::now() < t)
+}
+
+/// Where the pointer is now (None where the system doesn't tell).
+fn pointer() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        let mut p = windows::Win32::Foundation::POINT::default();
+        // SAFETY: plain Win32 call writing into a local POINT.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) }.ok()?;
+        Some((p.x, p.y))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let ev = objc2_core_graphics::CGEvent::new(None)?;
+        let p = objc2_core_graphics::CGEvent::location(Some(&ev));
+        Some((p.x.round() as i32, p.y.round() as i32))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if crate::wayland::input_ready() {
+            return None;
+        }
+        crate::winlist::pointer()
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    None
+}
+
+/// Watch the pointer while viewers use it (started with the first remote move).
+fn watch_local_user() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        let _ = std::thread::Builder::new().name("rf-local-user".into()).spawn(|| {
+            let mut misses = 0;
+            loop {
+                let busy = LAST_REMOTE.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed() < Duration::from_secs(30));
+                if !busy {
+                    misses = 0;
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+                let (Some((x, y)), Some((px, py))) = (pointer(), *PUT.lock().unwrap_or_else(|e| e.into_inner())) else { continue };
+                // Twice in a row, so a move we are making right now isn't mistaken for theirs.
+                misses = if (x - px).abs() > 6 || (y - py).abs() > 6 { misses + 1 } else { 0 };
+                if misses >= 2 {
+                    misses = 0;
+                    *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((x, y));
+                    let was = local_user_active();
+                    *LOCAL_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + LOCAL_GRACE);
+                    if !was {
+                        tracing::info!("the computer's user took the mouse: viewers wait");
+                        // A drag the viewer started must not continue under the local hand.
+                        release_held_buttons();
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Release only the mouse buttons a viewer holds.
+fn release_held_buttons() {
+    let buttons = HELD.lock().ok().and_then(|mut g| g.as_mut().map(|h| std::mem::take(&mut h.buttons)));
+    for button in buttons.unwrap_or_default() {
+        let _ = dispatch(InputEvent::MouseUp { button });
+    }
+}
+
 /// Queue the input (non-blocking).
 pub(crate) fn apply(ev: InputEvent) -> Result<()> {
+    *LAST_REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    watch_local_user();
     // Update the held state only if the event was actually queued; that way a dropped
     // "release" event can still be made up for by release_all().
     let tracked = matches!(ev, InputEvent::Key { .. } | InputEvent::MouseDown { .. } | InputEvent::MouseUp { .. });
@@ -162,16 +252,19 @@ fn enigo_apply(enigo: &mut enigo::Enigo, ev: InputEvent) -> Result<()> {
             #[cfg(windows)]
             {
                 let _ = enigo;
+                let (px, py) = (g.mon_x + x as i32, g.mon_y + y as i32);
                 // SAFETY: plain Win32 call with integer coordinates.
-                unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(g.mon_x + x as i32, g.mon_y + y as i32) }
+                unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(px, py) }
                     .map_err(|e| anyhow::anyhow!("SetCursorPos: {e}"))?;
+                *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((px, py));
             }
             // macOS: capture is in pixels (Retina), the pointer in points.
             #[cfg(not(windows))]
             {
                 let lx = g.mon_x + (x as f32 / g.scale).round() as i32;
                 let ly = g.mon_y + (y as f32 / g.scale).round() as i32;
-                enigo.move_mouse(lx, ly, Coordinate::Abs)?
+                enigo.move_mouse(lx, ly, Coordinate::Abs)?;
+                *PUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((lx, ly));
             }
         }
         InputEvent::MouseDown { button } => enigo.button(map_btn(button), Direction::Press)?,

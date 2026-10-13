@@ -129,8 +129,28 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
   never written to disk.
 - The computer's user sees every session and can disconnect it, pause all input ("Take back
   control") or turn off mouse/keyboard, sound, files and clipboard per viewer; the viewer is told.
-- While a session runs, the RemoteFriends window is minimized and (Windows, macOS) excluded from
-  screen capture; closing it asks first.
+- While a session runs in the safe view, the RemoteFriends window stays open for the computer's
+  user but is kept out of the picture: excluded from screen capture (Windows, macOS) and blacked
+  out by the host (macOS, X11). On Wayland the window can't be hidden, so it shows only who is
+  connected until the computer's user opens it. Closing it asks first, and closing it tells every
+  viewer that RemoteFriends was closed (viewers also end a session after 15 s of silence).
+- **File access by trust.** Up to 0.14.1 every viewer with the Files permission could
+  browse and download any file the user can read (including ~/.ssh). Now a viewer allowed once
+  reaches only the shared folder (Downloads/RemoteFriend); a trusted device reaches the user's
+  folder and data disks (Linux /media, /run/media, /mnt; macOS /Volumes; Windows drives) without
+  system folders (Windows, Program Files, ProgramData, other users' profiles, AppData, macOS
+  ~/Library), hidden files and dot folders, and only after the computer's user agrees once per
+  session; the owner's own devices reach everything. Every path is resolved (symbolic links
+  included) and checked on the host for listing, downloading and as the destination of uploads;
+  a refused or unanswered question means the shared folder only. Each received or taken file is
+  listed in the session's row and announced on the desktop.
+- **Viewers can't use RemoteFriends itself** in either view (only the owner's own devices may):
+  the app drops clicks and keys that arrive right after a viewer's (0.7 s), so a viewer can't
+  change settings, widen its own access or trust its device, even by clicking blindly.
+- **The local user comes first:** when the pointer moves without us (Windows, macOS, X11),
+  viewers' input waits for 1.5 s and buttons they hold are released.
+- The History page shows where a visitor connected from only shortened (83.135.•••.•••) unless
+  the user asks for the full address; the host learns that address anyway (TCP / direct link).
 - Dead connections are detected: TCP keepalive on every link, relay heartbeat echoes (a computer
   reconnects after 70 s without an answer), a 90 s idle limit on relayed sessions and a 45 s idle
   limit on sessions (viewers ping every 2 s). Per-IP limits on the relay were raised (64 open

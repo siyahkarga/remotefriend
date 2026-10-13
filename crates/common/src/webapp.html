@@ -72,7 +72,8 @@
   .tb.on { background:rgba(91,132,255,.30); color:#fff; }
   .tb.danger { color:#ff7a7f; }
   .tb svg { width:21px; height:21px; }
-  #stats { font-size:12px; color:var(--bar-dim); padding:0 8px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  /* Fixed width: changing numbers must not make the whole bar grow and shrink. */
+  #stats { font-size:12px; color:var(--bar-dim); padding:0 8px; white-space:nowrap; font-variant-numeric:tabular-nums; flex:none; width:22em; overflow:hidden; text-overflow:ellipsis; text-align:center; }
   @media (max-width:520px) { #stats { display:none; } }
   @media (max-width:400px) { .tb { width:36px; } }
   .sheet { position:absolute; left:50%; top:calc(62px + env(safe-area-inset-top)); transform:translateX(-50%); width:min(440px, calc(100% - 16px)); background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:14px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); box-shadow:0 10px 32px rgba(0,0,0,.5); z-index:6; max-height:calc(100% - 90px); overflow:auto; }
@@ -90,9 +91,14 @@
   .frow span:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .frow small { color:var(--bar-dim); flex:none; }
   .fbar { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
-  .fbar button, .xfer button { border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:9px; padding:6px 10px; cursor:pointer; }
+  .fbar button, .xfer button { border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:9px; padding:6px 10px; cursor:pointer; white-space:nowrap; flex:none; }
+  .fbar button:disabled { opacity:.4; cursor:default; }
   .fbar code { font-size:12px; color:var(--bar-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left; }
   .xfer { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; color:var(--bar-txt); }
+  .facc { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; margin:0 2px 14px; line-height:1.35; }
+  .facc i { flex:none; width:10px; height:10px; border-radius:50%; margin-top:4px; }
+  .facc span { color:var(--bar-dim); font-size:12.5px; }
+  .rowbtn:disabled { opacity:.45; cursor:default; }
   .xfer span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .remember { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:14px; color:var(--dim); cursor:pointer; user-select:none; }
   .remember input { width:18px; height:18px; accent-color:var(--acc); }
@@ -220,11 +226,15 @@
   </div>
 
   <div class="sheet" id="filesSheet" hidden>
-    <button class="rowbtn" id="sendFileBtn">⬆ Send files to the computer</button>
+    <div class="facc" id="filesAccess"></div>
+    <h3>Send to the computer</h3>
+    <button class="rowbtn" id="sendFileBtn">⬆ Choose files to send</button>
+    <p class="note" id="sendDest"></p>
     <div class="xfer" id="upBox" hidden><span id="upText"></span><button id="upCancel">Cancel</button></div>
-    <h3>On the computer</h3>
-    <div class="fbar"><button id="dirUp">⬆ Up</button><button id="dirHome">Home</button><code id="dirPath"></code></div>
+    <h3>Get from the computer</h3>
+    <div class="fbar"><button id="dirUp">⬆ Up</button><button id="dirHome">Start</button><code id="dirPath"></code></div>
     <div class="xfer" id="downBox" hidden><span id="downText"></span><button id="downCancel">Cancel</button></div>
+    <p class="note" style="margin-top:0">Tap a file to download it: your browser saves it (usually in Downloads).</p>
     <div class="flist" id="dirList"></div>
   </div>
 
@@ -545,6 +555,11 @@ fetch('info', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j =>
   applyRole();
   const q = new URLSearchParams(location.hash.slice(1));
   if (q.get('id')) idInput.value = q.get('id').replace(/\D/g, '').replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+  // An invite link carries the ID and password after "#" (never sent to the server). Take
+  // them out of the address bar and history, then connect right away.
+  const invitePw = q.get('pw');
+  if (invitePw !== null) history.replaceState(null, '', location.pathname + location.search);
+  if (invitePw && role !== 'host' && idInput.value) { $('pw').value = invitePw; $('rememberPw').checked = false; showPwHint(); connect(); return; }
   (role === 'host' || idInput.value ? $('pw') : idInput).focus({ preventScroll: true });
 });
 
@@ -607,7 +622,7 @@ function onClosed(sock) {
     autoReconnecting = false;
     $('toast').hidden = true;
     $('ovTitle').textContent = sock._title || 'Connection lost';
-    $('ovText').textContent = sock._reason || 'The network dropped or the remote computer ended the session.';
+    $('ovText').textContent = sock._reason || 'The network dropped, or RemoteFriends was closed on that computer.';
     $('overlay').hidden = false;
   } else {
     showLogin();
@@ -634,6 +649,7 @@ function onMessage(ev) {
 }
 
 function handleJson(m) {
+  lastRx = performance.now();
   switch (m.t) {
     case 'wait': if (autoReconnecting) toast('Waiting for approval on the remote computer…', 0);
       setBusy(true, 'Waiting for approval…');
@@ -645,7 +661,11 @@ function handleJson(m) {
         if (savedPw) { ws._quiet = true; ws.close(); setTimeout(() => connect(true), 150); break; }
       }
       if (m.msg === 'wrong password') { store(pwKeyFor(savedId), ''); m.msg = 'wrong password (the computer may have a new one)'; }
-      if (m.code === 'ended') { ws._title = 'Session ended'; ws._reason = 'The remote computer\'s user ended the session.'; }
+      if (m.code === 'ended') {
+        ws._title = 'Session ended';
+        const why = m.msg || 'the remote computer\'s user ended the session';
+        ws._reason = why.charAt(0).toUpperCase() + why.slice(1) + '.';
+      }
       else ws._reason = 'Rejected: ' + (m.msg || 'unknown reason');
       ws.close(); break;
     case 'perms': applyPerms(m, true); break;
@@ -659,10 +679,24 @@ function handleJson(m) {
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
     case 'quality': setQualityUi(m.p); break;
     case 'file_done': $('upBox').hidden = true; toast('✓ Sent ' + (m.name || 'file') + ' — saved on the computer as ' + (m.path || '?'), 7000); break;
-    case 'ls': dir = m; renderDir(); break;
+    case 'ls':
+      lsAsked = 0;
+      if (m.wait) filesLevel = 'wait';
+      if (m.level) filesLevel = m.level;
+      // A refused folder keeps the list that was shown, with the reason.
+      if (m.error && dir && (dir.path || (dir.entries || []).length)) dir.error = m.error; else dir = m;
+      renderDir(); break;
+    case 'files_access': {
+      const was = filesLevel;
+      filesLevel = m.level || ''; filesShared = m.shared || ''; filesMax = m.max || 0;
+      filesInfo();
+      if (was === 'wait' && ['shared', 'disk', 'all'].includes(filesLevel)) listDir('');
+      break;
+    }
+    case 'host_busy': if (m.on) toast('The computer\'s user is using the mouse — yours waits until they stop', 2500); break;
     case 'fdata': onFileData(m); break;
     case 'get_err': download = null; showDownload(); toast('Download failed: ' + (m.msg || ''), 5000); break;
-    case 'file_err': $('upBox').hidden = true; toast('File error: ' + (m.msg || ''), 5000); break;
+    case 'file_err': uploadFailed = true; $('upBox').hidden = true; toast('File not sent: ' + (m.msg || ''), 6000); break;
   }
 }
 
@@ -702,7 +736,7 @@ function onWelcome(m) {
 // ---------------- viewer ----------------
 let decoder = null, decCfg = '', sps = null, pps = null, needKey = true, lastKeyReq = 0;
 let jpegBusy = false, jpegNext = null, lastSeq = null;
-let statFrames = 0, statBytes = 0, statT = 0, fps = 0, kbps = 0, rtt = 0, pingTimer = 0, statsTimer = 0;
+let statFrames = 0, statBytes = 0, statT = 0, fps = 0, kbps = 0, rtt = 0, pingTimer = 0, statsTimer = 0, lastRx = 0;
 let wakeLock = null;
 
 function showLogin() { $('viewer').hidden = true; $('login').hidden = false; resetLogin(); }
@@ -720,7 +754,15 @@ function startViewer() {
   statT = performance.now(); statFrames = statBytes = 0;
   let pings = 0;
   // Every 5th ping goes through the server even on a direct path, so the server keeps the session.
+  lastRx = performance.now();
   pingTimer = setInterval(() => {
+    // The computer answers every ping: this long without anything means it is gone
+    // (RemoteFriends closed there, asleep, or its network dropped).
+    if (ws && performance.now() - lastRx > 15000) {
+      ws._title = 'The computer stopped answering';
+      ws.close();
+      return;
+    }
     const o = { t: 'ping', ts: performance.now() };
     if (sec && sec.ready) sendSecure(o, ++pings % 5 === 0); else send(o);
   }, 2000);
@@ -736,6 +778,7 @@ function stopViewer() {
   closeDecoder();
   sps = pps = null; jpegBusy = false; jpegNext = null;
   dir = null; download = null; showDownload(); $('upBox').hidden = true;
+  filesLevel = filesShared = ''; filesMax = 0; lsAsked = 0;
   closeSheets();
   try { wakeLock && wakeLock.release(); } catch (_) {}
   wakeLock = null;
@@ -745,7 +788,7 @@ function updateStats() {
   const now = performance.now(), dt = (now - statT) / 1000;
   fps = Math.round(statFrames / dt); kbps = Math.round(statBytes * 8 / 1000 / dt);
   statFrames = statBytes = 0; statT = now;
-  const txt = (frameW ? frameW + '×' + frameH + ' · ' : '') + fps + ' fps · ' + (kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbit/s' : kbps + ' kbit/s') + (rtt ? ' · ' + rtt + ' ms' : '') + (p2p && p2p.open ? ' · direct' : '');
+  const txt = (frameW ? frameW + '×' + frameH + ' · ' : '') + fps + ' fps · ' + (kbps / 1000).toFixed(1) + ' Mbit/s' + (rtt ? ' · ' + rtt + ' ms' : '');
   $('stats').textContent = txt;
   if (!$('setSheet').hidden) renderInfo();
 }
@@ -766,6 +809,7 @@ function renderInfo() {
 }
 
 function onFrame(buf) {
+  lastRx = performance.now();
   if (buf.byteLength < HDR) return;
   const u8 = new Uint8Array(buf, 0, HDR);
   if (u8[0] !== FRAME_VER) {
@@ -1461,12 +1505,39 @@ $('ovClose').onclick = () => { $('overlay').hidden = true; showLogin(); };
 // ---------------- file upload ----------------
 $('fileBtn').onclick = () => {
   toggleSheet('filesSheet', $('fileBtn'));
-  if (!$('filesSheet').hidden && !dir) send({ t: 'ls', path: '' });
+  if ($('filesSheet').hidden) return;
+  send({ t: 'files_hello' });
+  if (!dir) listDir('');
+  filesInfo();
 };
 $('sendFileBtn').onclick = () => $('filePick').click();
 
 // ---------------- files on the computer (browse, download) ----------------
-let dir = null, download = null, uploadCancel = false, uploadId = 0;
+let dir = null, download = null, uploadCancel = false, uploadFailed = false, uploadId = 0;
+// What the computer lets us reach: 'shared', 'disk', 'all', 'wait' (its user is asked), 'off',
+// or '' (an older computer that doesn't say).
+let filesLevel = '', filesShared = '', filesMax = 0, lsAsked = 0, lsTimer = 0;
+function filesInfo() {
+  const shared = filesShared || 'Downloads/RemoteFriend';
+  const lv = {
+    shared: ['Shared folder only', 'That computer shares one folder with you: ' + shared, '#5b84ff'],
+    disk: ['Its folders and disks', 'System folders and hidden files stay hidden.', '#2fbf71'],
+    all: ['Everything (your device)', 'All folders and disks of that computer.', '#2fbf71'],
+    wait: ['Waiting for approval', 'The computer\'s user is asked to let you use its files.', '#f5a524'],
+    off: ['File transfer is off', 'The computer\'s user turned file transfer off.', '#e5484d'],
+  }[filesLevel];
+  $('filesAccess').innerHTML = lv ? '<i style="background:' + lv[2] + '"></i><div><b>' + esc(lv[0]) + '</b><br><span>' + esc(lv[1]) + '</span></div>' : '';
+  $('sendDest').textContent = 'Goes to: ' + (sendDir() || shared);
+  $('sendFileBtn').disabled = filesLevel === 'wait' || filesLevel === 'off';
+}
+// Where a file we send lands: the folder shown, where the computer lets us choose.
+function sendDir() { return (filesLevel === 'disk' || filesLevel === 'all') && dir && dir.path ? dir.path : ''; }
+function listDir(path) {
+  lsAsked = performance.now();
+  send({ t: 'ls', path });
+  clearTimeout(lsTimer); lsTimer = setTimeout(renderDir, 10500);
+  renderDir();
+}
 function humanSize(n) { return n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + ' GB' : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB' : n >= 1024 ? (n >> 10) + ' KB' : n + ' B'; }
 function joinPath(base, name) {
   if (!base) return name;
@@ -1475,21 +1546,30 @@ function joinPath(base, name) {
 }
 function renderDir() {
   const list = $('dirList'); list.innerHTML = '';
-  $('dirPath').textContent = dir ? (dir.path || 'This PC') : '';
+  $('dirPath').textContent = dir ? (dir.path || 'That computer') : '';
   $('dirUp').disabled = !dir || dir.parent == null;
-  if (!dir) return;
-  if (dir.error) { const e = document.createElement('div'); e.className = 'note'; e.textContent = dir.error; list.appendChild(e); return; }
+  filesInfo();
+  const note = text => { const e = document.createElement('div'); e.className = 'note'; e.textContent = text; list.appendChild(e); return e; };
+  if (lsAsked && performance.now() - lsAsked > 10000) {
+    const e = note('No answer from that computer. ');
+    const b = document.createElement('button'); b.textContent = 'Retry'; b.className = 'key';
+    b.onclick = () => { send({ t: 'files_hello' }); listDir(dir && dir.path || ''); };
+    e.appendChild(b);
+    return;
+  }
+  if (!dir) { if (lsAsked) note('Loading…'); return; }
+  if (dir.error) { note(dir.error); if (!(dir.entries || []).length) return; }
   for (const e of dir.entries || []) {
     const row = document.createElement('button');
     row.className = 'frow';
     row.innerHTML = '<span>' + (e.d ? '📁 ' : '📄 ') + esc(e.n) + '</span>' + (e.d ? '' : '<small>' + humanSize(e.s) + ' · ⬇</small>');
-    row.onclick = () => e.d ? send({ t: 'ls', path: joinPath(dir.path, e.n) }) : startDownload(joinPath(dir.path, e.n), e.n, e.s);
+    row.onclick = () => e.d ? listDir(joinPath(dir.path, e.n)) : startDownload(joinPath(dir.path, e.n), e.n, e.s);
     list.appendChild(row);
   }
   if (!(dir.entries || []).length) { const e = document.createElement('div'); e.className = 'note'; e.textContent = 'Empty folder'; list.appendChild(e); }
 }
-$('dirUp').onclick = () => { if (dir && dir.parent != null) send({ t: 'ls', path: dir.parent }); };
-$('dirHome').onclick = () => send({ t: 'ls', path: '' });
+$('dirUp').onclick = () => { if (dir && dir.parent != null) listDir(dir.parent); };
+$('dirHome').onclick = () => listDir('');
 // Downloads are kept in memory until complete, then saved by the browser.
 const MAX_DOWNLOAD = 1024 * 1024 * 1024;
 function startDownload(path, name, size) {
@@ -1531,15 +1611,20 @@ async function drain() {
 $('filePick').addEventListener('change', async () => {
   const files = Array.from($('filePick').files || []);
   $('filePick').value = '';
+  const max = filesMax || 512 * 1024 * 1024;
   for (const f of files) {
-    if (!f.size || f.size > 512 * 1024 * 1024) { toast(f.name + ': empty or larger than the 512 MB limit', 4000); continue; }
+    if (f.size > max) { toast(f.name + ' is too big (' + humanSize(f.size) + '; that computer takes up to ' + humanSize(max) + ')', 5000); continue; }
     const rnd = new Uint32Array(1); crypto.getRandomValues(rnd);
     const id = Date.now() * 1000 + (rnd[0] % 1000);
     const CH = 192 * 1024;
-    uploadCancel = false; uploadId = id;
+    uploadCancel = false; uploadFailed = false; uploadId = id;
     $('upBox').hidden = false;
+    $('upText').textContent = 'Sending ' + f.name;
+    if (sendDir()) send({ t: 'put_dir', id, dir: sendDir() });
     try {
+      if (!f.size) send({ t: 'file', transfer_id: id, name: f.name, offset: 0, total: 0, data: '', last: true });
       for (let off = 0; off < f.size; off += CH) {
+        if (uploadFailed) return;
         if (uploadCancel) {
           send({ t: 'file_cancel', id });
           $('upBox').hidden = true; toast('Sending ' + f.name + ' canceled', 3000);

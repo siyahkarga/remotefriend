@@ -114,6 +114,11 @@ pub(crate) fn ask(req: &Request) -> Decision {
         status::notice(format!("{who}: accepted automatically (REMOTE_FRIEND_AUTO_ACCEPT=1)"));
         return Decision::Once;
     }
+    // Development aid: test a trusted device's session ("Always allow") without clicking.
+    #[cfg(debug_assertions)]
+    if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").is_ok_and(|v| v == "trust") {
+        return Decision::Trust;
+    }
     notify_desktop(req);
     let decision = if status::ui_prompts() {
         match status::ask_ui(PromptKind::Connection(req.clone()), ASK_TIMEOUT) {
@@ -150,6 +155,32 @@ pub(crate) fn ask(req: &Request) -> Decision {
         }
     ));
     decision
+}
+
+/// A trusted device wants to use this computer's folders and disks (without system files)
+/// in this session. No answer: only the shared folder.
+pub(crate) fn ask_files(label: &str) -> bool {
+    if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").is_ok_and(|v| v == "1" || (cfg!(debug_assertions) && v == "trust")) {
+        status::notice(format!("{label}: file access allowed automatically (REMOTE_FRIEND_AUTO_ACCEPT)"));
+        return true;
+    }
+    status::desktop_notify("RemoteFriends: file access", &format!("{label} wants to use the files on this computer"));
+    let shared = crate::files::shared_shown();
+    let yes = if status::ui_prompts() {
+        let kind = PromptKind::FileAccess { label: label.to_string(), shared };
+        matches!(status::ask_ui(kind, Duration::from_secs(60)), Some(Answer::Files(true)))
+    } else {
+        let question = format!(
+            "*** {label} wants to use the folders on this computer (no system files).\n*** A = allow / N = only the shared folder {shared}  (60 s, default: only the shared folder)"
+        );
+        prompt_line(&question, Duration::from_secs(60)).is_some_and(|l| yes(&l))
+    };
+    status::notice(if yes {
+        format!("{label} may use the folders on this computer (no system files)")
+    } else {
+        format!("{label} may use only the shared folder")
+    });
+    yes
 }
 
 /// First connection to a relay server: trust its certificate fingerprint?

@@ -15,6 +15,40 @@ pub enum Via {
     App,
 }
 
+/// How far a viewer is trusted. It decides what it may do with this computer's files and
+/// whether it may use RemoteFriends itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Logged in with the password and allowed once (or switched sides): files only in the
+    /// shared folder, never RemoteFriends itself.
+    Guest,
+    /// A trusted device ("Always allow"): folders and disks without system files once this
+    /// computer's user agrees in the session, never RemoteFriends itself.
+    Trusted,
+    /// One of the owner's own devices: everything, without questions.
+    Mine,
+}
+
+impl Access {
+    pub fn word(self) -> &'static str {
+        match self {
+            Access::Guest => "allowed once",
+            Access::Trusted => "trusted",
+            Access::Mine => "your device",
+        }
+    }
+}
+
+/// A file that came in or went out during a session (the computer's user sees them).
+#[derive(Clone, Debug)]
+pub struct FileEvent {
+    /// Sent to this computer (true) or taken from it (false).
+    pub incoming: bool,
+    pub name: String,
+    /// Where it is on this computer.
+    pub path: String,
+}
+
 /// What a viewer may do; the computer's user can change it during the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Perms {
@@ -62,8 +96,11 @@ pub struct SessionInfo {
     pub via: Via,
     /// Unix seconds.
     pub since: u64,
-    /// Logged in as a trusted device (no password, no approval).
+    /// Logged in as a trusted device or one of the owner's own devices.
     pub trusted: bool,
+    pub access: Access,
+    /// Files received or taken in this session, newest first (a few).
+    pub file_log: Vec<FileEvent>,
     pub perms: Perms,
     pub transfer: Option<Transfer>,
     /// The viewer is a RemoteFriends app that can switch sides.
@@ -138,9 +175,10 @@ pub(crate) struct SessionHandle {
     pub used_password: bool,
     /// The viewer said goodbye (Disconnect button), not a network drop.
     pub bye: bool,
+    pub access: Access,
 }
 
-pub(crate) fn register(label: &str, peer: &str, via: Via, trusted: bool, used_password: bool) -> SessionHandle {
+pub(crate) fn register(label: &str, peer: &str, via: Via, access: Access, used_password: bool) -> SessionHandle {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let (perms_tx, perms_rx) = watch::channel(Perms::default());
     let kill = Arc::new(Notify::new());
@@ -153,7 +191,9 @@ pub(crate) fn register(label: &str, peer: &str, via: Via, trusted: bool, used_pa
             peer: peer.to_string(),
             via,
             since: now_secs(),
-            trusted,
+            trusted: access != Access::Guest,
+            access,
+            file_log: Vec::new(),
             perms: Perms::default(),
             transfer: None,
             can_switch: false,
@@ -174,6 +214,7 @@ pub(crate) fn register(label: &str, peer: &str, via: Via, trusted: bool, used_pa
         started: Instant::now(),
         used_password,
         bye: false,
+        access,
     }
 }
 
@@ -208,6 +249,17 @@ impl SessionHandle {
     /// Signalled when the computer's user asks this viewer to switch sides.
     pub(crate) fn switch_signal(&self) -> Arc<Notify> {
         self.switch_req.clone()
+    }
+
+    /// A file came in or went out: shown in the session's row.
+    pub(crate) fn log_file(&self, incoming: bool, name: &str, path: &str) {
+        log_file_for(self.id, incoming, name, path);
+    }
+
+    /// `log_file` for a task that runs on its own.
+    pub(crate) fn file_logger(&self) -> impl Fn(bool, &str, &str) + Send + 'static {
+        let id = self.id;
+        move |incoming, name, path| log_file_for(id, incoming, name, path)
     }
 
     pub(crate) fn set_can_switch(&self, can: bool) {
@@ -255,6 +307,13 @@ pub(crate) fn set_direct(id: u64, on: bool) {
     }
 }
 
+fn log_file_for(id: u64, incoming: bool, name: &str, path: &str) {
+    if let Some(l) = live().iter_mut().find(|l| l.info.id == id) {
+        l.info.file_log.insert(0, FileEvent { incoming, name: name.to_string(), path: path.to_string() });
+        l.info.file_log.truncate(4);
+    }
+}
+
 /// Sessions connected right now.
 pub fn list() -> Vec<SessionInfo> {
     live().iter().map(|l| l.info.clone()).collect()
@@ -268,6 +327,28 @@ pub fn set_perms(id: u64, perms: Perms) {
     if let Some(l) = live().iter_mut().find(|l| l.info.id == id) {
         l.info.perms = perms;
         l.perms_tx.send_replace(perms);
+    }
+}
+
+static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// RemoteFriends is closing: end every session, telling the viewers why. Returns how many
+/// there were (the caller gives the goodbyes a moment to go out).
+pub fn end_all_closing() -> usize {
+    CLOSING.store(true, Ordering::SeqCst);
+    let list = live();
+    for l in list.iter() {
+        l.kill.notify_one();
+    }
+    list.len()
+}
+
+/// Why a session ends when this computer's user (or closing the app) ends it.
+pub(crate) fn end_reason() -> &'static str {
+    if CLOSING.load(Ordering::SeqCst) {
+        "RemoteFriends was closed on the remote computer"
+    } else {
+        "the remote computer's user ended the session"
     }
 }
 

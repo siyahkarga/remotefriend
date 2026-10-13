@@ -1,5 +1,11 @@
 //! Files: incoming chunks (ordered, size/count limits, safe names, atomic completion), and
 //! browsing/reading this computer's files for a viewer that downloads them.
+//!
+//! What a viewer reaches depends on how far it is trusted ([`Scope`]): a guest only the
+//! shared folder (Downloads/RemoteFriend), a trusted device its user's folders and data disks
+//! without system folders or hidden files, the owner's own devices everything. Every path a
+//! viewer names is resolved (symbolic links included) and checked before it is listed, read
+//! or written to.
 
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
@@ -103,18 +109,27 @@ pub fn cancel(transfer_id: u64) -> Option<String> {
     Some(t.name)
 }
 
-/// Write one chunk of a file a viewer sends. Returns the final path once it is complete.
-pub(crate) fn save_chunk(c: remote_friend_common::FileChunk) -> Result<Option<String>> {
-    save_chunk_limited(c, max_file_bytes())
+/// Largest file a viewer may send (guests: RF_MAX_FILE_BYTES, 512 MB by default).
+pub(crate) fn max_upload(scope: Scope) -> u64 {
+    match scope {
+        Scope::Shared => max_file_bytes(),
+        Scope::NoSystem | Scope::All => max_file_bytes().max(64 << 30),
+    }
+}
+
+/// Write one chunk of a file a viewer sends into `dir` (checked by the caller with
+/// [`upload_dir`]). Returns the final path once it is complete.
+pub(crate) fn save_chunk(c: remote_friend_common::FileChunk, dir: std::path::PathBuf, max: u64) -> Result<Option<String>> {
+    save_chunk_limited(c, max, dir)
 }
 
 /// Write one chunk of a file downloaded from another computer (the user asked for it, so
 /// the size limit for unrequested files does not apply).
 pub fn save_download_chunk(c: remote_friend_common::FileChunk) -> Result<Option<String>> {
-    save_chunk_limited(c, 1 << 40)
+    save_chunk_limited(c, 1 << 40, receive_dir())
 }
 
-fn save_chunk_limited(c: remote_friend_common::FileChunk, max: u64) -> Result<Option<String>> {
+fn save_chunk_limited(c: remote_friend_common::FileChunk, max: u64, dir: std::path::PathBuf) -> Result<Option<String>> {
     use std::io::Write as _;
 
     const MAX_CHUNK: usize = 256 * 1024;
@@ -142,12 +157,16 @@ fn save_chunk_limited(c: remote_friend_common::FileChunk, max: u64) -> Result<Op
         anyhow::bail!("file last-chunk flag does not match the total size");
     }
 
-    let dir = receive_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create folder: {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    if c.offset == 0 {
+        if dir == receive_dir() {
+            std::fs::create_dir_all(&dir).with_context(|| format!("failed to create folder: {}", dir.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        anyhow::ensure!(dir.is_dir(), "the folder {} does not exist", dir.display());
     }
 
     let mut transfers = transfer_map().lock().unwrap();
@@ -226,12 +245,34 @@ fn save_chunk_limited(c: remote_friend_common::FileChunk, max: u64) -> Result<Op
 }
 
 
-// ---- this computer's files, for viewers that download ----
+// ---- this computer's files, for viewers ----
+
+/// What a viewer may reach (see the module comment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// Only the shared folder (Downloads/RemoteFriend).
+    Shared,
+    /// The user's folders and data disks, without system folders and hidden files.
+    NoSystem,
+    /// Everything.
+    All,
+}
+
+impl Scope {
+    /// For the viewer: "shared", "disk" or "all".
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Scope::Shared => "shared",
+            Scope::NoSystem => "disk",
+            Scope::All => "all",
+        }
+    }
+}
 
 /// One entry of a folder listing.
 #[derive(serde::Serialize)]
 pub(crate) struct Entry {
-    /// Name.
+    /// Name (in the list of starting points: the whole path).
     pub n: String,
     /// Folder?
     pub d: bool,
@@ -246,50 +287,256 @@ fn home_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
 }
 
-/// List a folder (empty path: the home folder). Returns (path, parent, entries): folders
-/// first, hidden files left out, at most 2000 entries. On Windows the parent of a drive is
-/// "" which lists the drives.
-pub(crate) fn list_dir(path: &str) -> Result<(String, Option<String>, Vec<Entry>)> {
+/// A path as viewers see it (Windows: without the \\?\ prefix canonicalize adds).
+fn shown(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
     #[cfg(windows)]
-    if path == "" {
+    let s = s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s);
+    s
+}
+
+/// The shared folder, created if needed.
+fn shared_root() -> Result<std::path::PathBuf> {
+    let dir = receive_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create folder: {}", dir.display()))?;
+    Ok(dir.canonicalize()?)
+}
+
+/// Where a trusted device may start: the user's folder and data disks (resolved paths).
+fn starting_points() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(windows)]
+    for l in b'A'..=b'Z' {
+        let d = std::path::PathBuf::from(format!("{}:\\", l as char));
+        if d.is_dir() {
+            roots.push(d);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        roots.push(home_dir());
+        let user = std::env::var("USER").unwrap_or_default();
+        let mut mounts = vec!["/Volumes".to_string(), "/mnt".to_string()];
+        if !user.is_empty() {
+            mounts.push(format!("/media/{user}"));
+            mounts.push(format!("/run/media/{user}"));
+        }
+        for m in mounts {
+            if let Ok(list) = std::fs::read_dir(&m) {
+                roots.extend(list.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+            }
+        }
+    }
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for r in roots.into_iter().filter_map(|r| r.canonicalize().ok()) {
+        // The system disk itself (macOS lists it in /Volumes) is not a data disk.
+        if !cfg!(windows) && r == std::path::Path::new("/") {
+            continue;
+        }
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// Hidden on this system: dot files, and on Windows the hidden/system attributes.
+fn hidden(name: &str, meta: Option<&std::fs::Metadata>) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const HIDDEN: u32 = 0x2;
+        const SYSTEM: u32 = 0x4;
+        if meta.is_some_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0) {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = meta;
+    name.starts_with('$') && cfg!(windows)
+}
+
+/// Windows folders at the top of a drive that hold the system or programs.
+#[cfg(windows)]
+const SYSTEM_FOLDERS: &[&str] = &[
+    "windows", "program files", "program files (x86)", "programdata", "recovery", "system volume information",
+    "perflogs", "boot", "config.msi", "documents and settings", "msocache", "intel", "amd", "nvidia", "drivers",
+    "onedrivetemp", "inetpub", "windows.old",
+];
+
+/// May a trusted device reach `p` (resolved)? Inside a starting point, no hidden part on
+/// the way, no system folder, and on Windows only this user's folder and Public in Users.
+fn reachable(p: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    let Some(root) = roots.iter().find(|r| p.starts_with(r)) else { return false };
+    let rest: Vec<String> = p
+        .strip_prefix(root)
+        .map(|r| r.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect())
+        .unwrap_or_default();
+    let mut at = root.clone();
+    for (i, part) in rest.iter().enumerate() {
+        at.push(part);
+        if hidden(part, std::fs::symlink_metadata(&at).ok().as_ref()) {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            let lower = part.to_lowercase();
+            if i == 0 && SYSTEM_FOLDERS.contains(&lower.as_str()) {
+                return false;
+            }
+            if i == 1 && rest[0].eq_ignore_ascii_case("users") {
+                let me = std::env::var("USERNAME").unwrap_or_default().to_lowercase();
+                if lower != me && lower != "public" {
+                    return false;
+                }
+            }
+            if lower == "appdata" {
+                return false;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if i == 0 && *root == home_dir() && part == "Library" {
+            return false;
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = i;
+    }
+    true
+}
+
+/// Resolve a path a viewer named and check that it may reach it.
+fn resolve(path: &str, scope: Scope) -> Result<std::path::PathBuf> {
+    let p = std::path::PathBuf::from(path);
+    let p = p.canonicalize().with_context(|| format!("cannot open {path}"))?;
+    let ok = match scope {
+        Scope::All => true,
+        Scope::Shared => p.starts_with(shared_root()?),
+        Scope::NoSystem => reachable(&p, &starting_points()),
+    };
+    anyhow::ensure!(ok, "{path} is not shared with you");
+    Ok(p)
+}
+
+/// The folder a file a viewer sends is saved in: `wanted` if it may write there, otherwise
+/// the shared folder.
+pub(crate) fn upload_dir(wanted: Option<&str>, scope: Scope) -> std::path::PathBuf {
+    if scope != Scope::Shared {
+        if let Some(p) = wanted.filter(|w| !w.trim().is_empty()).and_then(|w| resolve(w, scope).ok()).filter(|p| p.is_dir()) {
+            return p;
+        }
+    }
+    receive_dir()
+}
+
+/// The shared folder as viewers see it.
+pub(crate) fn shared_shown() -> String {
+    shown(&receive_dir())
+}
+
+/// List a folder for a viewer. An empty path is where it starts: the shared folder, the
+/// list of starting points (trusted) or the home folder (everything). Returns (path,
+/// parent, entries): folders first, at most 2000 entries. A parent of "" goes back to the
+/// starting points.
+pub(crate) fn list_dir(path: &str, scope: Scope) -> Result<(String, Option<String>, Vec<Entry>)> {
+    let roots = if scope == Scope::NoSystem { starting_points() } else { Vec::new() };
+    if path.trim().is_empty() && scope == Scope::NoSystem {
+        let entries = roots.iter().map(|r| Entry { n: shown(r), d: true, s: 0 }).collect();
+        return Ok((String::new(), None, entries));
+    }
+    #[cfg(windows)]
+    if path.trim().is_empty() && scope == Scope::All {
         let drives = (b'A'..=b'Z')
             .map(|l| format!("{}:\\", l as char))
             .filter(|d| std::path::Path::new(d).is_dir())
             .map(|d| Entry { n: d, d: true, s: 0 })
             .collect();
-        return Ok(("".into(), None, drives));
+        return Ok((String::new(), None, drives));
     }
-    let dir = if path.trim().is_empty() { home_dir() } else { std::path::PathBuf::from(path) };
-    let dir = dir.canonicalize().with_context(|| format!("cannot open {}", dir.display()))?;
+    let dir = match (path.trim().is_empty(), scope) {
+        (true, Scope::Shared) => shared_root()?,
+        (true, _) => home_dir().canonicalize()?,
+        (false, _) => resolve(path, scope)?,
+    };
+    anyhow::ensure!(dir.is_dir(), "{} is not a folder", shown(&dir));
     let mut entries = Vec::new();
-    for e in std::fs::read_dir(&dir).with_context(|| format!("cannot open {}", dir.display()))?.flatten() {
+    for e in std::fs::read_dir(&dir).with_context(|| format!("cannot open {}", shown(&dir)))?.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        let Ok(meta) = e.metadata() else { continue };
+        if scope != Scope::All && hidden(&name, Some(&meta)) {
             continue;
         }
-        let Ok(meta) = e.metadata() else { continue };
+        if scope == Scope::NoSystem && !reachable(&dir.join(&name), &roots) {
+            continue;
+        }
         entries.push(Entry { n: name, d: meta.is_dir(), s: if meta.is_file() { meta.len() } else { 0 } });
         if entries.len() >= 2000 {
             break;
         }
     }
     entries.sort_by(|a, b| b.d.cmp(&a.d).then_with(|| a.n.to_lowercase().cmp(&b.n.to_lowercase())));
-    let parent = match dir.parent() {
-        Some(p) => Some(p.display().to_string()),
-        None if cfg!(windows) => Some(String::new()),
-        None => None,
+    let parent = match scope {
+        Scope::Shared if dir == shared_root()? => None,
+        Scope::NoSystem if roots.contains(&dir) => Some(String::new()),
+        _ => match dir.parent() {
+            Some(p) => Some(shown(p)),
+            None if cfg!(windows) => Some(String::new()),
+            None => None,
+        },
     };
-    let shown = dir.display().to_string();
-    #[cfg(windows)]
-    let shown = shown.trim_start_matches(r"\\?\").to_string();
-    Ok((shown, parent.map(|p| p.trim_start_matches(r"\\?\").to_string()), entries))
+    Ok((shown(&dir), parent, entries))
 }
 
-/// Open a regular file for download: (file, name, size).
-pub(crate) fn open_for_download(path: &str) -> Result<(std::fs::File, String, u64)> {
-    let p = std::path::Path::new(path);
-    let meta = std::fs::metadata(p).with_context(|| format!("cannot read {path}"))?;
+/// Open a regular file for a viewer to download: (file, name, size, path).
+pub(crate) fn open_for_download(path: &str, scope: Scope) -> Result<(std::fs::File, String, u64, String)> {
+    let p = resolve(path, scope)?;
+    let meta = std::fs::metadata(&p).with_context(|| format!("cannot read {path}"))?;
     anyhow::ensure!(meta.is_file(), "only files can be downloaded");
     let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-    Ok((std::fs::File::open(p).with_context(|| format!("cannot open {path}"))?, name, meta.len()))
+    let file = std::fs::File::open(&p).with_context(|| format!("cannot open {path}"))?;
+    Ok((file, name, meta.len(), shown(&p)))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trusted_device_stays_out_of_hidden_and_outside_folders() {
+        let base = std::env::temp_dir().join(format!("rf-files-{}", std::process::id()));
+        let docs = base.join("docs");
+        std::fs::create_dir_all(docs.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join(".ssh")).unwrap();
+        std::fs::write(base.join(".ssh/id_ed25519"), "key").unwrap();
+        std::fs::write(docs.join("a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink("/etc", docs.join("etc-link")).unwrap();
+        let roots = vec![base.canonicalize().unwrap()];
+        let r = |p: &std::path::Path| reachable(&p.canonicalize().unwrap(), &roots);
+        assert!(r(&docs.join("sub")));
+        assert!(r(&docs.join("a.txt")));
+        assert!(!r(&base.join(".ssh/id_ed25519"))); // hidden folder on the way
+        assert!(!r(&docs.join("etc-link"))); // a link that leads outside
+        assert!(!r(std::path::Path::new("/etc/passwd")));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_guest_only_reaches_the_shared_folder() {
+        let shared = std::env::temp_dir().join(format!("rf-shared-{}", std::process::id()));
+        std::env::set_var("REMOTE_FRIEND_DIR", &shared);
+        std::fs::create_dir_all(shared.join("inside")).unwrap();
+        assert!(resolve(&shared.join("inside").display().to_string(), Scope::Shared).is_ok());
+        assert!(resolve(&shared.join("..").display().to_string(), Scope::Shared).is_err());
+        assert!(resolve("/etc/passwd", Scope::Shared).is_err());
+        assert!(resolve(&home_dir().display().to_string(), Scope::Shared).is_err());
+        assert!(resolve("/etc", Scope::All).is_ok());
+        assert_eq!(upload_dir(Some("/etc"), Scope::Shared), receive_dir());
+        assert_eq!(upload_dir(Some("/etc"), Scope::NoSystem), receive_dir());
+        let (path, parent, _) = list_dir("", Scope::Shared).unwrap();
+        assert_eq!(path, shared.canonicalize().unwrap().display().to_string());
+        assert!(parent.is_none());
+        std::fs::remove_dir_all(&shared).unwrap();
+    }
 }

@@ -47,7 +47,7 @@ pub fn subscribe() -> broadcast::Receiver<Arc<AudioPacket>> {
             let res = if test_tone() { capture_test_tone() } else { capture() };
             match &res {
                 Ok(()) => tracing::info!("sound capture stopped (nobody listening)"),
-                Err(e) => tracing::warn!("sound capture unavailable: {e:#}"),
+                Err(e) => report_failure(&format!("{e:#}")),
             }
             RUNNING.store(false, Ordering::Release);
             // A listener that arrived while the capture was stopping would otherwise get nothing.
@@ -60,6 +60,17 @@ pub fn subscribe() -> broadcast::Receiver<Arc<AudioPacket>> {
         }
     }
     rx
+}
+
+/// Tell the computer's user (once per reason) why viewers hear nothing.
+fn report_failure(reason: &str) {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    tracing::warn!("sound capture unavailable: {reason}");
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if *last != reason {
+        *last = reason.to_string();
+        crate::status::notice(format!("Viewers can't hear this computer: {reason}"));
+    }
 }
 
 /// Browser message body: [codec: 0 = Opus, 1 = PCM 24 kHz s16le stereo][seq: u32 BE][data].
@@ -338,6 +349,8 @@ fn capture_cpal() -> Result<()> {
     use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 
     let device = cpal::default_host().default_output_device().context("no sound output device")?;
+    #[cfg(target_os = "macos")]
+    macos_check(&device)?;
     let config = device.default_output_config().context("cannot read the sound output format")?;
     let (channels, rate) = (config.channels() as usize, config.sample_rate());
     let (tx, rx) = sync_channel::<Vec<f32>>(64);
@@ -382,6 +395,29 @@ fn capture_cpal() -> Result<()> {
         if idle.expired() {
             break;
         }
+    }
+    Ok(())
+}
+
+/// macOS records what an output plays only through a process tap (14.6+). On a device that
+/// also has a microphone (a headset) cpal would record the microphone instead: never send that.
+#[cfg(target_os = "macos")]
+fn macos_check(device: &cpal::Device) -> Result<()> {
+    use cpal::traits::DeviceTrait;
+    let version = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if major > 0 && (major, minor) < (14, 6) {
+        anyhow::bail!("sound needs macOS 14.6 or newer (this Mac has {version})");
+    }
+    if device.supports_input() {
+        anyhow::bail!(
+            "the sound output also has a microphone (a headset?), which would be recorded instead; choose other speakers in System Settings, Sound"
+        );
     }
     Ok(())
 }

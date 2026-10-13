@@ -395,8 +395,8 @@ where
         auth::session_ended(login.used_password(), false);
         anyhow::bail!("denied by operator");
     }
-    let trusted = matches!(login, crate::core::Login::Device { .. });
-    let handle = crate::sessions::register(&label, &peer, crate::sessions::Via::App, trusted, login.used_password());
+    let access = crate::core::access(&login, decision);
+    let handle = crate::sessions::register(&label, &peer, crate::sessions::Via::App, access, login.used_password());
     handle.set_can_switch(auth.can_switch);
     write_packet_secure(&mut wr, &mut tx, &Packet::Accept).await?;
     let welcome = web::welcome_json(false, issued, &handle);
@@ -520,7 +520,8 @@ where
                 Event::Kill => {
                     // Ended on purpose: the password changes right away.
                     core.handle.bye = true;
-                    let _ = ctrl_tx.send(r#"{"t":"ended","msg":"the remote computer's user ended the session"}"#.into()).await;
+                    let ended = serde_json::json!({"t": "ended", "msg": crate::sessions::end_reason()});
+                    let _ = ctrl_tx.send(ended.to_string()).await;
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     break Ok(());
                 }

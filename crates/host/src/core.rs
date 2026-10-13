@@ -9,6 +9,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::approval::{Decision, Request, Trust};
 use crate::audio::AudioPacket;
+use crate::files::Scope;
 use crate::sessions::{SessionHandle, Transfer};
 use crate::web::Flow;
 
@@ -132,6 +133,20 @@ pub(crate) fn pre_decision(login: &Login, auth: &AuthMsg, label: &str, peer: &st
     })
 }
 
+/// How far the session is trusted (files, RemoteFriends itself), from how it logged in and
+/// the operator's answer.
+pub(crate) fn access(login: &Login, decision: Decision) -> crate::sessions::Access {
+    use crate::sessions::Access;
+    match login {
+        // Switched sides: a one-time grant.
+        Login::Device { temporary: true, .. } => Access::Guest,
+        Login::Device { trust: Trust::Mine, .. } => Access::Mine,
+        Login::Device { .. } => Access::Trusted,
+        Login::Password if decision == Decision::Trust => Access::Trusted,
+        Login::Password => Access::Guest,
+    }
+}
+
 /// A device token handed to the viewer: it logs in with it from now on.
 pub(crate) struct Issued {
     pub token: String,
@@ -240,6 +255,17 @@ struct Incoming {
     last_report: Instant,
 }
 
+/// A trusted device's file access in this session: this computer's user is asked once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilesAnswer {
+    NotAsked,
+    Asking,
+    /// Folders and disks without system files.
+    Allowed,
+    /// The user said no (or didn't answer): only the shared folder.
+    SharedOnly,
+}
+
 pub(crate) struct Core {
     pub handle: SessionHandle,
     pub flow: Flow,
@@ -255,6 +281,12 @@ pub(crate) struct Core {
     downloads: std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
     /// A "show another screen" question is open (one at a time).
     screen_asking: Arc<std::sync::atomic::AtomicBool>,
+    /// Trusted devices: the answer about file access (set by the question's task).
+    files_ok: Arc<std::sync::Mutex<FilesAnswer>>,
+    /// Folders the viewer chose for the files it sends next (transfer id -> folder).
+    upload_dirs: std::collections::HashMap<u64, String>,
+    /// The viewer was told that the computer's user is using the mouse.
+    host_busy: bool,
 }
 
 impl Core {
@@ -275,6 +307,9 @@ impl Core {
             file_lane: None,
             downloads: Default::default(),
             screen_asking: Default::default(),
+            files_ok: Arc::new(std::sync::Mutex::new(FilesAnswer::NotAsked)),
+            upload_dirs: Default::default(),
+            host_busy: false,
         }
     }
 
@@ -322,6 +357,16 @@ impl Core {
         if !self.handle.control_allowed() {
             return;
         }
+        // The person at the computer is using the mouse: they come first. Releases still go
+        // through so nothing stays pressed.
+        let busy = crate::input::local_user_active();
+        if busy != self.host_busy {
+            self.host_busy = busy;
+            self.send(serde_json::json!({"t": "host_busy", "on": busy}));
+        }
+        if busy && !matches!(ev, InputEvent::MouseUp { .. } | InputEvent::Key { down: false, .. }) {
+            return;
+        }
         let ev = match ev {
             InputEvent::MouseMove { x, y } => match self.flow.map_point(x, y) {
                 Some((x, y)) => InputEvent::MouseMove { x, y },
@@ -329,6 +374,7 @@ impl Core {
             },
             other => other,
         };
+        crate::privacy::remote_input(&ev, self.handle.access == crate::sessions::Access::Mine);
         if let Err(e) = crate::input::apply(ev) {
             tracing::debug!("input error: {e:#}");
         }
@@ -341,6 +387,68 @@ impl Core {
         self.sound.apply(self.handle.perms().sound);
     }
 
+    /// What this viewer may reach among this computer's files now (None: the computer's
+    /// user hasn't answered yet).
+    fn scope(&self) -> Option<Scope> {
+        use crate::sessions::Access;
+        match self.handle.access {
+            Access::Guest => Some(Scope::Shared),
+            Access::Mine => Some(Scope::All),
+            Access::Trusted => match *self.files_ok.lock().unwrap_or_else(|e| e.into_inner()) {
+                FilesAnswer::Allowed => Some(Scope::NoSystem),
+                FilesAnswer::SharedOnly => Some(Scope::Shared),
+                FilesAnswer::NotAsked | FilesAnswer::Asking => None,
+            },
+        }
+    }
+
+    /// {t:"files_access", level, shared, max}: what the viewer's file window offers.
+    /// level: "shared", "disk", "all", "wait" (the computer's user is asked) or "off".
+    fn files_access_json(&self) -> serde_json::Value {
+        let level = match (self.handle.perms().files, self.scope()) {
+            (false, _) => "off",
+            (true, None) => "wait",
+            (true, Some(s)) => s.name(),
+        };
+        let max = self.scope().map_or(0, crate::files::max_upload);
+        serde_json::json!({"t": "files_access", "level": level, "shared": crate::files::shared_shown(), "max": max})
+    }
+
+    /// The scope for a file action, or None after telling the viewer why it has to wait.
+    fn files_scope(&mut self) -> Option<Scope> {
+        if !self.handle.perms().files {
+            return None;
+        }
+        let scope = self.scope();
+        if scope.is_none() {
+            self.ask_files();
+        }
+        scope
+    }
+
+    /// Ask this computer's user once whether a trusted device may use its folders.
+    fn ask_files(&mut self) {
+        {
+            let mut answer = self.files_ok.lock().unwrap_or_else(|e| e.into_inner());
+            if *answer != FilesAnswer::NotAsked {
+                return;
+            }
+            *answer = FilesAnswer::Asking;
+        }
+        self.send(self.files_access_json());
+        let (label, ctrl, answer) = (self.label.clone(), self.ctrl.clone(), self.files_ok.clone());
+        let shared = crate::files::shared_shown();
+        tokio::spawn(async move {
+            let l = label.clone();
+            let yes = tokio::task::spawn_blocking(move || crate::approval::ask_files(&l)).await.unwrap_or(false);
+            *answer.lock().unwrap_or_else(|e| e.into_inner()) = if yes { FilesAnswer::Allowed } else { FilesAnswer::SharedOnly };
+            let level = if yes { Scope::NoSystem } else { Scope::Shared };
+            let max = crate::files::max_upload(level);
+            let msg = serde_json::json!({"t": "files_access", "level": level.name(), "shared": shared, "max": max});
+            let _ = ctrl.send(msg.to_string()).await;
+        });
+    }
+
     /// A piece of a file from the viewer.
     pub(crate) fn file(&mut self, chunk: FileChunk) {
         let id = chunk.transfer_id;
@@ -349,6 +457,14 @@ impl Core {
             self.send(serde_json::json!({"t": "file_err", "id": id, "msg": "file transfer is turned off on the remote computer"}));
             return;
         }
+        let Some(scope) = self.files_scope() else {
+            self.incoming.remove(&id);
+            if chunk.offset == 0 {
+                let msg = "the computer's user is asked to allow file access; send it again once they agree";
+                self.send(serde_json::json!({"t": "file_err", "id": id, "msg": msg}));
+            }
+            return;
+        };
         let name: String = chunk.name.chars().take(128).collect();
         let (got, total) = (chunk.offset + chunk.data.len() as u64, chunk.total);
         if chunk.offset == 0 && !self.incoming.contains_key(&id) {
@@ -356,13 +472,21 @@ impl Core {
             self.incoming.insert(id, Incoming { name: name.clone(), last_report: Instant::now() });
         }
         self.handle.set_transfer(Some(Transfer { name: name.clone(), got, total }));
-        match crate::files::save_chunk(chunk) {
+        // The folder matters only for the first chunk (it is checked once, then kept).
+        let dir = if chunk.offset == 0 {
+            crate::files::upload_dir(self.upload_dirs.get(&id).map(String::as_str), scope)
+        } else {
+            std::path::PathBuf::new()
+        };
+        match crate::files::save_chunk(chunk, dir, crate::files::max_upload(scope)) {
             Ok(Some(path)) => {
                 self.incoming.remove(&id);
+                self.upload_dirs.remove(&id);
                 self.handle.set_transfer(None);
+                self.handle.log_file(true, &name, &path);
                 self.send(serde_json::json!({"t": "file_done", "id": id, "name": name, "path": path}));
                 crate::status::notice(format!("Received {name} from {}: {path}", self.label));
-                crate::status::desktop_notify("RemoteFriends: file received", &format!("{name} saved to {path}"));
+                crate::status::desktop_notify("RemoteFriends: file received", &format!("{name} from {} saved to {path}", self.label));
             }
             Ok(None) => {
                 if let Some(inc) = self.incoming.get_mut(&id) {
@@ -374,6 +498,7 @@ impl Core {
             }
             Err(e) => {
                 let name = self.incoming.remove(&id).map(|i| i.name).unwrap_or(name);
+                self.upload_dirs.remove(&id);
                 self.handle.set_transfer(None);
                 crate::status::notice(format!("Receiving {name} failed: {e:#}"));
                 self.send(serde_json::json!({"t": "file_err", "id": id, "msg": format!("{e:#}")}));
@@ -453,6 +578,20 @@ impl Core {
                     crate::status::notice(format!("{} canceled sending {name}", self.label));
                 }
             }
+            Some("files_hello") => {
+                if self.handle.perms().files && self.scope().is_none() {
+                    self.ask_files();
+                } else {
+                    self.send(self.files_access_json());
+                }
+            }
+            Some("put_dir") => {
+                let id = v.get("id").and_then(|n| n.as_u64()).unwrap_or(0);
+                let dir: String = v.get("dir").and_then(|x| x.as_str()).unwrap_or("").chars().take(4096).collect();
+                if id != 0 && self.upload_dirs.len() < 16 {
+                    self.upload_dirs.insert(id, dir);
+                }
+            }
             Some("ls") => self.list(v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string()),
             Some("get") => {
                 let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -495,12 +634,18 @@ impl Core {
             self.send(serde_json::json!({"t": "ls", "error": "file access is turned off on the remote computer"}));
             return;
         }
+        let Some(scope) = self.files_scope() else {
+            self.send(serde_json::json!({"t": "ls", "wait": true, "error": "Waiting for the computer's user to allow file access…"}));
+            return;
+        };
         let ctrl = self.ctrl.clone();
         tokio::spawn(async move {
-            let msg = match tokio::task::spawn_blocking(move || crate::files::list_dir(&path)).await {
-                Ok(Ok((path, parent, entries))) => serde_json::json!({"t": "ls", "path": path, "parent": parent, "entries": entries}),
+            let msg = match tokio::task::spawn_blocking(move || crate::files::list_dir(&path, scope)).await {
+                Ok(Ok((path, parent, entries))) => {
+                    serde_json::json!({"t": "ls", "path": path, "parent": parent, "entries": entries, "level": scope.name()})
+                }
                 Ok(Err(e)) => serde_json::json!({"t": "ls", "error": format!("{e:#}")}),
-                Err(_) => return,
+                Err(e) => serde_json::json!({"t": "ls", "error": format!("cannot list the folder: {e}")}),
             };
             let _ = ctrl.send(msg.to_string()).await;
         });
@@ -515,22 +660,29 @@ impl Core {
         if !self.handle.perms().files {
             return fail(self, "file access is turned off on the remote computer");
         }
+        let Some(scope) = self.files_scope() else {
+            return fail(self, "the computer's user is asked to allow file access; try again once they agree");
+        };
         let Some(lane) = self.file_lane.clone() else { return fail(self, "downloads are not supported here") };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.downloads.insert(id, cancel.clone());
         let (ctrl, label) = (self.ctrl.clone(), self.label.clone());
+        let log = self.handle.file_logger();
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let err = |msg: String| serde_json::json!({"t": "get_err", "id": id, "msg": msg}).to_string();
-            let (file, name, total) = match tokio::task::spawn_blocking(move || crate::files::open_for_download(&path)).await {
-                Ok(Ok(x)) => x,
-                Ok(Err(e)) => {
-                    let _ = ctrl.send(err(format!("{e:#}"))).await;
-                    return;
-                }
-                Err(_) => return,
-            };
-            crate::status::notice(format!("{label} is downloading {name} ({}) from this computer", human_size(total)));
+            let (file, name, total, shown) =
+                match tokio::task::spawn_blocking(move || crate::files::open_for_download(&path, scope)).await {
+                    Ok(Ok(x)) => x,
+                    Ok(Err(e)) => {
+                        let _ = ctrl.send(err(format!("{e:#}"))).await;
+                        return;
+                    }
+                    Err(_) => return,
+                };
+            crate::status::notice(format!("{label} is downloading {shown} ({}) from this computer", human_size(total)));
+            crate::status::desktop_notify("RemoteFriends: file taken", &format!("{label} is downloading {shown}"));
+            log(false, &name, &shown);
             let mut file = tokio::fs::File::from_std(file);
             let mut offset = 0u64;
             loop {

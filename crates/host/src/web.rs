@@ -501,7 +501,7 @@ async fn handle_ws(socket: WebSocket, _permit: tokio::sync::OwnedSemaphorePermit
     let (out, out_rx) = outbox();
     let writer = spawn_ws_writer(io.sink, out_rx, None);
     let reader = spawn_ws_reader(io.stream, inbox_tx, None);
-    let handle = crate::sessions::register(&who, &who, crate::sessions::Via::Browser, false, true);
+    let handle = crate::sessions::register(&who, &who, crate::sessions::Via::Browser, crate::sessions::Access::Guest, true);
     run_session(inbox, out, want_jpeg, handle, issued, None).await;
     reader.abort();
     let _ = writer.await;
@@ -591,8 +591,8 @@ async fn secure_session(
         tokio::time::sleep(Duration::from_millis(300)).await;
         return;
     }
-    let trusted = matches!(login, Login::Device { .. });
-    let handle = crate::sessions::register(&label, peer, crate::sessions::Via::Browser, trusted, login.used_password());
+    let access = crate::core::access(&login, decision);
+    let handle = crate::sessions::register(&label, peer, crate::sessions::Via::Browser, access, login.used_password());
     run_session(inbox, out, jpeg, handle, issued, direct).await;
 }
 
@@ -789,7 +789,7 @@ async fn run_session(
                 crate::core::Event::Kill => {
                     // Ended on purpose: the password changes right away.
                     core.handle.bye = true;
-                    let ended = serde_json::json!({"t": "reject", "code": "ended", "msg": "the remote computer's user ended the session"});
+                    let ended = serde_json::json!({"t": "reject", "code": "ended", "msg": crate::sessions::end_reason()});
                     let _ = out.ctrl.send(ended.to_string()).await;
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     break;

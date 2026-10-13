@@ -1,16 +1,26 @@
 //! What viewers see: "safe" (default) or "full".
 //!
-//! Safe: the RemoteFriends window is kept out of the picture (the app minimizes it and, on
-//! Windows/macOS, excludes it from capture) and windows of private apps — password managers
-//! and anything the user adds — are blacked out. Only the visible part of such a window is
-//! covered, so windows in front of it stay visible. This needs window positions, which
-//! Windows, macOS and X11 provide; on Wayland the desktop does not tell apps where windows are.
+//! Safe: RemoteFriends itself and the windows of private apps — password managers and
+//! anything the user adds — are blacked out. In both views a viewer's mouse and keyboard
+//! can't use RemoteFriends (the app drops their clicks and keys, see [`remote_input_recent`])
+//! unless it is one of the owner's own devices. Only the
+//! visible part of a private window is covered, so windows in front of it stay visible.
+//! Window positions are read for every captured frame (winlist.rs) and a window is covered
+//! both where it is now and where it was a frame ago, so a moving window never shows through.
+//! Windows, macOS and X11 tell apps where windows are; Wayland doesn't, so there only
+//! RemoteFriends can keep itself out of view (the app shows a neutral screen instead).
 //!
-//! Full: everything is shown, as if sitting at the computer.
+//! Full: everything is shown, as if sitting at the computer (RemoteFriends included).
 
+use crate::winlist::Win;
+use remote_friend_common::InputEvent;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Title of the small bar the app shows while someone is connected: it is not blacked out
+/// (it holds nothing secret and tells viewers they are watched).
+pub const SESSION_BAR_TITLE: &str = "RemoteFriends session";
 
 /// Private apps hidden in safe mode unless the user changes the list.
 pub const DEFAULT_PRIVATE_APPS: &[&str] = &[
@@ -39,33 +49,114 @@ pub fn set_full_view(full: bool) {
     });
 }
 
-/// Name parts of apps hidden in safe mode (case is ignored).
+/// Name parts of apps hidden in safe mode (lowercase).
 pub fn private_apps() -> Vec<String> {
-    let list = remote_friend_common::identity::load_host_settings().private_apps;
-    if list.is_empty() {
+    let s = remote_friend_common::identity::load_host_settings();
+    if s.private_apps.is_empty() && !s.private_apps_set {
         DEFAULT_PRIVATE_APPS.iter().map(|s| s.to_string()).collect()
     } else {
-        list
+        s.private_apps
     }
 }
 
 pub fn set_private_apps(list: Vec<String>) {
     let mut s = remote_friend_common::identity::load_host_settings();
-    s.private_apps = list.into_iter().map(|a| a.trim().to_lowercase()).filter(|a| !a.is_empty()).collect();
+    let mut clean: Vec<String> = Vec::new();
+    for a in list.into_iter().map(|a| a.trim().to_lowercase()).filter(|a| !a.is_empty()) {
+        if !clean.contains(&a) {
+            clean.push(a);
+        }
+    }
+    s.private_apps = clean;
+    s.private_apps_set = true;
     remote_friend_common::identity::save_host_settings(&s);
-    *cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *patterns_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// A top-level window (screen coordinates); topmost first in the list.
-struct Win {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    private: bool,
-    /// Left visible at the top of a private window (a browser's tab strip and address bar).
-    keep_top: i32,
+fn patterns_cache() -> &'static Mutex<Option<Vec<String>>> {
+    static P: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    &P
 }
+
+/// The private-app list without reading the settings file for every frame.
+fn patterns() -> Vec<String> {
+    patterns_cache().lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(private_apps).clone()
+}
+
+fn listed(name: &str, patterns: &[String]) -> bool {
+    let name = name.to_lowercase();
+    patterns.iter().any(|p| name.contains(p.as_str()))
+}
+
+/// An app with a window on screen now (Settings → Privacy).
+#[derive(Clone, Debug)]
+pub struct OpenApp {
+    pub name: String,
+    /// Blacked out in the safe view.
+    pub hidden: bool,
+}
+
+/// Apps with a window on screen, by name (empty where the system doesn't tell, i.e. Wayland).
+pub fn open_apps() -> Vec<OpenApp> {
+    let patterns = patterns();
+    let mut apps: Vec<OpenApp> = Vec::new();
+    for w in crate::winlist::list() {
+        let name = w.app.trim();
+        if w.own || !w.opaque || name.is_empty() || name.to_lowercase().contains("remotefriend") {
+            continue;
+        }
+        if !apps.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
+            apps.push(OpenApp { name: name.to_string(), hidden: listed(name, &patterns) });
+        }
+    }
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    apps
+}
+
+/// Hide an app in the safe view (adds its name to the list) or show it again (removes every
+/// list entry that matches its name).
+pub fn set_app_hidden(name: &str, hidden: bool) {
+    let lower = name.trim().to_lowercase();
+    let mut list = private_apps();
+    if hidden {
+        if !listed(&lower, &list) {
+            list.push(lower);
+        }
+    } else {
+        list.retain(|p| !lower.contains(p.as_str()));
+    }
+    set_private_apps(list);
+}
+
+// ---- remote input never operates RemoteFriends itself ----
+
+/// Clicks and keys arriving this soon after a viewer's are taken to be the viewer's.
+const REMOTE_ECHO: Duration = Duration::from_millis(700);
+
+static REMOTE_POINTER: Mutex<Option<Instant>> = Mutex::new(None);
+static REMOTE_KEYS: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// A viewer's input is about to reach the desktop (`mine`: one of the owner's own devices,
+/// which may also use RemoteFriends).
+pub(crate) fn remote_input(ev: &InputEvent, mine: bool) {
+    let slot = match ev {
+        _ if mine => return,
+        InputEvent::MouseDown { .. } | InputEvent::MouseUp { .. } | InputEvent::Scroll { .. } => &REMOTE_POINTER,
+        InputEvent::Key { .. } | InputEvent::Text(_) => &REMOTE_KEYS,
+        InputEvent::MouseMove { .. } => return,
+    };
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+/// Did a viewer click (`.0`) or type (`.1`) just now? The app then ignores clicks or keys it
+/// receives, so viewers can't use RemoteFriends — in either view, and even blindly where its
+/// window is hidden from them. Only the owner's own devices may.
+pub fn remote_input_recent() -> (bool, bool) {
+    let recent = |slot: &Mutex<Option<Instant>>| slot.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed() < REMOTE_ECHO);
+    (recent(&REMOTE_POINTER), recent(&REMOTE_KEYS))
+}
+
+// ---- the mask ----
 
 /// Browsers whose window is private only because of the open tab's title keep their tab strip
 /// and address bar visible, so a viewer can switch to another tab. Height at 100 % scale.
@@ -77,74 +168,76 @@ fn is_browser(app: &str) -> bool {
     BROWSERS.iter().any(|b| app.contains(b))
 }
 
-fn cache() -> &'static Mutex<Option<(Instant, Vec<Win>)>> {
-    static C: Mutex<Option<(Instant, Vec<Win>)>> = Mutex::new(None);
-    &C
+/// A window for the mask, in screen coordinates (window units).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shape {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    private: bool,
+    opaque: bool,
+    /// Left visible at the top of a private window (a browser's tab strip and address bar).
+    keep_top: i32,
 }
 
-/// Visible windows, refreshed at most every 400 ms (listing windows is not free).
-fn with_windows<R>(f: impl FnOnce(&[Win]) -> R) -> R {
-    let mut g = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if g.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_millis(400)) {
-        let own = std::process::id();
-        let patterns = private_apps();
-        let list = xcap::Window::all()
-            .map(|all| {
-                all.iter()
-                    .filter(|w| !w.is_minimized().unwrap_or(false))
-                    .filter_map(|w| {
-                        let (x, y) = (w.x().ok()?, w.y().ok()?);
-                        let (ww, hh) = (w.width().ok()? as i32, w.height().ok()? as i32);
-                        if ww <= 0 || hh <= 0 {
-                            return None;
-                        }
-                        let app = w.app_name().unwrap_or_default().to_lowercase();
-                        let title = w.title().unwrap_or_default().to_lowercase();
-                        let whole_window = w.pid().is_ok_and(|p| p == own)
-                            || app.contains("remotefriend")
-                            || title.contains("remotefriend")
-                            || patterns.iter().any(|p| app.contains(p.as_str()));
-                        let by_title = patterns.iter().any(|p| title.contains(p.as_str()));
-                        // Only the page of a browser tab is private: its bars stay visible.
-                        let keep_top = if !whole_window && by_title && is_browser(&app) {
-                            #[cfg(windows)]
-                            let dpi = w.current_monitor().and_then(|m| m.scale_factor()).unwrap_or(1.0);
-                            #[cfg(not(windows))]
-                            let dpi = 1.0;
-                            ((BROWSER_BARS * dpi).round() as i32).min(hh / 3)
-                        } else {
-                            0
-                        };
-                        Some(Win { x, y, w: ww, h: hh, private: whole_window || by_title, keep_top })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        *g = Some((Instant::now(), list));
-    }
-    f(g.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[]))
+/// Which windows are private. `bars` is the size of the browser bars per BROWSER_BARS unit.
+fn shapes(wins: &[Win], patterns: &[String], bars: f32) -> Vec<Shape> {
+    wins.iter()
+        .map(|w| {
+            let app = w.app.to_lowercase();
+            let title = w.title.to_lowercase();
+            let bar = w.title == SESSION_BAR_TITLE;
+            let whole_window = !bar && (w.own || app.contains("remotefriend") || title == "remotefriends" || listed(&app, patterns));
+            let by_title = !bar && listed(&title, patterns);
+            // Only the page of a browser tab is private: its bars stay visible.
+            let keep_top = if !whole_window && by_title && is_browser(&app) {
+                ((BROWSER_BARS * bars).round() as i32).min(w.h / 3)
+            } else {
+                0
+            };
+            Shape { x: w.x, y: w.y, w: w.w, h: w.h, private: whole_window || by_title, opaque: w.opaque, keep_top }
+        })
+        .collect()
 }
+
+/// The windows of the previous frame, to cover a window that moved where it was before too.
+static LAST: Mutex<Option<(Instant, Vec<Shape>)>> = Mutex::new(None);
 
 /// Safe view: black out the visible parts of private windows in a captured monitor image
-/// (RGBA, `width`×`height`, monitor origin at `mon_x`/`mon_y`, `scale` pixels per window unit).
-pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: i32, scale: f32) {
+/// (RGBA, `width`×`height`, monitor origin at `mon_x`/`mon_y`, `scale` pixels per window
+/// unit, `bars` = display scale in window units for the browser bars).
+pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: i32, scale: f32, bars: f32) {
     if full_view() {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
         return;
     }
-    let rects: Vec<Rect> = with_windows(|wins| {
-        let to_px = |v: i32, origin: i32| ((v - origin) as f32 * scale).round() as i32;
-        wins.iter()
-            .map(|w| Rect {
-                x0: to_px(w.x, mon_x),
-                y0: to_px(w.y, mon_y),
-                x1: to_px(w.x + w.w, mon_x),
-                y1: to_px(w.y + w.h, mon_y),
-                private: w.private,
-                keep_top: (w.keep_top as f32 * scale).round() as i32,
+    let now = shapes(&crate::winlist::list(), &patterns(), bars);
+    let before = {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let before = last.take().filter(|(t, _)| t.elapsed() < Duration::from_secs(1)).map(|(_, s)| s);
+        *last = Some((Instant::now(), now.clone()));
+        before
+    };
+    let to_px = |v: i32, origin: i32| ((v - origin) as f32 * scale).round() as i32;
+    let rects = |list: &[Shape]| -> Vec<Rect> {
+        list.iter()
+            .map(|s| Rect {
+                x0: to_px(s.x, mon_x),
+                y0: to_px(s.y, mon_y),
+                x1: to_px(s.x + s.w, mon_x),
+                y1: to_px(s.y + s.h, mon_y),
+                private: s.private,
+                opaque: s.opaque,
+                keep_top: (s.keep_top as f32 * scale).round() as i32,
             })
             .collect()
-    });
-    paint(rgba, width, height, &rects);
+    };
+    // The picture was taken between the two lists: cover what is private in either.
+    if let Some(before) = before.filter(|b| *b != now) {
+        paint(rgba, width, height, &rects(&before));
+    }
+    paint(rgba, width, height, &rects(&now));
 }
 
 /// A window in image pixels.
@@ -155,6 +248,8 @@ struct Rect {
     x1: i32,
     y1: i32,
     private: bool,
+    /// Hides what is behind it (see-through overlays and the menu bar don't).
+    opaque: bool,
     /// Rows at the top that stay visible (a browser's bars).
     keep_top: i32,
 }
@@ -163,21 +258,20 @@ struct Rect {
 /// what is behind them, including a browser's visible bars.
 fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[Rect]) {
     for (i, r) in rects.iter().enumerate() {
-        let Rect { x0, y0, x1, y1, private, keep_top } = *r;
+        let Rect { x0, y0, x1, y1, private, keep_top, .. } = *r;
         if !private {
             continue;
         }
         for y in (y0 + keep_top).max(0)..y1.min(height as i32) {
             // This row of the window minus the windows in front of it.
             let mut spans = vec![(x0.max(0), x1.min(width as i32))];
-            for a in &rects[..i] {
-                let (ax0, ay0, ax1, ay1) = (a.x0, a.y0, a.x1, a.y1);
-                if y < ay0 || y >= ay1 {
+            for a in rects[..i].iter().filter(|a| a.opaque) {
+                if y < a.y0 || y >= a.y1 {
                     continue;
                 }
                 spans = spans
                     .into_iter()
-                    .flat_map(|(s0, s1)| [(s0, s1.min(ax0)), (s0.max(ax1), s1)])
+                    .flat_map(|(s0, s1)| [(s0, s1.min(a.x0)), (s0.max(a.x1), s1)])
                     .filter(|(s0, s1)| s1 > s0)
                     .collect();
             }
@@ -195,12 +289,15 @@ fn paint(rgba: &mut [u8], width: u32, height: u32, rects: &[Rect]) {
 mod tests {
     use super::*;
 
+    fn r(x0: i32, y0: i32, x1: i32, y1: i32, private: bool) -> Rect {
+        Rect { x0, y0, x1, y1, private, opaque: true, keep_top: 0 }
+    }
+
     #[test]
     fn only_the_visible_part_of_a_private_window_is_covered() {
         let (w, h) = (100u32, 50u32);
         let mut img = vec![255u8; (w * h * 4) as usize];
         // A normal window (topmost) overlaps the right half of a private window behind it.
-        let r = |x0, y0, x1, y1, private| Rect { x0, y0, x1, y1, private, keep_top: 0 };
         let rects = [r(50, 0, 100, 50, false), r(20, 10, 80, 40, true)];
         paint(&mut img, w, h, &rects);
         let px = |x: u32, y: u32| img[((y * w + x) * 4) as usize];
@@ -211,13 +308,58 @@ mod tests {
     }
 
     #[test]
+    fn see_through_windows_in_front_do_not_protect_what_is_behind() {
+        let (w, h) = (100u32, 50u32);
+        let mut img = vec![255u8; (w * h * 4) as usize];
+        // A full-screen overlay (menu bar layer, notification shade) above a private window.
+        let overlay = Rect { opaque: false, ..r(0, 0, 100, 50, false) };
+        paint(&mut img, w, h, &[overlay, r(20, 10, 80, 40, true)]);
+        assert_eq!(img[((20 * w + 30) * 4) as usize], 24);
+    }
+
+    #[test]
     fn a_private_browser_tab_keeps_its_bars_visible() {
         let (w, h) = (100u32, 100u32);
         let mut img = vec![255u8; (w * h * 4) as usize];
-        let rects = [Rect { x0: 0, y0: 0, x1: 100, y1: 100, private: true, keep_top: 20 }];
+        let rects = [Rect { keep_top: 20, ..r(0, 0, 100, 100, true) }];
         paint(&mut img, w, h, &rects);
         let px = |x: u32, y: u32| img[((y * w + x) * 4) as usize];
         assert_eq!(px(50, 10), 255); // tab strip: visible
         assert_eq!(px(50, 50), 24); // page: covered
+    }
+
+    fn win(app: &str, title: &str, own: bool) -> Win {
+        Win { x: 0, y: 0, w: 800, h: 600, app: app.into(), title: title.into(), own, opaque: true }
+    }
+
+    #[test]
+    fn private_windows_are_found_by_app_title_or_owner() {
+        let patterns: Vec<String> = DEFAULT_PRIVATE_APPS.iter().map(|s| s.to_string()).collect();
+        let list = [
+            win("KeePassXC", "Passwords.kdbx - KeePassXC", false),
+            win("firefox", "Bitwarden Web Vault — Mozilla Firefox", false),
+            win("gnome-terminal", "~", false),
+            win("remotefriend", "RemoteFriends", true),
+            win("firefox", "remotefriend - GitHub", false),
+        ];
+        let s = shapes(&list, &patterns, 1.0);
+        assert!(s[0].private && s[0].keep_top == 0);
+        assert!(s[1].private && s[1].keep_top == 88); // only the page of the tab
+        assert!(!s[2].private);
+        assert!(s[3].private);
+        assert!(!s[4].private); // a web page about RemoteFriends is not RemoteFriends
+    }
+
+    #[test]
+    fn viewer_clicks_and_keys_are_remembered_separately() {
+        remote_input(&InputEvent::Key { key: remote_friend_common::RemoteKey::Enter, down: true }, false);
+        let recent = |slot: &Mutex<Option<Instant>>| slot.lock().unwrap().is_some_and(|t| t.elapsed() < REMOTE_ECHO);
+        assert!(recent(&REMOTE_KEYS));
+        // The owner's own devices may use RemoteFriends.
+        *REMOTE_POINTER.lock().unwrap() = None;
+        remote_input(&InputEvent::MouseDown { button: remote_friend_common::MouseButton::Left }, true);
+        assert!(!recent(&REMOTE_POINTER));
+        remote_input(&InputEvent::MouseMove { x: 1, y: 1 }, false);
+        assert!(!recent(&REMOTE_POINTER));
     }
 }

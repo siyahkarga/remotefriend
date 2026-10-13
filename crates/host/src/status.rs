@@ -140,6 +140,8 @@ pub enum PromptKind {
     SwitchSides { label: String },
     /// A viewer asks to see a screen it may not switch to by itself.
     ShowScreen { label: String, screen: String },
+    /// A trusted device wants to use this computer's folders (not only the shared one).
+    FileAccess { label: String, shared: String },
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +158,7 @@ pub enum Answer {
     Trust(bool),
     Switch(bool),
     Screen(bool),
+    Files(bool),
 }
 
 struct Pending {

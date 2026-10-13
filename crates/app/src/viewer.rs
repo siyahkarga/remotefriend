@@ -135,9 +135,10 @@ impl App {
                         .on_hover_text("Send files to the remote computer, or browse and download its files")
                         .clicked()
                     {
-                        self.files_open = !self.files_open;
-                        if self.files_open && shared.lock().unwrap().remote_dir.is_none() {
-                            self.send_control(serde_json::json!({"t": "ls", "path": ""}));
+                        if self.files_open {
+                            self.files_open = false;
+                        } else {
+                            self.open_files();
                         }
                     }
                     let me = remote_friend_host::snapshot();
@@ -187,6 +188,8 @@ impl App {
         }
 
         self.files_window(ctx, &shared);
+        #[cfg(debug_assertions)]
+        self.debug_autosend(&shared);
 
         // Trust on first use: an unknown server is confirmed by its fingerprint once.
         if let Some((srv, fp)) = shared.lock().unwrap().tofu_pending.clone() {
@@ -209,10 +212,21 @@ impl App {
             });
         }
 
-        let failed = shared.lock().unwrap().failed;
+        let (failed, accepted) = {
+            let s = shared.lock().unwrap();
+            (s.failed, s.accepted)
+        };
 
         // Cloning a TextureHandle only clones a reference, not the pixels.
         let display_tex = self.screen_tex.clone();
+        // A session that ran and ended (the computer closed it, RemoteFriends was closed there,
+        // the network dropped): back to the home screen instead of a frozen picture.
+        if failed && (accepted || display_tex.is_some()) {
+            self.disconnect();
+            self.flash(format!("Session ended: {status}"));
+            ctx.request_repaint();
+            return;
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(tex) = display_tex.as_ref() {
                 let avail = ui.available_size();
@@ -370,19 +384,81 @@ impl App {
 }
 
 impl App {
-    /// File window: send files, browse the remote computer's folders, download files.
+    /// Development aid: RF_AUTOSEND=path opens the file window and sends that file once the
+    /// computer said what it allows (debug builds).
+    #[cfg(debug_assertions)]
+    fn debug_autosend(&mut self, shared: &std::sync::Arc<std::sync::Mutex<crate::net::Shared>>) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let Ok(path) = std::env::var("RF_AUTOSEND") else { return };
+        let (accepted, level, dir) = {
+            let s = shared.lock().unwrap();
+            (s.accepted, s.files_level.clone(), s.remote_dir.as_ref().map(|d| d.path.clone()))
+        };
+        match STEP.load(Ordering::Relaxed) {
+            0 if accepted => {
+                self.open_files();
+                STEP.store(1, Ordering::Relaxed);
+            }
+            1 if matches!(level.as_str(), "shared" | "disk" | "all") && dir.is_some() => {
+                let dest = std::env::var("RF_AUTOSEND_DIR").ok();
+                self.send_file(path.into(), dest);
+                STEP.store(2, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Ask the computer what we may reach among its files, and list where we start.
+    pub(crate) fn open_files(&mut self) {
+        self.files_open = true;
+        self.send_control(serde_json::json!({"t": "files_hello"}));
+        self.list_remote("");
+    }
+
+    fn list_remote(&self, path: &str) {
+        if let Some(shared) = &self.shared {
+            shared.lock().unwrap().ls_asked = Some(std::time::Instant::now());
+        }
+        self.send_control(serde_json::json!({"t": "ls", "path": path}));
+    }
+
+    /// File window: what this viewer may reach, sending files (and where they land), and the
+    /// computer's folders to download from.
     fn files_window(&mut self, ctx: &egui::Context, shared: &std::sync::Arc<std::sync::Mutex<crate::net::Shared>>) {
         if !self.files_open {
             return;
         }
-        let (dir, upload, download, downloaded) = {
-            let s = shared.lock().unwrap();
-            (s.remote_dir.clone(), s.upload.clone(), s.download.clone(), s.downloaded.clone())
+        let (dir, upload, download, downloaded, level, shared_dir, sent, asked, refresh) = {
+            let mut s = shared.lock().unwrap();
+            let refresh = std::mem::take(&mut s.files_refresh);
+            (
+                s.remote_dir.clone(),
+                s.upload.clone(),
+                s.download.clone(),
+                s.downloaded.clone(),
+                s.files_level.clone(),
+                s.files_shared.clone(),
+                s.sent.clone(),
+                s.ls_asked,
+                refresh,
+            )
         };
+        if refresh {
+            self.list_remote("");
+        }
+        // Where a file we send lands: the folder shown, if we may write there.
+        let browsing = dir.as_ref().map(|d| d.path.clone()).filter(|p| !p.is_empty());
+        let dest = match (level.as_str(), &browsing) {
+            ("disk" | "all", Some(p)) => Some(p.clone()),
+            _ => None,
+        };
+        let shared_name = if shared_dir.is_empty() { "Downloads/RemoteFriend".to_string() } else { shared_dir.clone() };
         let mut open = true;
         egui::SidePanel::right("files")
-            .default_width(360.0)
-            .min_width(280.0)
+            .default_width(380.0)
+            .min_width(300.0)
+            .max_width(480.0)
             .frame(egui::Frame::new().fill(kit::SURFACE).inner_margin(14))
             .show(ctx, |ui| {
                 kit::split(
@@ -392,41 +468,76 @@ impl App {
                         ui.label(RichText::new("Files").size(16.0).color(kit::TEXT).strong());
                     },
                     |ui| {
-                        if kit::icon_button(ui, "✖", "Close").clicked() {
+                        if kit::icon(ui, kit::Icon::Close, "Close").clicked() {
                             open = false;
                         }
                     },
                 );
-                if kit::wide(ui, kit::primary("⬆  Send a file…"), 34.0).clicked() && upload.is_none() {
+                let (color, what, detail) = match level.as_str() {
+                    "shared" => (kit::ACCENT, "Shared folder only", format!("That computer shares one folder with you: {shared_name}")),
+                    "disk" => (kit::OK, "Its folders and disks", "System folders and hidden files stay hidden.".to_string()),
+                    "all" => (kit::OK, "Everything (your device)", "All folders and disks of that computer.".to_string()),
+                    "wait" => (kit::WARN, "Waiting for approval", "The computer's user is asked to let you use its files.".to_string()),
+                    "off" => (kit::ERR, "File transfer is off", "The computer's user turned file transfer off.".to_string()),
+                    _ => (kit::MUTED, "Files", String::new()),
+                };
+                kit::dot(ui, color, what);
+                if !detail.is_empty() {
+                    kit::note(ui, detail);
+                }
+
+                kit::section_label(ui, "SEND TO THAT COMPUTER");
+                let can_send = upload.is_none() && !matches!(level.as_str(), "wait" | "off");
+                if kit::wide(ui, kit::primary("⬆  Send a file…"), 34.0).clicked() && can_send {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.send_file(path);
+                        self.send_file(path, dest.clone());
                     }
                 }
+                let goes_to = dest.clone().unwrap_or_else(|| shared_name.clone());
+                kit::note(ui, format!("Goes to: {goes_to}"));
                 if let Some((name, got, total)) = &upload {
                     ui.horizontal(|ui| {
                         let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
-                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Sending {name}")).desired_width(320.0));
+                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Sending {name}")).desired_width(ui.available_width() - 70.0));
                         if ui.button("Cancel").clicked() {
                             shared.lock().unwrap().cancel_upload = true;
                         }
                     });
                 }
-                kit::note(ui, "Sent files are saved in the remote computer's Downloads/RemoteFriend folder.");
-                kit::section_label(ui, "ON THE REMOTE COMPUTER");
+                for (name, path) in sent.iter().take(3) {
+                    kit::line(ui, RichText::new(format!("Sent {name} to {path}")).size(12.0).color(kit::OK)).on_hover_text(path);
+                }
+
+                kit::section_label(ui, "GET FROM THAT COMPUTER");
+                let waiting = asked.is_some_and(|t| t.elapsed().as_secs() < 10);
                 let Some(dir) = dir else {
-                    ui.spinner();
+                    if waiting {
+                        ui.spinner();
+                    } else {
+                        ui.horizontal(|ui| {
+                            kit::dot(ui, kit::WARN, "No answer from that computer");
+                            if ui.add(kit::secondary("Retry")).clicked() {
+                                self.send_control(serde_json::json!({"t": "files_hello"}));
+                                self.list_remote("");
+                            }
+                        });
+                    }
                     return;
                 };
                 ui.horizontal_wrapped(|ui| {
                     if let Some(parent) = &dir.parent {
                         if ui.button("⬆ Up").clicked() {
-                            self.send_control(serde_json::json!({"t": "ls", "path": parent}));
+                            self.list_remote(parent);
                         }
                     }
-                    if ui.button("🏠 Home").clicked() {
-                        self.send_control(serde_json::json!({"t": "ls", "path": ""}));
+                    if ui.button("Start").on_hover_text("Where you start on that computer").clicked() {
+                        self.list_remote("");
                     }
-                    ui.label(RichText::new(if dir.path.is_empty() { "This PC" } else { &dir.path }).monospace());
+                    let here = if dir.path.is_empty() { "That computer" } else { &dir.path };
+                    ui.label(RichText::new(here).monospace());
+                    if waiting {
+                        ui.spinner();
+                    }
                 });
                 if let Some(e) = &dir.error {
                     kit::dot(ui, kit::WARN, e.clone());
@@ -434,7 +545,7 @@ impl App {
                 if let Some(d) = &download {
                     ui.horizontal(|ui| {
                         let frac = if d.total > 0 { d.got as f32 / d.total as f32 } else { 1.0 };
-                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Downloading {}", d.name)).desired_width(320.0));
+                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Getting {}", d.name)).desired_width(ui.available_width() - 70.0));
                         if ui.button("Cancel").clicked() {
                             self.send_control(serde_json::json!({"t": "get_cancel", "id": d.id}));
                             remote_friend_host::cancel_incoming_file(d.id);
@@ -442,18 +553,22 @@ impl App {
                         }
                     });
                 }
+                let here = remote_friend_host::receive_dir();
+                ui.horizontal_wrapped(|ui| {
+                    kit::note(ui, format!("Saved on this computer in: {}", here.display()));
+                    if ui.small_button("Open folder").clicked() {
+                        let _ = std::fs::create_dir_all(&here);
+                        crate::open_path(&here);
+                    }
+                });
                 if let Some(path) = &downloaded {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small(format!("Last download: {path}"));
-                        if ui.small_button("Open folder").clicked() {
-                            if let Some(folder) = std::path::Path::new(path).parent() {
-                                crate::open_path(folder);
-                            }
-                        }
-                    });
+                    kit::line(ui, RichText::new(format!("Got: {path}")).size(12.0).color(kit::OK)).on_hover_text(path);
                 }
                 ui.separator();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if dir.entries.is_empty() && dir.error.is_none() {
+                        kit::empty(ui, "This folder is empty.");
+                    }
                     for (name, is_dir, size) in &dir.entries {
                         ui.horizontal(|ui| {
                             let full = if dir.path.is_empty() {
@@ -462,13 +577,14 @@ impl App {
                                 std::path::Path::new(&dir.path).join(name).display().to_string()
                             };
                             if *is_dir {
-                                if ui.link(format!("📁 {name}")).clicked() {
-                                    self.send_control(serde_json::json!({"t": "ls", "path": full}));
+                                let link = egui::Button::new(RichText::new(format!("📁 {name}")).color(kit::ACCENT)).frame(false).truncate();
+                                if ui.add(link).on_hover_text(&full).clicked() {
+                                    self.list_remote(&full);
                                 }
                             } else {
-                                ui.label(format!("📄 {name}"));
+                                ui.add(egui::Label::new(format!("📄 {name}")).truncate()).on_hover_text(&full);
                                 ui.small(human_size(*size));
-                                if ui.add_enabled(download.is_none(), egui::Button::new("⬇ Download").small()).clicked() {
+                                if ui.add_enabled(download.is_none(), egui::Button::new("⬇ Get").small()).on_hover_text("Download to this computer").clicked() {
                                     let id = rand_id();
                                     shared.lock().unwrap().download =
                                         Some(crate::net::Transfer { id, name: name.clone(), got: 0, total: *size });
@@ -578,9 +694,15 @@ impl App {
         self.send_control(serde_json::json!({"t": "switch", "id": me.id, "token": token, "name": me.name, "reply": reply}));
     }
 
+    /// Control messages must not get lost while a file fills the queue: if it is full,
+    /// a short-lived thread waits for room.
     pub(crate) fn send_control(&self, v: serde_json::Value) {
         if let Some(tx) = self.tx() {
-            let _ = tx.try_send(Packet::Control(v.to_string()));
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(p)) = tx.try_send(Packet::Control(v.to_string())) {
+                std::thread::spawn(move || {
+                    let _ = tx.blocking_send(p);
+                });
+            }
         }
     }
 
@@ -664,82 +786,75 @@ impl App {
         }
     }
 
-    fn send_file(&self, path: std::path::PathBuf) {
+    /// Send a file in 64 KiB pieces from a thread. `dest`: the folder on the computer (only
+    /// where the computer lets us choose; otherwise it lands in its shared folder).
+    fn send_file(&self, path: std::path::PathBuf, dest: Option<String>) {
         let Some(tx) = self.tx() else { return };
         let Some(shared) = self.shared.clone() else { return };
         std::thread::spawn(move || {
             const CHUNK: usize = 64 * 1024;
-            const DEFAULT_MAX: u64 = 512 * 1024 * 1024;
-            let max = std::env::var("RF_MAX_FILE_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .filter(|v| *v > 0)
-                .unwrap_or(DEFAULT_MAX);
+            // Pieces waiting to go out at most: clicks and keys never wait behind a whole file.
+            const IN_FLIGHT: usize = 8;
+            let fail = |msg: String| {
+                let mut sh = shared.lock().unwrap();
+                sh.upload = None;
+                sh.banner(msg);
+            };
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+            let max = match shared.lock().unwrap().files_max {
+                0 => std::env::var("RF_MAX_FILE_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0).unwrap_or(512 << 20),
+                n => n,
+            };
             let total = match std::fs::metadata(&path) {
                 Ok(m) if m.is_file() => m.len(),
-                Ok(_) => {
-                    tracing::warn!("only regular files can be sent");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!("cannot read file info: {e}");
-                    return;
-                }
+                Ok(_) => return fail(format!("{name} is not a file")),
+                Err(e) => return fail(format!("Cannot read {name}: {e}")),
             };
-            if total == 0 || total > max {
-                tracing::warn!("file size out of range: {total} (limit {max})");
-                return;
+            if total > max {
+                return fail(format!("{name} is too big ({}; that computer takes up to {})", human_size(total), human_size(max)));
             }
             let mut file = match std::fs::File::open(&path) {
                 Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("cannot open file: {e}");
-                    return;
-                }
+                Err(e) => return fail(format!("Cannot open {name}: {e}")),
             };
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
             shared.lock().unwrap().upload = Some((name.clone(), 0, total));
-            let id = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| (d.as_nanos() as u64).max(1))
-                .unwrap_or(1);
+            let id = rand_id();
+            if let Some(dir) = dest {
+                if tx.blocking_send(Packet::Control(serde_json::json!({"t": "put_dir", "id": id, "dir": dir}).to_string())).is_err() {
+                    return fail("Not sent: the connection is closed".into());
+                }
+            }
             let mut offset = 0u64;
             let mut buf = vec![0u8; CHUNK];
             shared.lock().unwrap().cancel_upload = false;
-            while offset < total {
+            loop {
                 if std::mem::take(&mut shared.lock().unwrap().cancel_upload) {
                     let _ = tx.blocking_send(Packet::Control(serde_json::json!({"t": "file_cancel", "id": id}).to_string()));
-                    let mut sh = shared.lock().unwrap();
-                    sh.upload = None;
-                    sh.banner(format!("Sending {name} canceled"));
+                    return fail(format!("Sending {name} canceled"));
+                }
+                if shared.lock().unwrap().upload.is_none() {
+                    // The computer refused it (file_err) or the session ended.
                     return;
+                }
+                if tx.max_capacity() - tx.capacity() >= IN_FLIGHT {
+                    std::thread::sleep(std::time::Duration::from_millis(4));
+                    continue;
                 }
                 let want = ((total - offset) as usize).min(CHUNK);
                 let n = match file.read(&mut buf[..want]) {
-                    Ok(0) => {
-                        tracing::warn!("file ended earlier than expected: {name}");
-                        return;
-                    }
+                    Ok(0) if want > 0 => return fail(format!("{name} got shorter while sending")),
                     Ok(n) => n,
-                    Err(e) => {
-                        tracing::warn!("cannot read file: {e}");
-                        return;
-                    }
+                    Err(e) => return fail(format!("Cannot read {name}: {e}")),
                 };
                 let end = offset + n as u64;
-                let fc = FileChunk {
-                    transfer_id: id,
-                    name: name.clone(),
-                    offset,
-                    total,
-                    data: buf[..n].to_vec(),
-                    last: end == total,
-                };
+                let fc = FileChunk { transfer_id: id, name: name.clone(), offset, total, data: buf[..n].to_vec(), last: end == total };
                 if tx.blocking_send(Packet::File(fc)).is_err() {
-                    shared.lock().unwrap().upload = None;
-                    return;
+                    return fail("Not sent: the connection is closed".into());
                 }
                 offset = end;
+                if offset >= total {
+                    break;
+                }
             }
             tracing::info!("file sent: {name} ({total} bytes)");
         });

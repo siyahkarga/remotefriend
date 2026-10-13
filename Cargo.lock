@@ -4736,6 +4736,8 @@ dependencies = [
  "libc",
  "local-ip-address",
  "memmap2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "openh264",
  "openh264-sys2",
  "opus",
@@ -4750,11 +4752,12 @@ dependencies = [
  "tracing-subscriber",
  "windows 0.61.3",
  "xcap",
+ "xcb",
 ]
 
 [[package]]
 name = "remotefriend"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "arboard",

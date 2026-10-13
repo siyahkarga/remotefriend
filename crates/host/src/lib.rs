@@ -21,6 +21,7 @@ mod video;
 #[cfg(target_os = "linux")]
 mod wayland;
 mod web;
+mod winlist;
 
 pub use approval::{
     block_device, blocked_devices, grant_temporary, remove_device, set_device_mine, trusted_devices, unblock, BlockedDevice,
@@ -161,5 +162,14 @@ pub fn demo_prompt(trusted: bool) {
             can_block: true,
         };
         let _ = status::ask_ui(status::PromptKind::Connection(req), std::time::Duration::from_secs(30));
+    });
+}
+
+/// Development aid: the file access question with made-up data (debug builds only).
+#[cfg(debug_assertions)]
+pub fn demo_files_prompt() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = approval::ask_files("Ali's laptop");
     });
 }
