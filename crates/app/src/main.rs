@@ -339,6 +339,8 @@ impl eframe::App for App {
         debug_screenshot(ctx);
         #[cfg(debug_assertions)]
         self.debug_close(ctx);
+        #[cfg(debug_assertions)]
+        self.debug_restart(ctx);
         // Switching sides: the computer we were connected to accepted; control it now.
         if let Some(t) = remote_friend_host::take_switch() {
             if matches!(self.screen, Screen::Viewer) {
@@ -586,6 +588,19 @@ impl App {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
+
+    /// Development aid: RF_RESTART_AFTER=seconds restarts like after an update (once).
+    #[cfg(debug_assertions)]
+    fn debug_restart(&mut self, ctx: &egui::Context) {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let Some(secs) = std::env::var("RF_RESTART_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+        if START.get_or_init(Instant::now).elapsed().as_secs() >= secs {
+            // The restarted program must not restart again.
+            std::env::remove_var("RF_RESTART_AFTER");
+            restart_app();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
 }
 
 /// Development aid: RF_PAGE=devices|history|keys|settings[:tab] opens that page first.
@@ -680,6 +695,13 @@ fn restart_app() {
         // is at the same path without that suffix.
         let path = exe.to_string_lossy().to_string();
         let exe = std::path::PathBuf::from(path.strip_suffix(" (deleted)").unwrap_or(&path));
+        // Linux: become the new program in place (same process, nothing has to start it).
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(&exe).exec();
+            tracing::warn!("restart in place failed ({err}); starting a new process");
+        }
         let _ = std::process::Command::new(exe).spawn();
     }
     std::process::exit(0);

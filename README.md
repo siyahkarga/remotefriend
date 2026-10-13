@@ -80,8 +80,8 @@ its permissions, Disconnect and file progress, the shared screen, *Open RemoteFr
 Wayland it runs as a small helper on XWayland, the only way it can choose its place and stay on
 top there.
 
-Viewers see the computer's **pointer** in the picture (also when you move it); their own pointer
-shows as a crosshair over it.
+Viewers see the computer's **pointer** in the picture (also when you move it); over the picture
+the desktop viewer hides its own, so there is one pointer.
 
 Files on their way show the same everywhere: the name, a thin bar, the percentage, and how much
 is done and left. They travel inside the session's end-to-end encryption — directly between the

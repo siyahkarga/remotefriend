@@ -253,10 +253,9 @@ impl App {
                     ))
                 };
 
-                // The computer's pointer is part of the picture; ours becomes a small crosshair,
-                // so aiming stays immediate and the two don't look alike.
+                // The computer's pointer is part of the picture: hide ours so there is only one.
                 if cursor_in_video && resp.hovered() {
-                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                    ctx.set_cursor_icon(egui::CursorIcon::None);
                 }
                 if !perms.control {
                     // View only: nothing is sent.

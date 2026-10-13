@@ -230,7 +230,8 @@ impl App {
         });
     }
 
-    /// Server owner: "while you were away" once per run when the server has unread notices.
+    /// Server owner: "while you were away" when the server has unread notices. Once shown they
+    /// count as read, so the same notices don't come back at every start.
     pub(crate) fn notices_ui(&mut self, ctx: &egui::Context) {
         if self.notices_prompted {
             return;
@@ -266,11 +267,13 @@ impl App {
             kit::split(ui, 32.0, |_| {}, |ui| {
                 if ui.add(kit::primary("Open Access keys")).clicked() {
                     self.notices_prompted = true;
+                    crate::notices::mark_seen(self.notices.clone());
                     self.keys_ui.show();
                     self.page = crate::Page::Keys;
                 }
-                if ui.add(kit::secondary("Later")).clicked() {
+                if ui.add(kit::secondary("OK")).on_hover_text("They stay on the Access keys page").clicked() {
                     self.notices_prompted = true;
+                    crate::notices::mark_seen(self.notices.clone());
                 }
             });
         });
