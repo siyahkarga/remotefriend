@@ -94,12 +94,18 @@
   .fbar button, .xfer button { border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:9px; padding:6px 10px; cursor:pointer; white-space:nowrap; flex:none; }
   .fbar button:disabled { opacity:.4; cursor:default; }
   .fbar code { font-size:12px; color:var(--bar-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left; }
-  .xfer { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; color:var(--bar-txt); }
+  .xfer { display:flex; flex-direction:column; gap:6px; margin:6px 0 12px; padding:10px 12px; font-size:13px; color:var(--bar-txt); background:rgba(91,132,255,.10); border:1px solid rgba(91,132,255,.30); border-radius:12px; }
+  .xfer[hidden] { display:none; }
+  .xhead { display:flex; align-items:center; gap:8px; }
+  .xhead b { color:#8aa8ff; font-variant-numeric:tabular-nums; }
+  .xbar { height:6px; border-radius:3px; background:rgba(255,255,255,.12); overflow:hidden; }
+  .xbar i { display:block; height:100%; width:0; background:#5b84ff; border-radius:3px; transition:width .2s; }
+  .xfer small { color:var(--bar-dim); font-variant-numeric:tabular-nums; }
   .facc { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; margin:0 2px 14px; line-height:1.35; }
   .facc i { flex:none; width:10px; height:10px; border-radius:50%; margin-top:4px; }
   .facc span { color:var(--bar-dim); font-size:12.5px; }
   .rowbtn:disabled { opacity:.45; cursor:default; }
-  .xfer span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .xhead span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .remember { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:14px; color:var(--dim); cursor:pointer; user-select:none; }
   .remember input { width:18px; height:18px; accent-color:var(--acc); }
   .rowbtn { width:100%; display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--bar-line); background:rgba(255,255,255,.05); color:var(--bar-txt); border-radius:12px; cursor:pointer; margin-bottom:8px; text-align:left; }
@@ -227,13 +233,14 @@
 
   <div class="sheet" id="filesSheet" hidden>
     <div class="facc" id="filesAccess"></div>
+    <p class="note" id="filesPath" style="margin-top:-6px"></p>
     <h3>Send to the computer</h3>
     <button class="rowbtn" id="sendFileBtn">⬆ Choose files to send</button>
     <p class="note" id="sendDest"></p>
-    <div class="xfer" id="upBox" hidden><span id="upText"></span><button id="upCancel">Cancel</button></div>
+    <div class="xfer" id="upBox" hidden><div class="xhead"><span id="upText"></span><b id="upPct"></b><button id="upCancel">Cancel</button></div><div class="xbar"><i id="upFill"></i></div><small id="upSize"></small></div>
     <h3>Get from the computer</h3>
     <div class="fbar"><button id="dirUp">⬆ Up</button><button id="dirHome">Start</button><code id="dirPath"></code></div>
-    <div class="xfer" id="downBox" hidden><span id="downText"></span><button id="downCancel">Cancel</button></div>
+    <div class="xfer" id="downBox" hidden><div class="xhead"><span id="downText"></span><b id="downPct"></b><button id="downCancel">Cancel</button></div><div class="xbar"><i id="downFill"></i></div><small id="downSize"></small></div>
     <p class="note" style="margin-top:0">Tap a file to download it: your browser saves it (usually in Downloads).</p>
     <div class="flist" id="dirList"></div>
   </div>
@@ -674,7 +681,7 @@ function handleJson(m) {
     case 'p2p_off': stopP2P(); break;
     case 'monitors': { const before = screenCurrent; applyMonitors(m); if (m.current !== before) toast('Showing ' + screenName(m.current), 1500); break; }
     case 'monitor_no': toast('The computer\'s user kept the current screen.', 3000); break;
-    case 'file_progress': if (m.total) toast('Saving on the computer: ' + Math.floor(m.got * 100 / m.total) + '%', 0); break;
+    case 'file_progress': if (m.total && !$('upBox').hidden) showXfer('up', 'Sending', uploadName, m.got, m.total); break;
     case 'welcome': onWelcome(m); break;
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
     case 'quality': setQualityUi(m.p); break;
@@ -758,7 +765,7 @@ function startViewer() {
   pingTimer = setInterval(() => {
     // The computer answers every ping: this long without anything means it is gone
     // (RemoteFriends closed there, asleep, or its network dropped).
-    if (ws && performance.now() - lastRx > 15000) {
+    if (ws && !document.hidden && performance.now() - lastRx > 15000) {
       ws._title = 'The computer stopped answering';
       ws.close();
       return;
@@ -1247,7 +1254,9 @@ function onKeyUp(e) {
 window.addEventListener('keydown', onKeyDown, true);
 window.addEventListener('keyup', onKeyUp, true);
 window.addEventListener('blur', () => releaseAllKeys());
-document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllKeys(); });
+// Hidden pages get no timers and late messages (a phone's file picker, another app): the
+// computer's silence is only counted while the page is shown.
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllKeys(); else lastRx = performance.now(); });
 
 kb.addEventListener('compositionstart', () => composing = true);
 kb.addEventListener('compositionend', () => { composing = false; kbDiff(); kbReset(); });
@@ -1513,7 +1522,7 @@ $('fileBtn').onclick = () => {
 $('sendFileBtn').onclick = () => $('filePick').click();
 
 // ---------------- files on the computer (browse, download) ----------------
-let dir = null, download = null, uploadCancel = false, uploadFailed = false, uploadId = 0;
+let dir = null, download = null, uploadCancel = false, uploadFailed = false, uploadId = 0, uploadName = '';
 // What the computer lets us reach: 'shared', 'disk', 'all', 'wait' (its user is asked), 'off',
 // or '' (an older computer that doesn't say).
 let filesLevel = '', filesShared = '', filesMax = 0, lsAsked = 0, lsTimer = 0;
@@ -1528,6 +1537,9 @@ function filesInfo() {
   }[filesLevel];
   $('filesAccess').innerHTML = lv ? '<i style="background:' + lv[2] + '"></i><div><b>' + esc(lv[0]) + '</b><br><span>' + esc(lv[1]) + '</span></div>' : '';
   $('sendDest').textContent = 'Goes to: ' + (sendDir() || shared);
+  $('filesPath').textContent = p2p && p2p.open
+    ? 'Files go straight between the two devices (direct), end-to-end encrypted.'
+    : 'Files go through the server, end-to-end encrypted: the server can\'t read them.';
   $('sendFileBtn').disabled = filesLevel === 'wait' || filesLevel === 'off';
 }
 // Where a file we send lands: the folder shown, where the computer lets us choose.
@@ -1582,7 +1594,15 @@ function startDownload(path, name, size) {
 }
 function showDownload() {
   $('downBox').hidden = !download;
-  if (download) $('downText').textContent = 'Downloading ' + download.name + ' ' + (download.total ? Math.floor(download.got * 100 / download.total) : 0) + '%';
+  if (download) showXfer('down', 'Getting', download.name, download.got, download.total);
+}
+// A file on its way, the same in both directions: name and percent, a track, the sizes.
+function showXfer(box, verb, name, done, total) {
+  const pct = total ? Math.min(100, Math.floor(done * 100 / total)) : 0;
+  $(box + 'Text').textContent = verb + ' ' + name;
+  $(box + 'Pct').textContent = pct + '%';
+  $(box + 'Fill').style.width = pct + '%';
+  $(box + 'Size').textContent = humanSize(done) + ' of ' + humanSize(total) + ' · ' + humanSize(Math.max(0, total - done)) + ' left';
 }
 function onFileData(m) {
   if (!download || m.id !== download.id) return;
@@ -1619,7 +1639,8 @@ $('filePick').addEventListener('change', async () => {
     const CH = 192 * 1024;
     uploadCancel = false; uploadFailed = false; uploadId = id;
     $('upBox').hidden = false;
-    $('upText').textContent = 'Sending ' + f.name;
+    uploadName = f.name;
+    showXfer('up', 'Sending', f.name, 0, f.size);
     if (sendDir()) send({ t: 'put_dir', id, dir: sendDir() });
     try {
       if (!f.size) send({ t: 'file', transfer_id: id, name: f.name, offset: 0, total: 0, data: '', last: true });
@@ -1635,9 +1656,7 @@ $('filePick').addEventListener('change', async () => {
         for (let i = 0; i < part.length; i += 8192) bin += String.fromCharCode.apply(null, part.subarray(i, i + 8192));
         await drain();
         send({ t: 'file', transfer_id: id, name: f.name, offset: off, total: f.size, data: btoa(bin), last: off + part.length === f.size });
-        const pct = Math.floor((off + part.length) * 100 / f.size);
-        $('upText').textContent = 'Sending ' + f.name + ' ' + pct + '%';
-        toast('Sending: ' + f.name + ' ' + pct + '%', 0);
+        showXfer('up', 'Sending', f.name, off + part.length, f.size);
       }
     } catch (e) { toast('Send failed: ' + (e && e.message || e), 4000); return; }
   }

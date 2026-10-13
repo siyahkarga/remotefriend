@@ -94,8 +94,9 @@ pub(crate) fn local_user_active() -> bool {
     LOCAL_UNTIL.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| Instant::now() < t)
 }
 
-/// Where the pointer is now (None where the system doesn't tell).
-fn pointer() -> Option<(i32, i32)> {
+/// Where the pointer is now (None where the system doesn't tell): pixels on Windows and X11,
+/// points on macOS.
+pub(crate) fn pointer() -> Option<(i32, i32)> {
     #[cfg(windows)]
     {
         let mut p = windows::Win32::Foundation::POINT::default();

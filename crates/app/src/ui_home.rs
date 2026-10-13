@@ -112,10 +112,6 @@ impl App {
         let snap = remote_friend_host::snapshot();
         self.load_logo(ctx);
         ctx.request_repaint_after(Duration::from_millis(500));
-        if self.curtain_needed(&snap) {
-            self.curtain_ui(ctx, &snap);
-            return;
-        }
         // The access-key page belongs to the server owner only.
         if self.page == Page::Keys && !owner_key_like(&remote_friend_host::server_settings().key) {
             self.page = Page::Home;
@@ -146,48 +142,6 @@ impl App {
         });
         self.confirm_mine_ui(ctx);
         self.notices_ui(ctx);
-    }
-
-    /// Wayland, safe view, someone connected: apps can't keep their window out of the shared
-    /// picture there, so the window shows only who is connected until this computer's user
-    /// opens RemoteFriends (a viewer's click can't: see App::raw_input_hook).
-    fn curtain_needed(&self, snap: &remote_friend_host::Snapshot) -> bool {
-        crate::privacy::wayland() && snap.sessions > 0 && !self.curtain_open && !remote_friend_host::privacy::full_view()
-    }
-
-    fn curtain_ui(&mut self, ctx: &egui::Context, snap: &remote_friend_host::Snapshot) {
-        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(egui::Margin::same(20)).fill(kit::BG)).show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.set_max_width(620.0);
-                    kit::card(ui, |ui| {
-                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            ui.horizontal(|ui| {
-                                if let Some(logo) = &self.logo {
-                                    ui.image((logo.id(), egui::vec2(26.0, 26.0)));
-                                }
-                                Self::card_title(ui, "Someone is connected to this computer");
-                            });
-                            kit::note(
-                                ui,
-                                "Viewers can see this window: this Linux desktop (Wayland) doesn't let apps hide themselves. \
-                                 Your password and settings stay out of sight until you open RemoteFriends here.",
-                            );
-                            self.sessions_ui(ui);
-                            self.shared_screen_ui(ui, snap);
-                            ui.add_space(12.0);
-                            if ui
-                                .add(kit::secondary("Open RemoteFriends"))
-                                .on_hover_text("Viewers will see it too, but their clicks and keys can't change anything in it")
-                                .clicked()
-                            {
-                                self.curtain_open = true;
-                            }
-                        });
-                    });
-                });
-            });
-        });
     }
 
     /// The menu on the left: logo, pages, and the connection status at the bottom.
@@ -539,7 +493,7 @@ impl App {
         let mut full = remote_friend_host::privacy::full_view();
         let wayland = crate::privacy::wayland();
         let safe_tip = if wayland {
-            "While someone watches, RemoteFriends shows only who is connected. This Linux desktop doesn't let apps hide other windows."
+            "This Linux desktop (Wayland) doesn't let apps hide windows: viewers see RemoteFriends and every app (your password stays hidden as dots)"
         } else {
             "RemoteFriends and private apps (Settings, Privacy) are blacked out; viewers can't use RemoteFriends"
         };
@@ -552,9 +506,6 @@ impl App {
         }
         if wayland && !full {
             kit::note(ui, "On this Linux desktop (Wayland) private apps can't be hidden: close them while someone watches, or log in with an X11 (Xorg) session.");
-            if snap.sessions > 0 && ui.add(kit::quiet("Show viewers only who is connected")).clicked() {
-                self.curtain_open = false;
-            }
         }
 
         self.sessions_ui(ui);
@@ -626,8 +577,8 @@ impl App {
                     sessions::set_perms(s.id, p);
                 }
                 if let Some(t) = &s.transfer {
-                    let frac = if t.total > 0 { t.got as f32 / t.total as f32 } else { 0.0 };
-                    ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Receiving {}", t.name)));
+                    let verb = if t.incoming { "Receiving" } else { "Sending" };
+                    kit::transfer(ui, verb, &t.name, t.got, t.total, false);
                 }
                 // Every file that came or went in this session, with where it is.
                 for f in &s.file_log {

@@ -131,9 +131,12 @@ app remembers the keys it created in `issued_keys.json` (readable only by the us
   control") or turn off mouse/keyboard, sound, files and clipboard per viewer; the viewer is told.
 - While a session runs in the safe view, the RemoteFriends window stays open for the computer's
   user but is kept out of the picture: excluded from screen capture (Windows, macOS) and blacked
-  out by the host (macOS, X11). On Wayland the window can't be hidden, so it shows only who is
-  connected until the computer's user opens it. Closing it asks first, and closing it tells every
-  viewer that RemoteFriends was closed (viewers also end a session after 15 s of silence).
+  out by the host (macOS, X11). On Wayland the window can't be hidden (the password shows as
+  dots, viewers can't use it). Closing it asks first, and closing it tells every viewer that
+  RemoteFriends was closed (viewers also end a session after 15 s of silence while their page is
+  shown; time a phone spends in another app or a file picker doesn't count).
+- The session bar's Wayland helper (`remotefriend --session-bar`) only shows what the app sends
+  it; the app runs its clicks only when no viewer clicked just before.
 - **File access by trust.** Up to 0.14.1 every viewer with the Files permission could
   browse and download any file the user can read (including ~/.ssh). Now a viewer allowed once
   reaches only the shared folder (Downloads/RemoteFriend); a trusted device reaches the user's

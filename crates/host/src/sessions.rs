@@ -81,6 +81,8 @@ impl Perms {
 /// A file being received from a viewer.
 #[derive(Clone, Debug)]
 pub struct Transfer {
+    /// Sent to this computer (true) or taken from it (false).
+    pub incoming: bool,
     pub name: String,
     pub got: u64,
     pub total: u64,
@@ -254,6 +256,16 @@ impl SessionHandle {
     /// A file came in or went out: shown in the session's row.
     pub(crate) fn log_file(&self, incoming: bool, name: &str, path: &str) {
         log_file_for(self.id, incoming, name, path);
+    }
+
+    /// `set_transfer` for a task that runs on its own (files taken from this computer).
+    pub(crate) fn transfer_reporter(&self) -> impl Fn(Option<Transfer>) + Send + 'static {
+        let id = self.id;
+        move |t| {
+            if let Some(l) = live().iter_mut().find(|l| l.info.id == id) {
+                l.info.transfer = t;
+            }
+        }
     }
 
     /// `log_file` for a task that runs on its own.

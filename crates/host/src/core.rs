@@ -289,6 +289,18 @@ pub(crate) struct Core {
     host_busy: bool,
 }
 
+impl Drop for Core {
+    /// A file still arriving when the session ends is deleted, not left half written.
+    fn drop(&mut self) {
+        for id in self.incoming.keys() {
+            if let Some(name) = crate::files::cancel(*id) {
+                crate::status::notice(format!("{}: {name} was not complete and was deleted", self.label));
+            }
+        }
+        self.handle.set_transfer(None);
+    }
+}
+
 impl Core {
     pub(crate) fn new(handle: SessionHandle, flow: Flow, ctrl: mpsc::Sender<String>, direct: Option<DirectHooks>) -> Self {
         let label = handle.label();
@@ -471,7 +483,7 @@ impl Core {
             crate::status::notice(format!("Receiving {name} ({}) from {}…", human_size(total), self.label));
             self.incoming.insert(id, Incoming { name: name.clone(), last_report: Instant::now() });
         }
-        self.handle.set_transfer(Some(Transfer { name: name.clone(), got, total }));
+        self.handle.set_transfer(Some(Transfer { incoming: true, name: name.clone(), got, total }));
         // The folder matters only for the first chunk (it is checked once, then kept).
         let dir = if chunk.offset == 0 {
             crate::files::upload_dir(self.upload_dirs.get(&id).map(String::as_str), scope)
@@ -668,6 +680,7 @@ impl Core {
         self.downloads.insert(id, cancel.clone());
         let (ctrl, label) = (self.ctrl.clone(), self.label.clone());
         let log = self.handle.file_logger();
+        let report = self.handle.transfer_reporter();
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let err = |msg: String| serde_json::json!({"t": "get_err", "id": id, "msg": msg}).to_string();
@@ -685,8 +698,11 @@ impl Core {
             log(false, &name, &shown);
             let mut file = tokio::fs::File::from_std(file);
             let mut offset = 0u64;
+            let mut reported = Instant::now();
+            report(Some(Transfer { incoming: false, name: name.clone(), got: 0, total }));
             loop {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    report(None);
                     crate::status::notice(format!("{label} canceled downloading {name}"));
                     return;
                 }
@@ -694,6 +710,7 @@ impl Core {
                 let n = match file.read(&mut buf).await {
                     Ok(n) => n,
                     Err(e) => {
+                        report(None);
                         let _ = ctrl.send(err(format!("cannot read {name}: {e}"))).await;
                         return;
                     }
@@ -701,18 +718,25 @@ impl Core {
                 buf.truncate(n);
                 let last = n == 0 || offset + n as u64 >= total;
                 if n == 0 && offset < total {
+                    report(None);
                     let _ = ctrl.send(err(format!("{name} got shorter while reading"))).await;
                     return;
                 }
                 let chunk = FileChunk { transfer_id: id, name: name.clone(), offset, total, data: buf, last };
                 if lane.send(chunk).await.is_err() {
+                    report(None);
                     return;
                 }
                 offset += n as u64;
+                if reported.elapsed() > Duration::from_millis(250) {
+                    reported = Instant::now();
+                    report(Some(Transfer { incoming: false, name: name.clone(), got: offset, total }));
+                }
                 if last {
                     break;
                 }
             }
+            report(None);
             crate::status::notice(format!("{label} downloaded {name}"));
         });
     }

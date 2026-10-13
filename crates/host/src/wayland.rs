@@ -58,11 +58,15 @@ pub fn cursor_embedded() -> bool {
     CURSOR_EMBEDDED.load(Ordering::Relaxed)
 }
 
-/// Leave the pointer out of the picture when the desktop allows it: viewers show their own,
-/// immediate pointer instead of a delayed copy (and never two pointers).
+/// The computer's pointer is part of the picture, so viewers see where it is (also when the
+/// person at the computer moves it). Hidden only where the desktop can't draw it.
 async fn cursor_mode(sc: &Screencast) -> CursorMode {
     let modes = sc.available_cursor_modes().await.unwrap_or_default();
-    let mode = if modes.contains(CursorMode::Hidden) { CursorMode::Hidden } else { CursorMode::Embedded };
+    let mode = if modes.contains(CursorMode::Embedded) || !modes.contains(CursorMode::Hidden) {
+        CursorMode::Embedded
+    } else {
+        CursorMode::Hidden
+    };
     CURSOR_EMBEDDED.store(mode == CursorMode::Embedded, Ordering::Relaxed);
     mode
 }
@@ -70,6 +74,8 @@ async fn cursor_mode(sc: &Screencast) -> CursorMode {
 /// Screens granted by the portal (several if the user selected more than one): PipeWire
 /// node id and logical size. The viewers see one of them; switching needs no new dialog.
 static SCREENS: Mutex<Vec<(u32, (i32, i32))>> = Mutex::new(Vec::new());
+/// Where each granted screen is on the desktop (logical, same order as SCREENS).
+static SCREEN_POS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
 static ACTIVE_NODE: AtomicU32 = AtomicU32::new(0);
 /// Bumped when switching screens: the PipeWire thread of the previous screen stops.
 static PW_GEN: AtomicU64 = AtomicU64::new(0);
@@ -82,6 +88,11 @@ pub fn screens() -> Vec<(u32, u32)> {
         .lock()
         .map(|l| l.iter().map(|(_, (w, h))| (*w.max(&0) as u32, *h.max(&0) as u32)).collect())
         .unwrap_or_default()
+}
+
+/// Logical positions of the granted screens (0, 0 where the desktop doesn't say).
+pub fn screen_positions() -> Vec<(i32, i32)> {
+    SCREEN_POS.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 /// Index of the screen being shared.
@@ -117,6 +128,7 @@ fn start_streams(streams: &[ashpd::desktop::screencast::Stream], fd: OwnedFd) ->
         tracing::info!("portal granted {} screens", list.len());
     }
     *SCREENS.lock().unwrap() = list;
+    *SCREEN_POS.lock().unwrap() = streams.iter().map(|s| s.position().unwrap_or((0, 0))).collect();
     ACTIVE_NODE.store(node, Ordering::Relaxed);
     if w > 0 && h > 0 {
         LOGICAL_W.store(w as i64, Ordering::Relaxed);

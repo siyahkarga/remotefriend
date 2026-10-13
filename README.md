@@ -72,9 +72,20 @@ page remember the password for a computer until it changes.
 
 ## On the shared computer
 
-While someone is connected, a small **session bar** stays on top of everything (even when the
-window is minimized): how many are connected, for how long, which screen they see, and **Open**,
-**Take back control** and **Disconnect**.
+While someone is connected, a small **session bar** sits on top of the shared screen (even when
+the window is minimized): how many are connected, for how long, which screen they see, a file on
+its way, **Take back control** and **Disconnect**. **⌄** opens the details — every viewer with
+its permissions, Disconnect and file progress, the shared screen, *Open RemoteFriends* — and
+**–** shrinks it to a small pill. Drag it by the dots on the left (or any empty part). On
+Wayland it runs as a small helper on XWayland, the only way it can choose its place and stay on
+top there.
+
+Viewers see the computer's **pointer** in the picture (also when you move it); their own pointer
+shows as a crosshair over it.
+
+Files on their way show the same everywhere: the name, a thin bar, the percentage, and how much
+is done and left. They travel inside the session's end-to-end encryption — directly between the
+devices when the connection is direct, otherwise through the server, which can't read them.
 
 The RemoteFriends window shows:
 
@@ -104,8 +115,8 @@ private apps such as password managers (*Settings → Privacy*: switch apps on i
 type words of their names). Windows are followed for every frame, so a moving window doesn't show
 through. When only a browser tab is private (its title matches), the tab bar and address bar stay
 visible so viewers can switch tabs. Linux **Wayland** desktops don't tell apps where windows are:
-there private apps can't be blacked out (use an X11 session for that), and while someone watches
-RemoteFriends shows only who is connected until you open it. **Everything** shows the screen exactly
+there private apps can't be blacked out (use an X11 session for that) and RemoteFriends itself
+stays visible (the password shows as dots; viewers can't use it). **Everything** shows the screen exactly
 as you see it. Apps that protect themselves from every screen capture (e.g. Signal's “Screen
 security”) stay black in both modes until that option is turned off in the app. Closing
 RemoteFriends asks first, because the computer is unreachable while it is closed.

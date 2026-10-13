@@ -1,7 +1,6 @@
 //! Keep the RemoteFriends window out of the shared picture while someone is connected, so
 //! a viewer cannot see the password or settings. Windows 10 (2004+) and macOS support
-//! this; on X11 the host blacks the window out instead, and on Wayland the app shows only
-//! who is connected (ui_home.rs, curtain_ui).
+//! this; on X11 the host blacks the window out instead. Wayland can't do either.
 
 use raw_window_handle::HasWindowHandle;
 
@@ -41,5 +40,7 @@ pub(crate) fn wayland() -> bool {
     if std::env::var("RF_DEMO_WAYLAND").is_ok_and(|v| v == "1") {
         return true;
     }
-    cfg!(target_os = "linux") && std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
+    cfg!(target_os = "linux")
+        && (std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
+            || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland")))
 }

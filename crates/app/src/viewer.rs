@@ -156,8 +156,7 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
                     }
                     if let Some((name, got, total)) = &upload {
-                        let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
-                        ui.add(egui::ProgressBar::new(frac).desired_width(180.0).show_percentage().text(format!("Sending {name}")));
+                        kit::transfer_inline(ui, "⬆", *got, *total, 90.0).on_hover_text(format!("Sending {name}"));
                         if ui.add(kit::quiet("Cancel")).clicked() {
                             shared.lock().unwrap().cancel_upload = true;
                         }
@@ -254,9 +253,10 @@ impl App {
                     ))
                 };
 
-                // The remote pointer is part of the picture: hide ours so there is only one.
+                // The computer's pointer is part of the picture; ours becomes a small crosshair,
+                // so aiming stays immediate and the two don't look alike.
                 if cursor_in_video && resp.hovered() {
-                    ctx.set_cursor_icon(egui::CursorIcon::None);
+                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
                 if !perms.control {
                     // View only: nothing is sent.
@@ -485,6 +485,15 @@ impl App {
                 if !detail.is_empty() {
                     kit::note(ui, detail);
                 }
+                let direct = shared.lock().unwrap().direct;
+                kit::note(
+                    ui,
+                    if direct {
+                        "Files go straight between the two devices (direct), end-to-end encrypted."
+                    } else {
+                        "Files go through the server, end-to-end encrypted: the server can't read them."
+                    },
+                );
 
                 kit::section_label(ui, "SEND TO THAT COMPUTER");
                 let can_send = upload.is_none() && !matches!(level.as_str(), "wait" | "off");
@@ -496,13 +505,9 @@ impl App {
                 let goes_to = dest.clone().unwrap_or_else(|| shared_name.clone());
                 kit::note(ui, format!("Goes to: {goes_to}"));
                 if let Some((name, got, total)) = &upload {
-                    ui.horizontal(|ui| {
-                        let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
-                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Sending {name}")).desired_width(ui.available_width() - 70.0));
-                        if ui.button("Cancel").clicked() {
-                            shared.lock().unwrap().cancel_upload = true;
-                        }
-                    });
+                    if kit::transfer(ui, "Sending", name, *got, *total, true) {
+                        shared.lock().unwrap().cancel_upload = true;
+                    }
                 }
                 for (name, path) in sent.iter().take(3) {
                     kit::line(ui, RichText::new(format!("Sent {name} to {path}")).size(12.0).color(kit::OK)).on_hover_text(path);
@@ -543,15 +548,11 @@ impl App {
                     kit::dot(ui, kit::WARN, e.clone());
                 }
                 if let Some(d) = &download {
-                    ui.horizontal(|ui| {
-                        let frac = if d.total > 0 { d.got as f32 / d.total as f32 } else { 1.0 };
-                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(format!("Getting {}", d.name)).desired_width(ui.available_width() - 70.0));
-                        if ui.button("Cancel").clicked() {
-                            self.send_control(serde_json::json!({"t": "get_cancel", "id": d.id}));
-                            remote_friend_host::cancel_incoming_file(d.id);
-                            shared.lock().unwrap().download = None;
-                        }
-                    });
+                    if kit::transfer(ui, "Getting", &d.name, d.got, d.total, true) {
+                        self.send_control(serde_json::json!({"t": "get_cancel", "id": d.id}));
+                        remote_friend_host::cancel_incoming_file(d.id);
+                        shared.lock().unwrap().download = None;
+                    }
                 }
                 let here = remote_friend_host::receive_dir();
                 ui.horizontal_wrapped(|ui| {
@@ -916,14 +917,7 @@ fn read_local_clipboard() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok().filter(|t| !t.is_empty())
 }
 
-fn human_size(n: u64) -> String {
-    match n {
-        n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
-        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
-        n if n >= 1 << 10 => format!("{} KB", n >> 10),
-        n => format!("{n} B"),
-    }
-}
+use crate::ui_kit::human_size;
 
 /// Transfer id for a download.
 fn rand_id() -> u64 {

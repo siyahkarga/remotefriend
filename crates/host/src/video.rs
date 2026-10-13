@@ -200,14 +200,55 @@ fn portal_capture() -> bool {
     crate::wayland::is_wayland() && std::env::var("RF_WAYLAND_XCAP").map(|v| v != "1").unwrap_or(true)
 }
 
-/// Is the mouse pointer drawn into the picture? The portal embeds it; the screenshot APIs used
-/// on X11, Windows and macOS don't, so clients then draw a pointer of their own.
+/// Is the mouse pointer drawn into the picture? The portal embeds it; on X11, Windows and
+/// macOS the screenshot leaves it out, so it is drawn in (`draw_pointer`) where the system
+/// tells where it is.
 pub(crate) fn cursor_in_video() -> bool {
+    if test_pattern() {
+        return false;
+    }
     #[cfg(target_os = "linux")]
-    if portal_capture() && !test_pattern() {
+    if portal_capture() {
         return crate::wayland::cursor_embedded();
     }
-    false
+    crate::input::pointer().is_some()
+}
+
+/// Draw an arrow pointer into a captured monitor image at the computer's pointer position
+/// (`x`, `y` in image pixels). Its shape is a plain arrow, not the system's current cursor.
+fn draw_pointer(rgba: &mut [u8], width: u32, height: u32, x: i32, y: i32, scale: f32) {
+    // A classic arrow (tip at 0,0), in points; filled white with a dark outline.
+    const ARROW: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 17.0), (4.2, 13.2), (7.2, 19.8), (10.0, 18.6), (7.1, 12.2), (12.4, 12.2)];
+    let s = scale.max(1.0);
+    let poly: Vec<(f32, f32)> = ARROW.iter().map(|(px, py)| (x as f32 + px * s, y as f32 + py * s)).collect();
+    let inside = |qx: f32, qy: f32| {
+        let mut c = false;
+        let mut j = poly.len() - 1;
+        for i in 0..poly.len() {
+            let ((xi, yi), (xj, yj)) = (poly[i], poly[j]);
+            if (yi > qy) != (yj > qy) && qx < (xj - xi) * (qy - yi) / (yj - yi) + xi {
+                c = !c;
+            }
+            j = i;
+        }
+        c
+    };
+    let border = 1.2 * s;
+    let (x1, y1) = ((x as f32 + 13.0 * s).ceil() as i32 + 2, (y as f32 + 20.5 * s).ceil() as i32 + 2);
+    for py in (y - 2).max(0)..y1.min(height as i32) {
+        for px in (x - 2).max(0)..x1.min(width as i32) {
+            let (cx, cy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let color = if inside(cx, cy) {
+                // Near the edge: outline.
+                let near = [(-border, 0.0), (border, 0.0), (0.0, -border), (0.0, border)].iter().any(|(dx, dy)| !inside(cx + dx, cy + dy));
+                if near { [20, 20, 20, 255] } else { [250, 250, 250, 255] }
+            } else {
+                continue;
+            };
+            let i = (py as usize * width as usize + px as usize) * 4;
+            rgba[i..i + 4].copy_from_slice(&color);
+        }
+    }
 }
 
 // ---- which screen is shared ----
@@ -217,6 +258,10 @@ pub(crate) fn cursor_in_video() -> bool {
 pub struct MonitorInfo {
     pub index: usize,
     pub name: String,
+    /// Position and size on the desktop: pixels on Windows and X11, points on macOS, logical
+    /// pixels on Wayland.
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
     pub primary: bool,
@@ -245,6 +290,8 @@ fn xcap_monitors() -> Vec<MonitorInfo> {
                 .map(|(index, m)| MonitorInfo {
                     index,
                     name: m.name().unwrap_or_else(|_| format!("Screen {}", index + 1)),
+                    x: m.x().unwrap_or(0),
+                    y: m.y().unwrap_or(0),
                     width: m.width().unwrap_or(0),
                     height: m.height().unwrap_or(0),
                     primary: m.is_primary().unwrap_or(false),
@@ -257,16 +304,19 @@ fn xcap_monitors() -> Vec<MonitorInfo> {
 /// Screens that can be shared right now.
 pub fn monitors() -> Vec<MonitorInfo> {
     if test_pattern() {
-        return vec![MonitorInfo { index: 0, name: "Test pattern".into(), width: 1280, height: 720, primary: true }];
+        return vec![MonitorInfo { index: 0, name: "Test pattern".into(), x: 0, y: 0, width: 1280, height: 720, primary: true }];
     }
     #[cfg(target_os = "linux")]
     if portal_capture() {
+        let positions = crate::wayland::screen_positions();
         return crate::wayland::screens()
             .into_iter()
             .enumerate()
             .map(|(index, (w, h))| MonitorInfo {
                 index,
                 name: format!("Screen {}", index + 1),
+                x: positions.get(index).map_or(0, |p| p.0),
+                y: positions.get(index).map_or(0, |p| p.1),
                 width: w,
                 height: h,
                 primary: index == 0,
@@ -472,6 +522,14 @@ impl Capturer {
         // Safe view: private windows are blacked out (window positions are in points on macOS).
         let (window_scale, bars) = if cfg!(target_os = "macos") { (scale, 1.0) } else { (1.0, scale) };
         crate::privacy::mask(&mut data, w, h, mon.x().unwrap_or(0), mon.y().unwrap_or(0), window_scale, bars);
+        // The computer's pointer (window units on macOS are points, like the pointer).
+        if let Some((px, py)) = crate::input::pointer() {
+            let to_px = |v: i32, origin: i32| ((v - origin) as f32 * window_scale).round() as i32;
+            let (ix, iy) = (to_px(px, mon.x().unwrap_or(0)), to_px(py, mon.y().unwrap_or(0)));
+            if ix >= 0 && iy >= 0 && (ix as u32) < w && (iy as u32) < h {
+                draw_pointer(&mut data, w, h, ix, iy, scale);
+            }
+        }
         let hash = quick_hash(&data) ^ ((w as u64) << 32 | h as u64);
         if hash == self.last_hash {
             return Ok(None);

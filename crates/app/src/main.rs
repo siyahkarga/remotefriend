@@ -83,8 +83,6 @@ pub(crate) struct App {
     copied: Option<(String, Instant)>,
     /// History: full network addresses instead of shortened ones.
     show_addresses: bool,
-    /// Wayland, safe view: this computer's user opened RemoteFriends while someone watches.
-    curtain_open: bool,
     /// Settings → Privacy: apps with a window on screen, re-read every few seconds.
     open_apps: (Vec<remote_friend_host::privacy::OpenApp>, Option<Instant>),
     /// The page shown in the main window.
@@ -156,6 +154,10 @@ fn load_icon() -> egui::IconData {
 }
 
 fn main() -> Result<()> {
+    // The session bar's helper process on Wayland (session_bar.rs): the bar alone.
+    if std::env::args().nth(1).as_deref() == Some("--session-bar") {
+        return session_bar::helper_main();
+    }
     remote_friend_common::tls::init_crypto();
     remote_friend_host::init_logging();
 
@@ -227,7 +229,6 @@ fn main() -> Result<()> {
         hide_id: false,
         copied: None,
         show_addresses: false,
-        curtain_open: false,
         open_apps: (Vec::new(), None),
         page: Page::Home,
         confirm_mine: None,
@@ -363,7 +364,7 @@ impl App {
     /// While someone is connected in the safe view the window stays where it is, so this
     /// computer's user sees who is connected, but it is kept out of the shared picture:
     /// excluded from capture (Windows, macOS) and blacked out by the host (macOS, X11). On
-    /// Wayland neither works, so the Home screen shows only who is connected (curtain_ui).
+    /// Wayland neither works; viewers can't use it there either (raw_input_hook).
     fn privacy(&mut self, frame: &eframe::Frame) {
         let n = remote_friend_host::sessions::count();
         // Full view: viewers see everything, RemoteFriends included.
@@ -371,9 +372,6 @@ impl App {
         if hide != self.hidden_from_capture {
             privacy::exclude_from_capture(frame, hide);
             self.hidden_from_capture = hide;
-        }
-        if n == 0 {
-            self.curtain_open = false;
         }
     }
 
@@ -678,6 +676,10 @@ fn mark_welcome_done() {
 /// Start a fresh copy of the app and quit (used to ask for screen permission again).
 fn restart_app() {
     if let Ok(exe) = std::env::current_exe() {
+        // After a package update Linux names the replaced program "… (deleted)": the new file
+        // is at the same path without that suffix.
+        let path = exe.to_string_lossy().to_string();
+        let exe = std::path::PathBuf::from(path.strip_suffix(" (deleted)").unwrap_or(&path));
         let _ = std::process::Command::new(exe).spawn();
     }
     std::process::exit(0);

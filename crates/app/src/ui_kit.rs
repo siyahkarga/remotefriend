@@ -271,6 +271,12 @@ pub(crate) enum Icon {
     Refresh,
     Close,
     Check,
+    /// Show more (a chevron pointing down).
+    More,
+    /// Show less (a chevron pointing up).
+    Less,
+    /// Make small.
+    Minus,
 }
 
 /// Draw `icon` centred in `rect` (it fills about 16×16 points).
@@ -317,6 +323,15 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, 
         }
         Icon::Check => {
             painter.add(egui::Shape::line(vec![at(-6.0, 0.5), at(-2.0, 4.5), at(6.5, -5.0)], Stroke::new(2.0_f32, color)));
+        }
+        Icon::More => {
+            painter.add(egui::Shape::line(vec![at(-5.5, -2.5), at(0.0, 3.0), at(5.5, -2.5)], Stroke::new(1.8_f32, color)));
+        }
+        Icon::Less => {
+            painter.add(egui::Shape::line(vec![at(-5.5, 2.5), at(0.0, -3.0), at(5.5, 2.5)], Stroke::new(1.8_f32, color)));
+        }
+        Icon::Minus => {
+            painter.line_segment([at(-5.5, 0.0), at(5.5, 0.0)], Stroke::new(1.8_f32, color));
         }
     }
 }
@@ -454,4 +469,74 @@ pub(crate) fn link(ui: &mut Ui, text: impl Into<egui::WidgetText>, url: &str) ->
         crate::open_url(url);
     }
     resp
+}
+
+/// "1.4 GB", "230.5 MB", "12 KB".
+pub(crate) fn human_size(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
+        n if n >= 1 << 10 => format!("{} KB", n >> 10),
+        n => format!("{n} B"),
+    }
+}
+
+fn fraction(done: u64, total: u64) -> f32 {
+    if total > 0 { (done as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// A thin progress track (not a button: no text inside, no frame around it).
+fn track(ui: &mut Ui, width: f32, frac: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 6.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 3.0, BORDER);
+    let mut done = rect;
+    done.set_width((rect.width() * frac).max(if frac > 0.0 { 6.0 } else { 0.0 }));
+    ui.painter().rect_filled(done, 3.0, color);
+}
+
+/// A file on its way, the same everywhere: what and how far above a thin track, the sizes
+/// below ("120.3 MB of 267.1 MB · 146.8 MB left"). Returns true when Cancel was clicked.
+pub(crate) fn transfer(ui: &mut Ui, verb: &str, name: &str, done: u64, total: u64, cancel: bool) -> bool {
+    let frac = fraction(done, total);
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(tint(ACCENT, 0.10))
+        .stroke(Stroke::new(1.0_f32, tint(ACCENT, 0.30)))
+        .corner_radius(R_ROW)
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            split(
+                ui,
+                20.0,
+                |ui| {
+                    line(ui, RichText::new(format!("{verb} {name}")).color(TEXT));
+                },
+                |ui| {
+                    if cancel {
+                        clicked = ui.add(quiet("Cancel")).clicked();
+                    }
+                    ui.label(RichText::new(format!("{:.0}%", frac * 100.0)).color(ACCENT).strong().monospace());
+                },
+            );
+            track(ui, ui.available_width(), frac, ACCENT);
+            ui.label(
+                RichText::new(format!("{} of {} · {} left", human_size(done), human_size(total), human_size(total.saturating_sub(done))))
+                    .size(11.5)
+                    .color(MUTED),
+            );
+        });
+    clicked
+}
+
+/// The same, on one line (toolbars, the session bar): a short track and "45% · 120 of 267 MB".
+pub(crate) fn transfer_inline(ui: &mut Ui, arrow: &str, done: u64, total: u64, track_width: f32) -> Response {
+    let frac = fraction(done, total);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(RichText::new(arrow).color(ACCENT));
+        track(ui, track_width, frac, ACCENT);
+        ui.label(RichText::new(format!("{:.0}% · {} of {}", frac * 100.0, human_size(done), human_size(total))).size(12.0).color(MUTED))
+    })
+    .response
 }
