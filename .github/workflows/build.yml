@@ -70,7 +70,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace --all-targets
-      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      # RF_GUI_TESTS: also the tests that open real windows and capture the screen.
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host -p remotefriend
+        env:
+          RF_GUI_TESTS: "1"
       - run: cargo build --locked --release -p remotefriend -p remote-friend-host
       - name: Installer (NSIS)
         shell: pwsh
@@ -105,7 +108,9 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace --all-targets
-      - run: cargo test --locked -p remote-friend-common -p remote-friend-host
+      - run: cargo test --locked -p remote-friend-common -p remote-friend-host -p remotefriend
+        env:
+          RF_GUI_TESTS: "1"
       - name: Universal build (Apple Silicon + Intel)
         run: |
           cargo build --locked --release -p remotefriend -p remote-friend-host --target aarch64-apple-darwin

@@ -260,26 +260,29 @@ pub(crate) fn mask(rgba: &mut [u8], width: u32, height: u32, mon_x: i32, mon_y: 
         *last = Some((Instant::now(), now.clone()));
         before
     };
-    let to_px = |v: i32, origin: i32| ((v - origin) as f32 * scale).round() as i32;
-    let rects = |list: &[Shape]| -> Vec<Rect> {
-        list.iter()
-            .map(|s| Rect {
-                x0: to_px(s.x, mon_x),
-                y0: to_px(s.y, mon_y),
-                x1: to_px(s.x + s.w, mon_x),
-                y1: to_px(s.y + s.h, mon_y),
-                private: s.private,
-                excluded: s.excluded,
-                opaque: s.opaque,
-                keep_top: (s.keep_top as f32 * scale).round() as i32,
-            })
-            .collect()
-    };
     // The picture was taken between the two lists: cover what is private in either.
     if let Some(before) = before.filter(|b| *b != now) {
-        paint(rgba, width, height, &rects(&before));
+        paint(rgba, width, height, &rects(&before, mon_x, mon_y, scale));
     }
-    paint(rgba, width, height, &rects(&now));
+    paint(rgba, width, height, &rects(&now, mon_x, mon_y, scale));
+}
+
+/// Windows in a monitor image's pixels (monitor origin `mon_x`/`mon_y`, `scale` pixels per
+/// window unit).
+fn rects(list: &[Shape], mon_x: i32, mon_y: i32, scale: f32) -> Vec<Rect> {
+    let to_px = |v: i32, origin: i32| ((v - origin) as f32 * scale).round() as i32;
+    list.iter()
+        .map(|s| Rect {
+            x0: to_px(s.x, mon_x),
+            y0: to_px(s.y, mon_y),
+            x1: to_px(s.x + s.w, mon_x),
+            y1: to_px(s.y + s.h, mon_y),
+            private: s.private,
+            excluded: s.excluded,
+            opaque: s.opaque,
+            keep_top: (s.keep_top as f32 * scale).round() as i32,
+        })
+        .collect()
 }
 
 /// A window in image pixels.
@@ -435,5 +438,137 @@ mod tests {
         assert!(!recent(&REMOTE_POINTER));
         remote_input(&InputEvent::MouseMove { x: 1, y: 1 }, false);
         assert!(!recent(&REMOTE_POINTER));
+    }
+}
+
+/// On a real desktop (CI sets RF_GUI_TESTS=1 on its Windows and macOS machines): other apps'
+/// windows are found, a hidden app's window is blacked out in a captured picture and shown in
+/// the Everything view, a window kept out of captures is recognised, the pointer can be read.
+#[cfg(all(test, any(windows, target_os = "macos")))]
+mod gui {
+    use super::*;
+    use crate::winlist::Win;
+
+    fn enabled() -> bool {
+        std::env::var("RF_GUI_TESTS").is_ok_and(|v| v == "1")
+    }
+
+    fn wait_for(what: &str, find: impl Fn(&Win) -> bool) -> Win {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let list = crate::winlist::list();
+            if let Some(w) = list.iter().find(|w| find(w)) {
+                return w.clone();
+            }
+            let seen: Vec<(String, String)> = list.iter().map(|w| (w.app.clone(), w.title.clone())).collect();
+            assert!(Instant::now() < deadline, "no {what} window among {seen:?}");
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    /// Capture the monitor holding `w`, mask it like a frame, and return the share of `w`'s
+    /// area that was blacked out.
+    #[cfg(windows)]
+    fn covered_share(w: &Win, patterns: &[String], full: bool) -> f32 {
+        let (cx, cy) = (w.x + w.w / 2, w.y + w.h / 2);
+        let mon = xcap::Monitor::all()
+            .expect("monitors")
+            .into_iter()
+            .find(|m| {
+                let (mx, my) = (m.x().unwrap_or(0), m.y().unwrap_or(0));
+                let (mw, mh) = (m.width().unwrap_or(0) as i32, m.height().unwrap_or(0) as i32);
+                cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
+            })
+            .expect("a monitor showing the window");
+        let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
+        let img = mon.capture_image().expect("screen capture");
+        let (iw, ih) = (img.width(), img.height());
+        let mut data = img.into_raw();
+        let list = shapes(&crate::winlist::list(), patterns, 1.0, full);
+        paint(&mut data, iw, ih, &rects(&list, mx, my, 1.0));
+        let (mut covered, mut total) = (0u32, 0u32);
+        for y in (w.y - my).max(0)..(w.y + w.h - my).min(ih as i32) {
+            for x in (w.x - mx).max(0)..(w.x + w.w - mx).min(iw as i32) {
+                let i = (y as usize * iw as usize + x as usize) * 4;
+                total += 1;
+                if data[i..i + 3] == [24, 24, 28] {
+                    covered += 1;
+                }
+            }
+        }
+        covered as f32 / total.max(1) as f32
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_real_windows() {
+        if !enabled() {
+            return;
+        }
+        // 1. A hidden app (Notepad here) is blacked out in the safe view, shown in Everything.
+        let mut notepad = std::process::Command::new("notepad.exe").spawn().expect("notepad");
+        let w = wait_for("Notepad", |w| w.app.to_lowercase().contains("notepad") || w.title.to_lowercase().contains("notepad"));
+        std::thread::sleep(Duration::from_millis(800));
+        let patterns = vec!["notepad".to_string()];
+        let safe = covered_share(&w, &patterns, false);
+        let everything = covered_share(&w, &patterns, true);
+        let _ = notepad.kill();
+        eprintln!("Notepad {:?}: covered {safe:.2} in the safe view, {everything:.2} in Everything", (w.x, w.y, w.w, w.h));
+        assert!(safe > 0.5, "only {safe:.2} of Notepad's window was blacked out in the safe view");
+        assert!(everything < 0.05, "Everything must show Notepad ({everything:.2} covered)");
+
+        // 2. The desktop and the taskbar are never hidden by the name of their app.
+        for s in crate::winlist::list().iter().filter(|w| w.shell) {
+            let shape = shapes(std::slice::from_ref(s), &[s.app.to_lowercase()], 1.0, false);
+            assert!(!shape[0].private, "the shell window {s:?} would be blacked out");
+        }
+
+        // 3. A window its app keeps out of screen captures (like Signal's Screen security).
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class Wda { [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr h, uint a); }'
+$f = New-Object System.Windows.Forms.Form
+$f.Text = 'RF test hidden from capture'
+$f.Add_Shown({ [void][Wda]::SetWindowDisplayAffinity($f.Handle, 0x11) })
+[System.Windows.Forms.Application]::Run($f)
+"#;
+        let mut ps = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .spawn()
+            .expect("powershell");
+        wait_for("self-hiding test", |w| w.title.contains("RF test hidden from capture"));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut excluded = false;
+        while !excluded && Instant::now() < deadline {
+            excluded = crate::winlist::list().iter().any(|w| w.title.contains("RF test hidden from capture") && w.excluded);
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let _ = ps.kill();
+        assert!(excluded, "a window kept out of captures was not recognised");
+
+        // 4. The pointer: where we put it is where it is read.
+        assert!(crate::input::pointer().is_some(), "the pointer position can't be read");
+        // SAFETY: plain Win32 call with integer coordinates.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(123, 145) }.expect("SetCursorPos");
+        assert_eq!(crate::input::pointer(), Some((123, 145)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_real_windows() {
+        if !enabled() {
+            return;
+        }
+        // Another app's window is found by its app name (no Screen Recording permission needed)
+        // and would be blacked out; the pointer can be read.
+        let file = std::env::temp_dir().join("rf-gui-test.txt");
+        std::fs::write(&file, "RemoteFriends test").expect("test file");
+        let _ = std::process::Command::new("open").args(["-a", "TextEdit"]).arg(&file).status();
+        let w = wait_for("TextEdit", |w| w.app == "TextEdit");
+        let _ = std::process::Command::new("osascript").args(["-e", "quit app \"TextEdit\""]).status();
+        let shape = shapes(&[w.clone()], &["textedit".to_string()], 1.0, false);
+        assert!(shape[0].private, "TextEdit {w:?} would not be blacked out");
+        assert!(shapes(&[w], &["textedit".to_string()], 1.0, true)[0].private == false);
+        assert!(crate::input::pointer().is_some(), "the pointer position can't be read");
     }
 }
