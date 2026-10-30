@@ -21,6 +21,7 @@ mod ui_home;
 mod ui_kit;
 mod ui_pages;
 mod update;
+mod view_settings;
 mod viewer;
 mod welcome;
 
@@ -129,6 +130,12 @@ pub(crate) struct App {
     narrow_tab: u8,
     /// Play the remote computer's sound in the viewer.
     sound_on: bool,
+    /// Viewer picture size: None = fit the window, otherwise picture pixels per screen pixel.
+    view_zoom: Option<f32>,
+    /// The viewer's top bar is hidden (a small button brings it back).
+    bar_hidden: bool,
+    /// Copied text goes between the computers (when the computer's user allows it).
+    clip_share: bool,
     /// Closing was requested while remote access is on: ask first.
     close_confirm: bool,
     /// The user confirmed closing.
@@ -265,6 +272,9 @@ fn main() -> Result<()> {
         logo: None,
         narrow_tab: 0,
         sound_on: true,
+        view_zoom: None,
+        bar_hidden: false,
+        clip_share: true,
         close_confirm: false,
         allow_close: false,
         hidden_from_capture: false,
@@ -483,6 +493,7 @@ impl App {
         self.screens_offered = false;
         self.screens_pending = None;
         self.screens_note = None;
+        self.bar_hidden = false;
         self.screen_tex = None;
         self.shared = Some(shared);
         self.tx_out = Some(tx_out);

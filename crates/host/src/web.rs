@@ -840,7 +840,7 @@ pub(crate) fn welcome_json(jpeg: bool, issued: Option<crate::core::Issued>, hand
         // The pointer is already part of the picture: the viewer doesn't draw its own.
         "cursor": video::cursor_in_video(),
         "perms": handle.perms().to_json(handle.blocked()),
-        "monitors": video::monitors_json(),
+        "monitors": video::monitors_json(handle.access == crate::sessions::Access::Mine),
         // Safe view: some windows (RemoteFriends, private apps) are hidden from viewers.
         "safe": !crate::privacy::full_view(),
     })

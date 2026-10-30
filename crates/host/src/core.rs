@@ -367,7 +367,7 @@ impl Core {
                 Err(_) => std::future::pending().await,
             },
             r = self.monitors.changed() => match r {
-                Ok(()) => Event::Send(crate::video::monitors_json().to_string()),
+                Ok(()) => Event::Send(crate::video::monitors_json(self.is_mine()).to_string()),
                 Err(_) => std::future::pending().await,
             },
             _ = kill.notified() => Event::Kill,
@@ -591,7 +591,8 @@ impl Core {
                     self.on_monitor_request(i as usize);
                 }
             }
-            Some("monitors") => self.send(crate::video::monitors_json()),
+            Some("monitors") => self.send(crate::video::monitors_json(self.is_mine())),
+            Some("share_screens") => self.on_share_request(),
             Some("switch") => self.on_switch(&v),
             Some("file_cancel") => {
                 let id = v.get("id").and_then(|n| n.as_u64()).unwrap_or(0);
@@ -799,7 +800,8 @@ impl Core {
         if index == crate::video::current_monitor() {
             return;
         }
-        if crate::video::viewer_may_switch(index) && self.handle.control_allowed() {
+        // One of this computer's own devices may see every screen without asking anyone.
+        if self.is_mine() || (crate::video::viewer_may_switch(index) && self.handle.control_allowed()) {
             crate::video::select_monitor(index);
             return;
         }
@@ -827,6 +829,40 @@ impl Core {
             } else {
                 let _ = ctrl.send(serde_json::json!({"t": "monitor_no", "i": index}).to_string()).await;
                 // No new question right after a "no": asking again and again is not possible.
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+            asking.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// The viewer is one of this computer's own devices ("My devices").
+    fn is_mine(&self) -> bool {
+        self.handle.access == crate::sessions::Access::Mine
+    }
+
+    /// The viewer wants a screen the desktop doesn't share yet: {t:"share_screens"}. On Wayland
+    /// only the screens picked in the desktop's sharing dialog can be shown, so this computer's
+    /// user is asked whether to open that dialog again — also for its own devices: someone has to
+    /// be there to tick the screens, or the computer would wait in that dialog unshared. The app answers and restarts for it
+    /// (everyone connects again); the viewer hears {t:"share_ok"} or {t:"share_no"} first.
+    fn on_share_request(&mut self) {
+        use std::sync::atomic::Ordering;
+        let shared = crate::video::monitors().len();
+        let unshared = crate::video::unshared_screens().len();
+        if unshared == 0 || self.screen_asking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        crate::status::notice(format!("{} asks to see your other screens", self.label));
+        let (label, ctrl, asking) = (self.label.clone(), self.ctrl.clone(), self.screen_asking.clone());
+        tokio::spawn(async move {
+            let yes = tokio::task::spawn_blocking(move || {
+                let kind = crate::status::PromptKind::ShareScreens { label, shared, total: shared + unshared };
+                matches!(crate::status::ask_ui(kind, Duration::from_secs(30)), Some(crate::status::Answer::Screen(true)))
+            })
+            .await
+            .unwrap_or(false);
+            let _ = ctrl.send(serde_json::json!({"t": if yes { "share_ok" } else { "share_no" }}).to_string()).await;
+            if !yes {
                 tokio::time::sleep(Duration::from_secs(20)).await;
             }
             asking.store(false, Ordering::SeqCst);

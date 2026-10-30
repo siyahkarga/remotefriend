@@ -93,6 +93,7 @@
   .scr.on { border:2px solid #5b84ff; background:rgba(91,132,255,.28); }
   .scr.on small { color:var(--bar-txt); }
   .scr.ask { border-style:dashed; border-color:#f5a524; }
+  .scr.off { border-style:dotted; background:rgba(255,255,255,.02); color:var(--bar-dim); }
   #scrNote.warn { color:#f5a524; }
   .keys { display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; margin-bottom:12px; }
   .key { padding:10px 4px; border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:10px; cursor:pointer; font-size:13.5px; }
@@ -700,6 +701,8 @@ function handleJson(m) {
     case 'p2p_off': stopP2P(); break;
     case 'monitors': { const before = screenCurrent; applyMonitors(m); if (m.current !== before) toast('Showing ' + screenName(m.current), 1500); break; }
     case 'monitor_no': screenRefused(); toast('The computer\'s user kept the current screen.', 3000); break;
+    case 'share_no': shareAnswer(false); break;
+    case 'share_ok': shareAnswer(true); toast('The computer\'s user is sharing more screens: RemoteFriends restarts there.', 4000); break;
     case 'file_progress': if (m.total && !$('upBox').hidden) showXfer('up', 'Sending', uploadName, m.got, m.total); break;
     case 'welcome': onWelcome(m); break;
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
@@ -1371,11 +1374,16 @@ function applyPerms(p, announce) {
 // Several screens on the computer: choose which one to see. The choice opens once by itself when
 // a computer with several screens connects, and from the toolbar any time later. Screens open to
 // this viewer switch at once (with mouse & keyboard allowed); others ask the computer's user.
+// Screens that computer's desktop doesn't share (Wayland: not picked in its sharing dialog) are
+// drawn too; asking for one asks its user to share more screens.
 let screenList = [], screenCurrent = 0, screenOffered = false, screenPending = null, screenNote = '', screenTimer = 0;
 function screenName(i) { const s = screenList.find(x => x.i === i); return s ? s.name : 'screen ' + (i + 1); }
-function screenDirect(s) { return s.open !== false && perms.control; }
+function screenDirect(s) { return s.shared !== false && s.open !== false && perms.control; }
 function applyMonitors(m) {
-  screenList = Array.isArray(m.list) ? m.list : [];
+  screenList = Array.isArray(m.list) ? m.list.slice() : [];
+  for (const u of Array.isArray(m.unshared) ? m.unshared : []) {
+    if (!screenList.some(s => s.i === u.i)) screenList.push({ ...u, name: 'Screen ' + (u.i + 1), open: false, shared: false });
+  }
   screenCurrent = m.current || 0;
   $('scrBtn').hidden = screenList.length < 2;
   if (screenPending !== null && screenCurrent === screenPending) {
@@ -1394,11 +1402,18 @@ function screenRefused() {
   screenPending = null; clearTimeout(screenTimer);
   if (!$('scrSheet').hidden) renderScreens();
 }
+function shareAnswer(yes) {
+  if (screenPending === null) return;
+  screenNote = yes ? 'The computer\'s user is sharing more screens: RemoteFriends restarts there. Connect again in a moment.'
+    : 'The computer\'s user keeps sharing only the screens you see.';
+  screenPending = null; clearTimeout(screenTimer);
+  if (!$('scrSheet').hidden) renderScreens();
+}
 function pickScreen(i) {
   if (i === screenCurrent) { closeSheets(); return; }
   if (screenPending !== null) return; // one question at a time
   const s = screenList.find(x => x.i === i);
-  send({ t: 'monitor', i });
+  send(s && s.shared === false ? { t: 'share_screens' } : { t: 'monitor', i });
   screenNote = '';
   if (s && screenDirect(s)) { closeSheets(); return; }
   screenPending = i;
@@ -1412,14 +1427,16 @@ function renderScreens() {
   const map = $('scrMap'); map.innerHTML = '';
   $('scrIntro').textContent = 'This computer has ' + screenList.length + ' screens. Which one do you want to see?';
   if (!screenList.length) return;
-  // Computers before v0.15 send no places: side by side then.
-  const placed = screenList.some(s => s.x || s.y);
-  let nx = 0;
-  const boxes = screenList.map(s => {
-    const w = Math.max(1, s.w || 1600), h = Math.max(1, s.h || 900);
-    const b = placed ? { x: s.x || 0, y: s.y || 0, w, h } : { x: nx, y: 0, w, h };
-    nx += w; return b;
-  });
+  // Computers before v0.15 send no places: side by side then, and also when places overlap
+  // (the desktop and its sharing dialog may count in different units).
+  const size = s => ({ w: Math.max(1, s.w || 1600), h: Math.max(1, s.h || 900) });
+  let boxes = screenList.map(s => ({ x: s.x || 0, y: s.y || 0, ...size(s) }));
+  const overlap = boxes.some((a, n) => boxes.slice(n + 1).some(b =>
+    Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 1 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 1));
+  if (!screenList.some(s => s.x || s.y) || overlap) {
+    let nx = 0;
+    boxes = screenList.map(s => { const b = { x: nx, y: 0, ...size(s) }; nx += b.w; return b; });
+  }
   const minX = Math.min(...boxes.map(b => b.x)), minY = Math.min(...boxes.map(b => b.y));
   const maxX = Math.max(...boxes.map(b => b.x + b.w)), maxY = Math.max(...boxes.map(b => b.y + b.h));
   const roomW = map.clientWidth || 380, roomH = 170;
@@ -1429,14 +1446,16 @@ function renderScreens() {
   screenList.forEach((s, n) => {
     const b = boxes[n], el = document.createElement('button');
     const current = s.i === screenCurrent, asking = s.i === screenPending, direct = screenDirect(s);
-    el.className = 'scr' + (current ? ' on' : '') + (!current && (!direct || asking) ? ' ask' : '');
+    const off = s.shared === false && !asking;
+    el.className = 'scr' + (current ? ' on' : '') + (off ? ' off' : !current && (!direct || asking) ? ' ask' : '');
     el.style.left = (offX + (b.x - minX) * k + 3) + 'px';
     el.style.top = ((b.y - minY) * k + 3) + 'px';
     el.style.width = Math.max(30, b.w * k - 6) + 'px';
     el.style.height = Math.max(30, b.h * k - 6) + 'px';
-    const tag = current ? 'shown now' : asking ? 'asking…' : direct ? (s.w + '×' + s.h) : 'asks first';
+    const tag = current ? 'shown now' : asking ? 'asking…' : off ? 'not shared' : direct ? (s.w + '×' + s.h) : 'asks first';
     el.innerHTML = (s.primary ? '<i>main</i>' : '') + '<b>' + (s.i + 1) + '</b><small>' + tag + '</small>';
-    el.title = s.name + (s.w ? ' · ' + s.w + '×' + s.h : '') + (current ? ' — shown now' : direct ? '' : ' — the computer\'s user is asked first');
+    el.title = s.name + (s.w ? ' · ' + s.w + '×' + s.h : '') + (current ? ' — shown now' : off ? ' — not shared: the computer\'s user is asked to share it'
+      : direct ? '' : ' — the computer\'s user is asked first');
     el.onclick = () => pickScreen(s.i);
     map.appendChild(el);
   });
@@ -1444,6 +1463,7 @@ function renderScreens() {
   note.classList.toggle('warn', !!screenNote && screenPending === null);
   note.textContent = screenPending !== null ? 'Asked the computer\'s user to show screen ' + (screenPending + 1) + '…'
     : screenNote ? screenNote
+    : screenList.some(s => s.shared === false) ? '“Not shared”: that computer\'s desktop gives RemoteFriends only the screens its user picked. Asking for one asks them to share more; RemoteFriends restarts there and you connect again.'
     : perms.control ? '' : 'Without mouse & keyboard permission, the computer\'s user is asked before the screen changes.';
 }
 let clipPending = '';

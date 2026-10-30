@@ -327,6 +327,66 @@ fn xcap_monitors() -> Vec<MonitorInfo> {
         .unwrap_or_default()
 }
 
+/// Debug builds: RF_TEST_UNSHARED=1..3 adds that many screens the "desktop" did not share
+/// (the Wayland case), placed after the RF_TEST_MONITORS ones.
+fn test_unshared() -> Vec<MonitorInfo> {
+    let n = if cfg!(debug_assertions) {
+        std::env::var("RF_TEST_UNSHARED").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0)
+    } else {
+        0
+    };
+    let shared = test_screens().len();
+    let layout = [(0, 0, 1280, 720), (1280, -180, 1920, 1080), (-1024, 0, 1024, 768), (0, 720, 1280, 720)];
+    layout
+        .iter()
+        .enumerate()
+        .skip(shared)
+        .take(n)
+        .map(|(index, &(x, y, width, height))| MonitorInfo {
+            index,
+            name: format!("Test screen {}", index + 1),
+            x,
+            y,
+            width,
+            height,
+            primary: false,
+        })
+        .collect()
+}
+
+/// Screens of this desktop that viewers can't be shown yet: on Wayland only those picked in the
+/// desktop's sharing dialog are given to RemoteFriends. Read through XWayland (the portal names
+/// only what it gave), at most every 5 s. Indexes follow those of `monitors()`.
+pub fn unshared_screens() -> Vec<MonitorInfo> {
+    if test_pattern() {
+        return test_unshared();
+    }
+    #[cfg(target_os = "linux")]
+    if portal_capture() {
+        static CACHE: Mutex<Option<(Instant, Vec<MonitorInfo>)>> = Mutex::new(None);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, list)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(5) {
+                return list.clone();
+            }
+        }
+        let granted = crate::wayland::screen_positions();
+        let mut list = Vec::new();
+        if !granted.is_empty() {
+            let desktop = xcap_monitors();
+            let spare = desktop.len().saturating_sub(granted.len());
+            list = desktop.into_iter().filter(|m| !granted.contains(&(m.x, m.y))).collect();
+            list.truncate(spare);
+            for (k, m) in list.iter_mut().enumerate() {
+                m.index = granted.len() + k;
+            }
+        }
+        *cache = Some((Instant::now(), list.clone()));
+        return list;
+    }
+    Vec::new()
+}
+
 /// Screens that can be shared right now.
 pub fn monitors() -> Vec<MonitorInfo> {
     if test_pattern() {
@@ -429,7 +489,8 @@ pub fn set_viewer_may_switch(index: usize, allowed: bool) {
 }
 
 /// The monitor list and current choice, as sent to viewers.
-pub(crate) fn monitors_json() -> serde_json::Value {
+/// `mine`: the viewer is one of this computer's own devices; every shared screen is open to it.
+pub(crate) fn monitors_json(mine: bool) -> serde_json::Value {
     let list: Vec<serde_json::Value> = monitors()
         .iter()
         .map(|m| {
@@ -438,11 +499,16 @@ pub(crate) fn monitors_json() -> serde_json::Value {
                 // Where it sits on the desktop, so viewers can draw the screens as arranged.
                 "x": m.x, "y": m.y,
                 // false: switching there needs the OK of this computer's user.
-                "open": viewer_may_switch(m.index),
+                "open": mine || viewer_may_switch(m.index),
             })
         })
         .collect();
-    serde_json::json!({"t": "monitors", "list": list, "current": current_monitor()})
+    // Screens the desktop didn't share (Wayland): viewers may ask for them.
+    let unshared: Vec<serde_json::Value> = unshared_screens()
+        .iter()
+        .map(|m| serde_json::json!({"i": m.index, "name": m.name, "w": m.width, "h": m.height, "x": m.x, "y": m.y}))
+        .collect();
+    serde_json::json!({"t": "monitors", "list": list, "current": current_monitor(), "unshared": unshared})
 }
 
 /// Most recent captured frame (for the preview in the app).

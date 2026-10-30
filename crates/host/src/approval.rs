@@ -119,6 +119,11 @@ pub(crate) fn ask(req: &Request) -> Decision {
     if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").is_ok_and(|v| v == "trust") {
         return Decision::Trust;
     }
+    // ...and one of "My devices" (from its next connection on).
+    #[cfg(debug_assertions)]
+    if std::env::var("REMOTE_FRIEND_AUTO_ACCEPT").is_ok_and(|v| v == "mine") {
+        return Decision::Mine;
+    }
     notify_desktop(req);
     let decision = if status::ui_prompts() {
         match status::ask_ui(PromptKind::Connection(req.clone()), ASK_TIMEOUT) {

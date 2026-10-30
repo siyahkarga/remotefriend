@@ -93,11 +93,14 @@ The RemoteFriends window shows:
 - **Screens** (with several monitors): which one viewers see now (**Show** another one at any
   time), and a switch per screen: **on** = viewers with mouse & keyboard may switch to it by
   themselves, **off** = they can only ask, and you answer *Show* or *Keep the current screen*.
+  Your own devices (*My devices*) always switch without asking.
   Viewers (app and phone page) get a picture of the screens as they are arranged — places and
   sizes only — when they connect, and from **Screen** in their bar any time later; they tap the
-  one they want, and those that need asking say so. On Wayland, pick all
-  screens you want to offer in the desktop's sharing dialog (*Choose…*). A live preview shows
-  what viewers see.
+  one they want, and those that need asking say so. On Wayland the desktop gives RemoteFriends
+  only the screens picked in its sharing dialog (it remembers that choice): the others are
+  listed as *not shared*, and **Share all screens…** — or a viewer asking for one, after your
+  OK — restarts RemoteFriends so the dialog asks again; tick every screen there. A live preview
+  shows what viewers see.
 - **Connected now**: every viewer with its device name, since when, how far it is trusted, and
   buttons for what it may do — **Control** (mouse & keyboard), **Sound**, **Files**,
   **Clipboard** — plus **Disconnect** and, for another RemoteFriends app, **Switch sides** (you
@@ -139,9 +142,14 @@ public address.
 
 ## The desktop viewer
 
-Toolbar: Disconnect, sound on/off, **Keys** (Ctrl+Alt+Del, Win/⌘, Alt+Tab, Alt+F4, Task
-Manager, lock, Print Screen…), quality, **Screen** (when the computer has several), full screen,
-**Files** and **Switch sides**. The file panel says what the computer lets you reach, then has
+Toolbar: Disconnect, **Screen** (when the computer has several), **Keys** (Ctrl+Alt+Del, Win/⌘,
+Alt+Tab, Alt+F4, Task Manager, lock, Print Screen…), sound on/off, **Files**, **Switch sides**,
+**⚙ Settings**, full screen, and ▲ to hide the bar (a small ▼ at the top brings it back).
+*Settings* holds the picture quality (Fast / Balanced / Sharp), the size (fit the window, or
+100–200% with scroll bars), sharing the clipboard on or off, what the computer's user allows
+(mouse & keyboard, sound, files, clipboard) and how the connection runs (direct or through the
+server, picture size, fps, delay). Clicks on a menu or window over the picture stay on this
+computer. The file panel says what the computer lets you reach, then has
 **Send to that computer** (with where the file goes) and **Get from that computer** (its folders;
 downloads are saved to your Downloads/RemoteFriend). The phone page has the same file panel.
 

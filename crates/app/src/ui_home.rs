@@ -607,10 +607,12 @@ impl App {
             self.monitors = (remote_friend_host::monitors(), Some(Instant::now()));
         }
         let monitors = self.monitors.0.clone();
-        if !watching && monitors.len() < 2 {
+        // Wayland: screens not picked in the desktop's sharing dialog (viewers can't see them).
+        let unshared = remote_friend_host::unshared_screens();
+        if !watching && monitors.len() < 2 && unshared.is_empty() {
             return;
         }
-        if monitors.len() > 1 {
+        if monitors.len() > 1 || !unshared.is_empty() {
             let current = remote_friend_host::current_monitor();
             kit::section_header(ui, "SCREENS", |ui| {
                 #[cfg(target_os = "linux")]
@@ -664,7 +666,43 @@ impl App {
                     self.monitors.1 = None;
                 }
             }
-            kit::note(ui, "Switch on: viewers may change to that screen by themselves. Off: they have to ask you.");
+            for m in &unshared {
+                let detail = format!(
+                    "{}{}×{}",
+                    if m.name.starts_with("Screen ") { String::new() } else { format!("{} · ", m.name) },
+                    m.width,
+                    m.height
+                );
+                kit::row(
+                    ui,
+                    |ui| kit::row_text(ui, &format!("🖥  Screen {}", m.index + 1), &detail),
+                    |ui| {
+                        kit::badge(ui, "not shared", WARN);
+                    },
+                );
+            }
+            if !unshared.is_empty() {
+                let total = monitors.len() + unshared.len();
+                kit::note(
+                    ui,
+                    format!(
+                        "Viewers can see {} of your {total} screens: the desktop gives RemoteFriends only those picked in its sharing dialog.",
+                        monitors.len()
+                    ),
+                );
+                #[cfg(target_os = "linux")]
+                if ui
+                    .add(kit::secondary("Share all screens…"))
+                    .on_hover_text("RemoteFriends restarts and the desktop asks again: tick every screen there")
+                    .clicked()
+                    && !remote_friend_host::retry_screen_permission()
+                {
+                    restart_app();
+                }
+            }
+            if monitors.len() > 1 {
+                kit::note(ui, "Switch on: viewers may change to that screen by themselves. Off: they have to ask you. Your own devices (My devices) always may.");
+            }
         }
         if watching {
             if self.preview_at.is_none_or(|t| t.elapsed() > Duration::from_millis(900)) {

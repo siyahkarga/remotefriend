@@ -18,10 +18,21 @@ impl App {
             (s.texture.take(), s.status.clone(), s.host_w, s.host_h, s.fps)
         };
         self.viewer_events(ctx, &shared);
-        let (perms, banner, upload, quality, rtt, monitors, monitor, direct, cursor_in_video) = {
+        let (perms, banner, upload, quality, rtt, monitors, monitor, direct, cursor_in_video, host_os) = {
             let s = shared.lock().unwrap();
             let banner = s.banner.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 6).map(|(b, _)| b.clone());
-            (s.perms, banner, s.upload.clone(), s.quality.clone(), s.rtt, s.monitors.clone(), s.monitor, s.direct, s.cursor_in_video)
+            (
+                s.perms,
+                banner,
+                s.upload.clone(),
+                s.quality.clone(),
+                s.rtt,
+                s.monitors.clone(),
+                s.monitor,
+                s.direct,
+                s.cursor_in_video,
+                s.host_os.clone(),
+            )
         };
 
         // Update the GPU texture only when a new frame arrived.
@@ -58,101 +69,124 @@ impl App {
         }
         self.screen_answers(&shared, monitor);
         if self.screens_open {
-            if let Some(i) = self.screen_picker(ctx, &monitors, monitor, perms.control) {
-                self.send_control(serde_json::json!({"t": "monitor", "i": i}));
+            match self.screen_picker(ctx, &monitors, monitor, perms.control) {
+                Some((i, true)) => self.send_control(serde_json::json!({"t": "monitor", "i": i})),
+                Some((_, false)) => self.send_control(serde_json::json!({"t": "share_screens"})),
+                None => {}
             }
         }
 
         let title = if self.current_name.is_empty() { remote_friend_common::format_id(&self.current_addr) } else { self.current_name.clone() };
-        egui::TopBottomPanel::top("bar")
-            .frame(egui::Frame::new().fill(kit::SIDEBAR).inner_margin(egui::Margin::symmetric(12, 8)))
-            .show_separator_line(false)
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let disconnect = kit::danger_solid("✖  Disconnect");
-                    if ui.add(disconnect).on_hover_text("End the session").clicked() {
-                        self.send_control(serde_json::json!({"t": "bye"}));
-                        self.disconnect();
-                        return;
-                    }
-                    ui.add_space(6.0);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new(&title).color(kit::TEXT).strong());
-                        let rtt = if rtt > 0 { format!(" · {rtt} ms") } else { String::new() };
-                        ui.label(RichText::new(format!("{status} · {hw}×{hh} · {fps:.0} fps{rtt}")).size(11.5).color(kit::MUTED));
-                    });
-                    if direct {
-                        kit::badge(ui, "direct", kit::OK)
-                            .on_hover_text("Peer-to-peer: the data goes straight between the devices, not through the server");
-                    } else {
-                        kit::badge(ui, "via server", kit::MUTED).on_hover_text(
-                            "End-to-end encrypted through the server (a direct path was not possible or is still being tried)",
-                        );
-                    }
-                    ui.add_space(10.0);
-                    if monitors.len() > 1 {
-                        let label = format!("🖥 Screen {} of {}", monitor + 1, monitors.len());
-                        if ui.add(kit::secondary(&label)).on_hover_text("Choose which screen to see").clicked() {
-                            self.screens_open = !self.screens_open;
-                            self.screens_note = None;
+        // Hidden bar: a small button at the top brings it back (clicks on it stay here).
+        if self.bar_hidden {
+            egui::Area::new(egui::Id::new("bar_handle")).anchor(egui::Align2::CENTER_TOP, [0.0, 2.0]).show(ctx, |ui| {
+                if ui.add(kit::secondary("⏷")).on_hover_text("Show the bar").clicked() {
+                    self.bar_hidden = false;
+                }
+            });
+        }
+        let facts = crate::view_settings::Facts {
+            quality: quality.clone(),
+            perms,
+            direct,
+            width: hw,
+            height: hh,
+            fps,
+            rtt,
+            os: host_os,
+        };
+        if !self.bar_hidden {
+            egui::TopBottomPanel::top("bar")
+                .frame(egui::Frame::new().fill(kit::SIDEBAR).inner_margin(egui::Margin::symmetric(12, 8)))
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let disconnect = kit::danger_solid("✖  Disconnect");
+                        if ui.add(disconnect).on_hover_text("End the session").clicked() {
+                            self.send_control(serde_json::json!({"t": "bye"}));
+                            self.disconnect();
+                            return;
                         }
-                    }
-                    ui.add_enabled_ui(perms.control, |ui| {
-                        ui.menu_button("⌨ Keys", |ui| self.keys_menu(ui));
-                    });
-                    ui.menu_button(format!("Quality: {}", quality_label(&quality)), |ui| {
-                        for (p, label) in [("fast", "Fast (smooth on slow networks)"), ("balanced", "Balanced"), ("sharp", "Sharp (more data)")] {
-                            if ui.selectable_label(quality == p, label).clicked() {
-                                self.send_control(serde_json::json!({"t": "quality", "p": p}));
-                                ui.close();
+                        ui.add_space(6.0);
+                        // A fixed width: the buttons after it must not move while the numbers change.
+                        ui.vertical(|ui| {
+                            ui.set_width(220.0);
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(egui::Label::new(RichText::new(&title).color(kit::TEXT).strong()).truncate());
+                            let rtt = if rtt > 0 { format!(" · {rtt} ms") } else { String::new() };
+                            let line = format!("{status} · {hw}×{hh} · {fps:.0} fps{rtt}");
+                            ui.add(egui::Label::new(RichText::new(&line).size(11.5).color(kit::MUTED)).truncate()).on_hover_text(line);
+                        });
+                        if direct {
+                            kit::badge(ui, "direct", kit::OK)
+                                .on_hover_text("Peer-to-peer: the data goes straight between the devices, not through the server");
+                        } else {
+                            kit::badge(ui, "via server", kit::MUTED).on_hover_text(
+                                "End-to-end encrypted through the server (a direct path was not possible or is still being tried)",
+                            );
+                        }
+                        ui.add_space(10.0);
+                        if monitors.len() > 1 {
+                            let label = format!("🖥 Screen {} of {}", monitor + 1, monitors.len());
+                            if ui.add(kit::secondary(&label)).on_hover_text("Choose which screen to see").clicked() {
+                                self.screens_open = !self.screens_open;
+                                self.screens_note = None;
+                            }
+                        }
+                        ui.add_enabled_ui(perms.control, |ui| {
+                            ui.menu_button("⌨ Keys", |ui| self.keys_menu(ui));
+                        });
+                        let sound_label = if self.sound_on { "🔊" } else { "🔇" };
+                        if ui
+                            .add_enabled(perms.sound, kit::secondary(sound_label))
+                            .on_hover_text(if self.sound_on { "Sound on (click to mute)" } else { "Sound off (click to play)" })
+                            .clicked()
+                        {
+                            self.sound_on = !self.sound_on;
+                            shared.lock().unwrap().sound = self.sound_on;
+                            self.send_control(serde_json::json!({"t": "audio", "on": self.sound_on}));
+                        }
+                        if ui
+                            .add_enabled(perms.files, kit::secondary("📁 Files"))
+                            .on_hover_text("Send files to the remote computer, or browse and download its files")
+                            .clicked()
+                        {
+                            if self.files_open {
+                                self.files_open = false;
+                            } else {
+                                self.open_files();
+                            }
+                        }
+                        let me = remote_friend_host::snapshot();
+                        if me.online
+                            && !self.switch_pending
+                            && ui
+                                .add(kit::secondary("⇄ Switch sides"))
+                                .on_hover_text("Let the remote computer control this one instead (they are asked first)")
+                                .clicked()
+                        {
+                            self.offer_switch(false);
+                        }
+                        ui.menu_button("⚙ Settings", |ui| self.settings_menu(ui, &facts))
+                            .response
+                            .on_hover_text(format!("Quality ({}), size, clipboard, permissions, connection", quality_label(&quality)));
+                        let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        if ui.add(kit::secondary("⛶")).on_hover_text(if full { "Exit full screen" } else { "Full screen" }).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+                        }
+                        if ui.add(kit::secondary("⏶")).on_hover_text("Hide this bar (the small button at the top brings it back)").clicked() {
+                            self.bar_hidden = true;
+                        }
+                        if let Some((name, got, total)) = &upload {
+                            kit::transfer_inline(ui, "⬆", *got, *total, 90.0).on_hover_text(format!("Sending {name}"));
+                            if ui.add(kit::quiet("Cancel")).clicked() {
+                                shared.lock().unwrap().cancel_upload = true;
                             }
                         }
                     });
-                    let sound_label = if self.sound_on { "🔊" } else { "🔇" };
-                    if ui
-                        .add_enabled(perms.sound, kit::secondary(sound_label))
-                        .on_hover_text(if self.sound_on { "Sound on (click to mute)" } else { "Sound off (click to play)" })
-                        .clicked()
-                    {
-                        self.sound_on = !self.sound_on;
-                        shared.lock().unwrap().sound = self.sound_on;
-                        self.send_control(serde_json::json!({"t": "audio", "on": self.sound_on}));
-                    }
-                    if ui
-                        .add_enabled(perms.files, kit::secondary("📁 Files"))
-                        .on_hover_text("Send files to the remote computer, or browse and download its files")
-                        .clicked()
-                    {
-                        if self.files_open {
-                            self.files_open = false;
-                        } else {
-                            self.open_files();
-                        }
-                    }
-                    let me = remote_friend_host::snapshot();
-                    if me.online
-                        && !self.switch_pending
-                        && ui
-                            .add(kit::secondary("⇄ Switch sides"))
-                            .on_hover_text("Let the remote computer control this one instead (they are asked first)")
-                            .clicked()
-                    {
-                        self.offer_switch(false);
-                    }
-                    let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                    if ui.add(kit::secondary("⛶")).on_hover_text(if full { "Exit full screen" } else { "Full screen" }).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
-                    }
-                    if let Some((name, got, total)) = &upload {
-                        kit::transfer_inline(ui, "⬆", *got, *total, 90.0).on_hover_text(format!("Sending {name}"));
-                        if ui.add(kit::quiet("Cancel")).clicked() {
-                            shared.lock().unwrap().cancel_upload = true;
-                        }
-                    }
                 });
-            });
+        }
 
         // Short messages float over the picture instead of moving it.
         let notice = if !perms.control {
@@ -218,18 +252,30 @@ impl App {
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(tex) = display_tex.as_ref() {
-                let avail = ui.available_size();
                 let img_size = tex.size_vec2();
-                let scale = (avail.x / img_size.x).min(avail.y / img_size.y).max(0.1);
-                let disp = img_size * scale;
-                let (rect, resp) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
-
-                ui.painter().image(
-                    tex.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
+                let picture = |ui: &mut egui::Ui, size: egui::Vec2| {
+                    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    (rect, resp)
+                };
+                let (rect, resp) = match self.view_zoom {
+                    None => {
+                        let avail = ui.available_size();
+                        let scale = (avail.x / img_size.x).min(avail.y / img_size.y).max(0.1);
+                        picture(ui, img_size * scale)
+                    }
+                    // Larger than the window: scroll bars move around; the wheel stays for that computer.
+                    Some(zoom) => egui::ScrollArea::both()
+                        .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| picture(ui, img_size * zoom / ctx.pixels_per_point()))
+                        .inner,
+                };
 
                 let to_host = |pos: egui::Pos2| -> Option<(u32, u32)> {
                     if hw == 0 || hh == 0 { return None; }
@@ -269,6 +315,10 @@ impl App {
                                 _ => continue,
                             };
                             if *pressed {
+                                // Not when a window or menu covers the picture there.
+                                if !resp.contains_pointer() {
+                                    continue;
+                                }
                                 let Some((x, y)) = to_host(*pos) else { continue };
                                 let _ = tx.try_send(Packet::Input(InputEvent::MouseMove { x, y }));
                                 let _ = tx.try_send(Packet::Input(InputEvent::MouseDown { button: btn }));
@@ -286,7 +336,7 @@ impl App {
                         egui::Event::Cut => self.shortcut('x'),
                         egui::Event::Paste(text) => {
                             // Put this computer's clipboard on the remote one first, then paste there.
-                            if perms.clipboard {
+                            if perms.clipboard && self.clip_share {
                                 self.send_control(serde_json::json!({"t": "clip", "text": text}));
                             }
                             self.shortcut('v');
@@ -635,7 +685,7 @@ impl App {
             self.login_msg = "That computer no longer trusts this device: enter its password.".into();
         }
         if let Some(text) = clip {
-            if clip_ok && !text.is_empty() {
+            if clip_ok && self.clip_share && !text.is_empty() {
                 ctx.copy_text(text);
             }
         }

@@ -143,6 +143,39 @@ impl App {
                     });
                     ui.label(RichText::new(format!("Declined automatically in {} s", p.seconds_left)).size(11.5).color(kit::FAINT));
                 }
+                PromptKind::ShareScreens { label, shared, total } => {
+                    heading(ui, "🖥", ACCENT, "Share your other screens?", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{label} asks to see another screen. Viewers can see {shared} of your {total} screens: only those picked in the desktop's sharing dialog."
+                                ))
+                                .color(TEXT),
+                            )
+                            .wrap(),
+                        );
+                        kit::note(ui, "RemoteFriends restarts and the desktop asks again: tick every screen there and keep remote interaction on. Viewers connect again afterwards.");
+                    });
+                    ui.add_space(14.0);
+                    kit::countdown(ui, p.seconds_left as f32 / ASK_SECONDS, ACCENT);
+                    ui.add_space(12.0);
+                    kit::split(ui, 32.0, |_| {}, |ui| {
+                        if ui.add(kit::primary("Share screens…")).clicked() {
+                            answer(Answer::Screen(true));
+                            // A moment for the viewers to hear why the connection ends.
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(1500));
+                                if !remote_friend_host::retry_screen_permission() {
+                                    crate::restart_app();
+                                }
+                            });
+                        }
+                        if ui.add(kit::secondary("Not now")).clicked() {
+                            answer(Answer::Screen(false));
+                        }
+                    });
+                    ui.label(RichText::new(format!("Declined automatically in {} s", p.seconds_left)).size(11.5).color(kit::FAINT));
+                }
                 PromptKind::FileAccess { label, shared } => {
                     heading(ui, "📁", ACCENT, "Let them use your files?", |ui| {
                         ui.add(

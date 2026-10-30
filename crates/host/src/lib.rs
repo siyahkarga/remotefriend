@@ -35,7 +35,9 @@ pub use status::{
 };
 
 pub(crate) use server::host_name;
-pub use video::{current_monitor, monitors, preview, select_monitor, set_viewer_may_switch, viewer_may_switch, MonitorInfo};
+pub use video::{
+    current_monitor, monitors, preview, select_monitor, set_viewer_may_switch, unshared_screens, viewer_may_switch, MonitorInfo,
+};
 pub use files::{cancel as cancel_incoming_file, save_download_chunk};
 
 /// Logging to stderr: "info" by default; harmless D-Bus/portal warnings are hidden.

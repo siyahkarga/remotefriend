@@ -2,7 +2,9 @@
 //! on that desktop (places and sizes only, never their content), opened once when a computer with
 //! several screens first shows its picture, and from the session bar any time later.
 //! Screens open to this viewer switch at once when mouse & keyboard are allowed; any other one
-//! is asked of the computer's user, and the picker waits for the answer.
+//! is asked of the computer's user, and the picker waits for the answer. Screens that computer's
+//! desktop doesn't share (Wayland: not picked in its sharing dialog) are drawn too; asking for
+//! one asks its user to share more screens.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,11 +21,21 @@ const ANSWER_WAIT: Duration = Duration::from_secs(35);
 impl App {
     /// What became of a screen request: shown, refused, or no answer in time.
     pub(crate) fn screen_answers(&mut self, shared: &Arc<Mutex<Shared>>, current: usize) {
-        let refused = shared.lock().unwrap().screen_refused.take();
+        let (refused, share) = {
+            let mut sh = shared.lock().unwrap();
+            (sh.screen_refused.take(), sh.share_answer.take())
+        };
         let Some((wanted, since)) = self.screens_pending else {
             return;
         };
-        if current == wanted {
+        if let Some(yes) = share {
+            self.screens_pending = None;
+            self.screens_note = Some(if yes {
+                "The computer's user is sharing more screens: RemoteFriends restarts there. Connect again in a moment.".into()
+            } else {
+                "The computer's user keeps sharing only the screens you see.".into()
+            });
+        } else if current == wanted {
             self.screens_pending = None;
             self.screens_open = false;
         } else if refused.is_some() {
@@ -35,8 +47,15 @@ impl App {
         }
     }
 
-    /// The picker window. Returns the screen to ask the computer for.
-    pub(crate) fn screen_picker(&mut self, ctx: &egui::Context, screens: &[ScreenInfo], current: usize, control: bool) -> Option<usize> {
+    /// The picker window. Returns the screen to ask the computer for, and whether it is shared
+    /// (false: ask the computer's user to share more screens).
+    pub(crate) fn screen_picker(
+        &mut self,
+        ctx: &egui::Context,
+        screens: &[ScreenInfo],
+        current: usize,
+        control: bool,
+    ) -> Option<(usize, bool)> {
         let mut open = true;
         let mut chosen = None;
         let waiting = self.screens_pending.map(|(i, _)| i);
@@ -61,6 +80,8 @@ impl App {
                         "shown now"
                     } else if Some(s.i) == waiting {
                         "waiting for the computer's user"
+                    } else if !s.shared {
+                        "not shared: the computer's user is asked to share it"
                     } else if s.open && control {
                         ""
                     } else {
@@ -79,6 +100,11 @@ impl App {
                     });
                 } else if let Some(note) = &self.screens_note {
                     ui.colored_label(kit::WARN, note);
+                } else if screens.iter().any(|s| !s.shared) {
+                    kit::note(
+                        ui,
+                        "\"Not shared\": that computer's desktop gives RemoteFriends only the screens its user picked. Asking for one asks them to share more; RemoteFriends restarts there and you connect again.",
+                    );
                 } else if !control {
                     kit::note(ui, "Without mouse & keyboard permission, the computer's user is asked before the screen changes.");
                 }
@@ -98,35 +124,36 @@ impl App {
         if waiting.is_some() {
             return None; // one question at a time
         }
-        let direct = screens.iter().find(|s| s.i == i).is_some_and(|s| s.open && control);
+        let screen = screens.iter().find(|s| s.i == i)?;
+        let direct = screen.shared && screen.open && control;
         self.screens_note = None;
         if direct {
             self.screens_open = false;
         } else {
             self.screens_pending = Some((i, Instant::now()));
         }
-        Some(i)
+        Some((i, screen.shared))
     }
 }
 
 /// The screens as arranged on that desktop, scaled into the window. Returns a clicked screen.
 fn draw_layout(ui: &mut egui::Ui, screens: &[ScreenInfo], current: usize, control: bool, waiting: Option<usize>) -> Option<usize> {
-    // Computers before v0.15 send no places: side by side then.
+    // Computers before v0.15 send no places: side by side then, and also when places overlap
+    // (the desktop and its sharing dialog may count in different units).
+    let size = |s: &ScreenInfo| Vec2::new(s.w.max(1) as f32, s.h.max(1) as f32);
+    let mut boxes: Vec<Rect> = screens.iter().map(|s| Rect::from_min_size(egui::pos2(s.x as f32, s.y as f32), size(s))).collect();
     let placed = screens.iter().any(|s| s.x != 0 || s.y != 0);
-    let mut next_x = 0.0;
-    let boxes: Vec<Rect> = screens
-        .iter()
-        .map(|s| {
-            let size = Vec2::new(s.w.max(1) as f32, s.h.max(1) as f32);
-            let min = if placed {
-                egui::pos2(s.x as f32, s.y as f32)
-            } else {
-                next_x += size.x;
-                egui::pos2(next_x - size.x, 0.0)
-            };
-            Rect::from_min_size(min, size)
-        })
-        .collect();
+    let overlap = boxes.iter().enumerate().any(|(a, ra)| boxes[a + 1..].iter().any(|rb| ra.intersect(*rb).area() > 1.0));
+    if !placed || overlap {
+        let mut next_x = 0.0;
+        boxes = screens
+            .iter()
+            .map(|s| {
+                next_x += size(s).x;
+                Rect::from_min_size(egui::pos2(next_x - size(s).x, 0.0), size(s))
+            })
+            .collect();
+    }
     let bounds = boxes.iter().fold(Rect::NOTHING, |acc, r| acc.union(*r));
     let room = Vec2::new(ui.available_width(), 190.0);
     let scale = (room.x / bounds.width()).min(room.y / bounds.height());
@@ -140,9 +167,11 @@ fn draw_layout(ui: &mut egui::Ui, screens: &[ScreenInfo], current: usize, contro
             .interact(rect, ui.id().with(("screen", s.i)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let is_current = s.i == current;
-        let direct = s.open && control;
+        let direct = s.shared && s.open && control;
         let fill = if is_current {
             kit::tint(kit::ACCENT, 0.35)
+        } else if !s.shared {
+            kit::SIDEBAR
         } else if resp.hovered() {
             kit::SURFACE_HI
         } else {
@@ -150,6 +179,8 @@ fn draw_layout(ui: &mut egui::Ui, screens: &[ScreenInfo], current: usize, contro
         };
         let stroke = if is_current {
             Stroke::new(2.0_f32, kit::ACCENT)
+        } else if !s.shared && Some(s.i) != waiting {
+            Stroke::new(1.0_f32, kit::FAINT)
         } else if !direct || Some(s.i) == waiting {
             Stroke::new(1.5_f32, kit::WARN)
         } else {
@@ -161,6 +192,8 @@ fn draw_layout(ui: &mut egui::Ui, screens: &[ScreenInfo], current: usize, contro
             "shown now".to_string()
         } else if Some(s.i) == waiting {
             "asking…".to_string()
+        } else if !s.shared {
+            "not shared".to_string()
         } else if !direct {
             "asks first".to_string()
         } else {

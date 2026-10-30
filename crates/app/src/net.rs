@@ -76,6 +76,8 @@ pub(crate) struct Shared {
     pub monitors: Vec<ScreenInfo>,
     /// The computer's user said no to this screen (taken by the screen picker).
     pub screen_refused: Option<usize>,
+    /// The computer's user answered a request for more screens (true: they share them now).
+    pub share_answer: Option<bool>,
     pub monitor: usize,
     /// Traffic flows directly (peer-to-peer), not through the relay server.
     pub direct: bool,
@@ -158,6 +160,7 @@ impl Shared {
             rtt: 0,
             monitors: Vec::new(),
             screen_refused: None,
+            share_answer: None,
             monitor: 0,
             direct: false,
             login_ok: false,
@@ -762,6 +765,11 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
             sh.screen_refused = Some(v.get("i").and_then(|x| x.as_u64()).unwrap_or(u64::MAX) as usize);
             sh.banner("The computer's user kept the current screen.");
         }
+        Some("share_no") => sh.share_answer = Some(false),
+        Some("share_ok") => {
+            sh.share_answer = Some(true);
+            sh.banner("The computer's user is sharing more screens: RemoteFriends restarts there. Connect again in a moment.");
+        }
         Some("perms") => {
             let new = parse_perms(&v);
             let old = sh.perms;
@@ -882,6 +890,9 @@ pub struct ScreenInfo {
     /// false: switching there needs the OK of the computer's user.
     pub open: bool,
     pub primary: bool,
+    /// false: the computer's desktop doesn't give it to RemoteFriends (Wayland: not picked in its
+    /// sharing dialog); asking for it asks the computer's user to share more screens.
+    pub shared: bool,
     /// Place and size on that computer's desktop (computers before v0.15 send no place).
     pub x: i64,
     pub y: i64,
@@ -906,6 +917,7 @@ fn parse_monitors(v: &serde_json::Value, sh: &mut Shared) {
             Some(ScreenInfo {
                 i,
                 label,
+                shared: true,
                 // Computers before v0.14 don't say: every screen was open then.
                 open: m.get("open").and_then(|x| x.as_bool()).unwrap_or(true),
                 primary: m.get("primary").and_then(|x| x.as_bool()).unwrap_or(false),
@@ -916,6 +928,27 @@ fn parse_monitors(v: &serde_json::Value, sh: &mut Shared) {
             })
         })
         .collect();
+    // Screens the desktop didn't share (v0.15.1 on): shown, but only to ask for.
+    let unshared = v.get("unshared").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    let num = |m: &serde_json::Value, k: &str| m.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    for m in &unshared {
+        let Some(i) = m.get("i").and_then(|x| x.as_u64()).map(|i| i as usize) else { continue };
+        if sh.monitors.iter().any(|s| s.i == i) {
+            continue;
+        }
+        let (w, h) = (num(m, "w").max(0) as u64, num(m, "h").max(0) as u64);
+        sh.monitors.push(ScreenInfo {
+            i,
+            label: format!("Screen {} · {w}×{h}", i + 1),
+            shared: false,
+            open: false,
+            primary: false,
+            x: num(m, "x"),
+            y: num(m, "y"),
+            w,
+            h,
+        });
+    }
     sh.monitor = v.get("current").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
 }
 
@@ -950,5 +983,16 @@ mod tests {
         parse_monitors(&serde_json::json!({"list": [{"i": 0, "w": 800, "h": 600}, {"i": 1, "w": 800, "h": 600}]}), &mut sh);
         assert_eq!(sh.monitor, 0);
         assert!(sh.monitors.iter().all(|s| s.open && s.x == 0 && s.y == 0));
+    }
+
+    #[test]
+    fn screens_the_desktop_did_not_share_can_only_be_asked_for() {
+        let mut sh = Shared::new(false, None);
+        let v = serde_json::json!({"current": 0, "list": [{"i": 0, "w": 1920, "h": 1080, "x": 1920, "y": 0}],
+            "unshared": [{"i": 1, "name": "DP-5", "w": 1920, "h": 1080, "x": 0, "y": 0}]});
+        parse_monitors(&v, &mut sh);
+        assert_eq!(sh.monitors.len(), 2);
+        assert!(sh.monitors[0].shared && !sh.monitors[1].shared && !sh.monitors[1].open);
+        assert_eq!((sh.monitors[1].i, sh.monitors[1].x), (1, 0));
     }
 }

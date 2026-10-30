@@ -140,6 +140,9 @@ pub enum PromptKind {
     SwitchSides { label: String },
     /// A viewer asks to see a screen it may not switch to by itself.
     ShowScreen { label: String, screen: String },
+    /// A viewer asks for a screen the desktop doesn't share (Wayland: only the screens picked
+    /// in its sharing dialog). Yes = the app opens that dialog again (it restarts for it).
+    ShareScreens { label: String, shared: usize, total: usize },
     /// A trusted device wants to use this computer's folders (not only the shared one).
     FileAccess { label: String, shared: String },
 }
