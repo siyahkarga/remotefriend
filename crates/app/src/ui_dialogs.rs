@@ -38,6 +38,9 @@ pub(crate) fn heading(ui: &mut egui::Ui, icon: &str, color: egui::Color32, title
 impl App {
     /// Connection requests and other questions from the host engine.
     pub(crate) fn prompts_ui(&mut self, ctx: &egui::Context) {
+        // Questions come from background threads: look twice a second on every screen, or one
+        // that arrives while an idle screen (the welcome page) is shown waits for a mouse move.
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
         let seq = remote_friend_host::prompt_sequence();
         if seq != self.last_prompt_seq {
             self.last_prompt_seq = seq;

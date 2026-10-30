@@ -194,6 +194,31 @@ fn test_pattern() -> bool {
     std::env::var("RF_TEST_PATTERN").map(|v| v == "1").unwrap_or(false)
 }
 
+/// Debug builds: RF_TEST_MONITORS=2..4 gives the test pattern that many screens (Xvfb can't
+/// fake a second monitor), so screen choice can be tested end to end.
+fn test_screens() -> Vec<MonitorInfo> {
+    let n = if cfg!(debug_assertions) {
+        std::env::var("RF_TEST_MONITORS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 4)
+    } else {
+        1
+    };
+    // Different sizes and an offset, like a laptop next to a bigger monitor.
+    let layout = [(0, 0, 1280, 720), (1280, -180, 1920, 1080), (-1024, 0, 1024, 768), (0, 720, 1280, 720)];
+    layout[..n]
+        .iter()
+        .enumerate()
+        .map(|(index, &(x, y, width, height))| MonitorInfo {
+            index,
+            name: if n == 1 { "Test pattern".into() } else { format!("Test screen {}", index + 1) },
+            x,
+            y,
+            width,
+            height,
+            primary: index == 0,
+        })
+        .collect()
+}
+
 /// Wayland: the screen comes from the desktop portal (PipeWire), not from screenshots.
 #[cfg(target_os = "linux")]
 fn portal_capture() -> bool {
@@ -305,7 +330,7 @@ fn xcap_monitors() -> Vec<MonitorInfo> {
 /// Screens that can be shared right now.
 pub fn monitors() -> Vec<MonitorInfo> {
     if test_pattern() {
-        return vec![MonitorInfo { index: 0, name: "Test pattern".into(), x: 0, y: 0, width: 1280, height: 720, primary: true }];
+        return test_screens();
     }
     #[cfg(target_os = "linux")]
     if portal_capture() {
@@ -329,6 +354,12 @@ pub fn monitors() -> Vec<MonitorInfo> {
 
 /// Index of the shared screen in `monitors()`.
 pub fn current_monitor() -> usize {
+    if test_pattern() {
+        return match MONITOR_SEL.load(Ordering::Relaxed) {
+            usize::MAX => 0,
+            i => i,
+        };
+    }
     #[cfg(target_os = "linux")]
     if portal_capture() {
         return crate::wayland::active_screen();
@@ -341,7 +372,9 @@ pub fn current_monitor() -> usize {
 
 /// Share another screen (all viewers see the change).
 pub fn select_monitor(index: usize) -> bool {
-    let ok = {
+    let ok = if test_pattern() {
+        index < test_screens().len()
+    } else {
         #[cfg(target_os = "linux")]
         {
             if portal_capture() {
@@ -402,6 +435,8 @@ pub(crate) fn monitors_json() -> serde_json::Value {
         .map(|m| {
             serde_json::json!({
                 "i": m.index, "name": m.name, "w": m.width, "h": m.height, "primary": m.primary,
+                // Where it sits on the desktop, so viewers can draw the screens as arranged.
+                "x": m.x, "y": m.y,
                 // false: switching there needs the OK of this computer's user.
                 "open": viewer_may_switch(m.index),
             })
@@ -545,14 +580,18 @@ impl Capturer {
         self.pattern_t = self.pattern_t.wrapping_add(1);
         let t = self.pattern_t;
         let bx = (t * 8) % (w - 120);
+        let screen = current_monitor();
         let mut data = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
                 let inside = x >= bx && x < bx + 120 && y > 300 && y < 420;
                 if inside {
                     data.extend_from_slice(&[255, 255, 255, 255]);
-                } else {
+                } else if screen == 0 {
                     data.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, (t * 3 % 256) as u8, 255]);
+                } else {
+                    // Another test screen looks different, so a switch shows in screenshots.
+                    data.extend_from_slice(&[(t * 3 % 256) as u8, (x * 255 / w) as u8, 160u8.saturating_sub((y * 160 / h) as u8), 255]);
                 }
             }
         }
@@ -903,6 +942,13 @@ mod tests {
         let sharp = profile(Preset::Sharp);
         assert!(fast.bitrate < bal.bitrate && bal.bitrate < sharp.bitrate);
         assert!(fast.max_w <= bal.max_w && bal.max_w <= sharp.max_w);
+    }
+
+    #[test]
+    fn one_test_screen_unless_more_are_asked_for() {
+        let one = test_screens();
+        assert_eq!(one.len(), 1);
+        assert!(one[0].primary && one[0].x == 0 && one[0].y == 0);
     }
 
     #[test]

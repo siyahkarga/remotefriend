@@ -51,6 +51,18 @@ impl App {
             }
         }
 
+        // Several screens: offer the choice once, when the picture first arrives.
+        if monitors.len() > 1 && !self.screens_offered && self.screen_tex.is_some() {
+            self.screens_offered = true;
+            self.screens_open = true;
+        }
+        self.screen_answers(&shared, monitor);
+        if self.screens_open {
+            if let Some(i) = self.screen_picker(ctx, &monitors, monitor, perms.control) {
+                self.send_control(serde_json::json!({"t": "monitor", "i": i}));
+            }
+        }
+
         let title = if self.current_name.is_empty() { remote_friend_common::format_id(&self.current_addr) } else { self.current_name.clone() };
         egui::TopBottomPanel::top("bar")
             .frame(egui::Frame::new().fill(kit::SIDEBAR).inner_margin(egui::Margin::symmetric(12, 8)))
@@ -81,33 +93,11 @@ impl App {
                     }
                     ui.add_space(10.0);
                     if monitors.len() > 1 {
-                        ui.menu_button(format!("🖥 Screen {} of {}", monitor + 1, monitors.len()), |ui| {
-                            for (i, label, open) in &monitors {
-                                let current = *i == monitor;
-                                let direct_switch = *open && perms.control;
-                                let text = if current {
-                                    format!("✔ {label}")
-                                } else if direct_switch {
-                                    label.clone()
-                                } else {
-                                    format!("{label} — ask")
-                                };
-                                let tip = if current {
-                                    "Shown now"
-                                } else if direct_switch {
-                                    "Switch to this screen"
-                                } else {
-                                    "The computer's user is asked first"
-                                };
-                                if ui.selectable_label(current, text).on_hover_text(tip).clicked() && !current {
-                                    self.send_control(serde_json::json!({"t": "monitor", "i": i}));
-                                    if !direct_switch {
-                                        shared.lock().unwrap().banner(format!("Asked to show screen {}…", i + 1));
-                                    }
-                                    ui.close();
-                                }
-                            }
-                        });
+                        let label = format!("🖥 Screen {} of {}", monitor + 1, monitors.len());
+                        if ui.add(kit::secondary(&label)).on_hover_text("Choose which screen to see").clicked() {
+                            self.screens_open = !self.screens_open;
+                            self.screens_note = None;
+                        }
                     }
                     ui.add_enabled_ui(perms.control, |ui| {
                         ui.menu_button("⌨ Keys", |ui| self.keys_menu(ui));

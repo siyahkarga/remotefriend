@@ -93,7 +93,9 @@ The RemoteFriends window shows:
 - **Screens** (with several monitors): which one viewers see now (**Show** another one at any
   time), and a switch per screen: **on** = viewers with mouse & keyboard may switch to it by
   themselves, **off** = they can only ask, and you answer *Show* or *Keep the current screen*.
-  Viewers see the list too, with the screens that need asking marked. On Wayland, pick all
+  Viewers (app and phone page) get a picture of the screens as they are arranged — places and
+  sizes only — when they connect, and from **Screen** in their bar any time later; they tap the
+  one they want, and those that need asking say so. On Wayland, pick all
   screens you want to offer in the desktop's sharing dialog (*Choose…*). A live preview shows
   what viewers see.
 - **Connected now**: every viewer with its device name, since when, how far it is trusted, and

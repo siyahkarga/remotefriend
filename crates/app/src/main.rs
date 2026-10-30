@@ -14,6 +14,7 @@ mod keys_ui;
 mod net;
 mod notices;
 mod privacy;
+mod screen_picker;
 mod session_bar;
 mod ui_dialogs;
 mod ui_home;
@@ -57,6 +58,12 @@ pub(crate) struct App {
     login_msg: String,
     // viewer (after connect)
     shared: Option<Arc<Mutex<Shared>>>,
+    /// Screen picker of this session (viewer.rs): open, offered once already, asked for
+    /// (screen, since), and what to tell (e.g. the computer's user said no).
+    screens_open: bool,
+    screens_offered: bool,
+    screens_pending: Option<(usize, Instant)>,
+    screens_note: Option<String>,
     tx_out: Option<Sender<Packet>>,
     disconnect_tx: Option<tokio::sync::watch::Sender<bool>>,
     last_mouse: Option<(u32, u32)>,
@@ -209,6 +216,10 @@ fn main() -> Result<()> {
         pass_field: std::env::args().nth(2).unwrap_or_default(),
         login_msg: String::new(),
         shared: None,
+        screens_open: false,
+        screens_offered: false,
+        screens_pending: None,
+        screens_note: None,
         tx_out: None,
         disconnect_tx: None,
         last_mouse: None,
@@ -468,6 +479,10 @@ impl App {
         self.current_addr = host;
         self.current_name = known_name;
         self.thumb_saved = false;
+        self.screens_open = false;
+        self.screens_offered = false;
+        self.screens_pending = None;
+        self.screens_note = None;
         self.screen_tex = None;
         self.shared = Some(shared);
         self.tx_out = Some(tx_out);

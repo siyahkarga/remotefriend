@@ -72,9 +72,10 @@ pub(crate) struct Shared {
     pub quality: String,
     /// Round trip time (ms) measured with pings.
     pub rtt: u32,
-    /// Screens of the remote computer: (index, label), and the one shown.
-    /// The computer's screens: (index, "Screen 2 · 1920×1080", the viewer may switch there by itself).
-    pub monitors: Vec<(usize, String, bool)>,
+    /// The computer's screens and the one shown.
+    pub monitors: Vec<ScreenInfo>,
+    /// The computer's user said no to this screen (taken by the screen picker).
+    pub screen_refused: Option<usize>,
     pub monitor: usize,
     /// Traffic flows directly (peer-to-peer), not through the relay server.
     pub direct: bool,
@@ -156,6 +157,7 @@ impl Shared {
             quality: String::new(),
             rtt: 0,
             monitors: Vec::new(),
+            screen_refused: None,
             monitor: 0,
             direct: false,
             login_ok: false,
@@ -756,7 +758,10 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
                 sh.banner(shown);
             }
         }
-        Some("monitor_no") => sh.banner("The computer's user kept the current screen."),
+        Some("monitor_no") => {
+            sh.screen_refused = Some(v.get("i").and_then(|x| x.as_u64()).unwrap_or(u64::MAX) as usize);
+            sh.banner("The computer's user kept the current screen.");
+        }
         Some("perms") => {
             let new = parse_perms(&v);
             let old = sh.perms;
@@ -869,22 +874,46 @@ fn on_control(text: &str, shared: &Arc<Mutex<Shared>>, started: Instant) -> bool
     true
 }
 
+/// One of the computer's screens, as the viewer lists them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScreenInfo {
+    pub i: usize,
+    pub label: String,
+    /// false: switching there needs the OK of the computer's user.
+    pub open: bool,
+    pub primary: bool,
+    /// Place and size on that computer's desktop (computers before v0.15 send no place).
+    pub x: i64,
+    pub y: i64,
+    pub w: u64,
+    pub h: u64,
+}
+
 fn parse_monitors(v: &serde_json::Value, sh: &mut Shared) {
     let list = v.get("list").and_then(|l| l.as_array()).cloned().unwrap_or_default();
     sh.monitors = list
         .iter()
         .filter_map(|m| {
             let i = m.get("i")?.as_u64()? as usize;
+            let num = |k: &str| m.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
             let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("Screen");
-            let (w, h) = (m.get("w").and_then(|x| x.as_u64()).unwrap_or(0), m.get("h").and_then(|x| x.as_u64()).unwrap_or(0));
-            // Computers before v0.14 don't say: every screen was open then.
-            let open = m.get("open").and_then(|x| x.as_bool()).unwrap_or(true);
+            let (w, h) = (num("w"), num("h"));
             let label = if name.starts_with("Screen ") {
                 format!("Screen {} · {w}×{h}", i + 1)
             } else {
                 format!("Screen {} · {name} · {w}×{h}", i + 1)
             };
-            Some((i, label, open))
+            Some(ScreenInfo {
+                i,
+                label,
+                // Computers before v0.14 don't say: every screen was open then.
+                open: m.get("open").and_then(|x| x.as_bool()).unwrap_or(true),
+                primary: m.get("primary").and_then(|x| x.as_bool()).unwrap_or(false),
+                x: m.get("x").and_then(|x| x.as_i64()).unwrap_or(0),
+                y: m.get("y").and_then(|x| x.as_i64()).unwrap_or(0),
+                w,
+                h,
+            })
         })
         .collect();
     sh.monitor = v.get("current").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -893,4 +922,33 @@ fn parse_monitors(v: &serde_json::Value, sh: &mut Shared) {
 fn parse_perms(v: &serde_json::Value) -> Perms {
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
     Perms { control: b("control"), sound: b("sound"), files: b("files"), clipboard: b("clipboard") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screens_keep_their_place_and_whether_they_ask() {
+        let mut sh = Shared::new(false, None);
+        let v = serde_json::json!({"current": 1, "list": [
+            {"i": 0, "name": "DP-1", "w": 1920, "h": 1080, "primary": true, "open": true, "x": 0, "y": 0},
+            {"i": 1, "name": "Screen 2", "w": 1280, "h": 1024, "open": false, "x": -1280, "y": 56},
+        ]});
+        parse_monitors(&v, &mut sh);
+        assert_eq!(sh.monitor, 1);
+        assert_eq!(sh.monitors[0].label, "Screen 1 · DP-1 · 1920×1080");
+        assert_eq!(sh.monitors[1].label, "Screen 2 · 1280×1024");
+        assert!(sh.monitors[0].primary && sh.monitors[0].open);
+        assert!(!sh.monitors[1].open);
+        assert_eq!((sh.monitors[1].x, sh.monitors[1].y), (-1280, 56));
+    }
+
+    #[test]
+    fn older_computers_send_screens_without_place_or_answer() {
+        let mut sh = Shared::new(false, None);
+        parse_monitors(&serde_json::json!({"list": [{"i": 0, "w": 800, "h": 600}, {"i": 1, "w": 800, "h": 600}]}), &mut sh);
+        assert_eq!(sh.monitor, 0);
+        assert!(sh.monitors.iter().all(|s| s.open && s.x == 0 && s.y == 0));
+    }
 }

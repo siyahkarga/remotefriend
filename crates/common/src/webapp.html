@@ -75,13 +75,25 @@
   /* Fixed width: changing numbers must not make the whole bar grow and shrink. */
   #stats { font-size:12px; color:var(--bar-dim); padding:0 8px; white-space:nowrap; font-variant-numeric:tabular-nums; flex:none; width:22em; overflow:hidden; text-overflow:ellipsis; text-align:center; }
   @media (max-width:520px) { #stats { display:none; } }
-  @media (max-width:400px) { .tb { width:36px; } }
+  /* Up to nine buttons (with the screen choice) must fit a 320-400 px wide phone. */
+  @media (max-width:400px) { .tb { width:34px; } #bar { gap:2px; } }
+  @media (max-width:340px) { .tb { width:30px; } }
   .sheet { position:absolute; left:50%; top:calc(62px + env(safe-area-inset-top)); transform:translateX(-50%); width:min(440px, calc(100% - 16px)); background:var(--bar); border:1px solid var(--bar-line); border-radius:16px; padding:14px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); box-shadow:0 10px 32px rgba(0,0,0,.5); z-index:6; max-height:calc(100% - 90px); overflow:auto; }
   .sheet h3 { margin:4px 2px 8px; font-size:12px; color:var(--bar-dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
   .seg { display:flex; gap:4px; background:rgba(255,255,255,.06); border-radius:12px; padding:4px; margin-bottom:14px; }
   .seg button { flex:1; border:0; padding:9px 6px; border-radius:9px; background:transparent; color:var(--bar-txt); cursor:pointer; font-size:14px; }
   .seg button.on { background:#5b84ff; color:#fff; font-weight:600; }
   .sheet .note { font-size:12.5px; color:var(--bar-dim); margin:-6px 2px 12px; }
+  /* The computer's screens as arranged on its desktop (places and sizes only, never content). */
+  #scrMap { position:relative; margin:4px 2px 16px; }
+  .scr { position:absolute; box-sizing:border-box; border:1.5px solid var(--bar-line); border-radius:8px; background:rgba(255,255,255,.06); color:var(--bar-txt); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; cursor:pointer; padding:2px; overflow:hidden; font:inherit; }
+  .scr b { font-size:24px; line-height:1; }
+  .scr small { font-size:11px; color:var(--bar-dim); white-space:nowrap; }
+  .scr i { position:absolute; left:6px; top:3px; font-style:normal; font-size:10px; color:var(--bar-dim); }
+  .scr.on { border:2px solid #5b84ff; background:rgba(91,132,255,.28); }
+  .scr.on small { color:var(--bar-txt); }
+  .scr.ask { border-style:dashed; border-color:#f5a524; }
+  #scrNote.warn { color:#f5a524; }
   .keys { display:grid; grid-template-columns:repeat(auto-fill, minmax(62px, 1fr)); gap:6px; margin-bottom:12px; }
   .key { padding:10px 4px; border:1px solid var(--bar-line); background:rgba(255,255,255,.06); color:var(--bar-txt); border-radius:10px; cursor:pointer; font-size:13.5px; }
   .key.on { background:#5b84ff; border-color:#5b84ff; }
@@ -184,6 +196,7 @@
     <button class="tb" id="kbBtn" title="Keyboard" aria-label="Keyboard"><svg><use href="#i-kb"/></svg></button>
     <button class="tb" id="keysBtn" title="Special keys" aria-label="Special keys"><svg><use href="#i-cmd"/></svg></button>
     <button class="tb" id="setBtn" title="Settings" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
+    <button class="tb" id="scrBtn" title="Screens" aria-label="Choose a screen" hidden><svg><use href="#i-monitor"/></svg></button>
     <button class="tb" id="fileBtn" title="Files" aria-label="Files"><svg><use href="#i-file"/></svg></button>
     <button class="tb" id="sndBtn" title="Sound" aria-label="Sound" hidden><svg><use href="#i-snd"/></svg></button>
     <button class="tb" id="fsBtn" title="Fullscreen" aria-label="Fullscreen"><svg><use href="#i-full"/></svg></button>
@@ -245,6 +258,14 @@
     <div class="flist" id="dirList"></div>
   </div>
 
+  <div class="sheet" id="scrSheet" hidden>
+    <h3>Choose a screen</h3>
+    <p class="note" id="scrIntro"></p>
+    <div id="scrMap"></div>
+    <p class="note" id="scrNote"></p>
+    <button class="rowbtn" id="scrKeep">Keep this screen</button>
+  </div>
+
   <div class="sheet" id="setSheet" hidden>
     <h3>Touch control</h3>
     <div class="seg" id="modeSeg">
@@ -257,10 +278,6 @@
       <button data-q="fast">Fast</button>
       <button data-q="balanced">Balanced</button>
       <button data-q="sharp">Sharp</button>
-    </div>
-    <div id="screenBox" hidden>
-      <h3>Screen</h3>
-      <div class="seg" id="screenSeg"></div>
     </div>
     <button class="rowbtn" id="fitBtn">🔍 Reset zoom</button>
     <h3>Connection</h3>
@@ -585,6 +602,8 @@ function resetLogin() { setBusy(false); }
 function connect(retry, auto) {
   if (ws && ws.readyState <= 1) return;
   autoReconnecting = !!auto;
+  // A new session offers the screen choice again; a reconnect of the same one does not.
+  if (!retry && !auto) { screenOffered = false; screenPending = null; screenNote = ''; }
   showMsg('');
   const id = retry ? savedId : idInput.value.replace(/\D/g, '');
   const pw = retry ? savedPw : ($('pw').value || storedPw(id));
@@ -680,7 +699,7 @@ function handleJson(m) {
     case 'p2p_answer': if (p2p) p2p.pc.setRemoteDescription({ type: 'answer', sdp: m.sdp }).catch(() => stopP2P()); break;
     case 'p2p_off': stopP2P(); break;
     case 'monitors': { const before = screenCurrent; applyMonitors(m); if (m.current !== before) toast('Showing ' + screenName(m.current), 1500); break; }
-    case 'monitor_no': toast('The computer\'s user kept the current screen.', 3000); break;
+    case 'monitor_no': screenRefused(); toast('The computer\'s user kept the current screen.', 3000); break;
     case 'file_progress': if (m.total && !$('upBox').hidden) showXfer('up', 'Sending', uploadName, m.got, m.total); break;
     case 'welcome': onWelcome(m); break;
     case 'pong': if (typeof m.ts === 'number') { rtt = Math.round(performance.now() - m.ts); } break;
@@ -1314,16 +1333,22 @@ $('pasteBtn').onclick = async () => {
 
 // ---------------- toolbar / panels ----------------
 function closeSheets() {
-  for (const id of ['keysSheet', 'setSheet', 'filesSheet']) $(id).hidden = true;
-  for (const id of ['keysBtn', 'setBtn', 'fileBtn']) $(id).classList.remove('on');
+  for (const id of ['keysSheet', 'setSheet', 'filesSheet', 'scrSheet']) $(id).hidden = true;
+  for (const id of ['keysBtn', 'setBtn', 'fileBtn', 'scrBtn']) $(id).classList.remove('on');
 }
 function toggleSheet(id, btn) {
   const open = $(id).hidden;
   closeSheets();
-  if (open) { $(id).hidden = false; btn.classList.add('on'); if (id === 'setSheet') renderInfo(); }
+  if (open) {
+    $(id).hidden = false; btn.classList.add('on');
+    if (id === 'setSheet') renderInfo();
+    if (id === 'scrSheet') renderScreens();
+  }
 }
 $('keysBtn').onclick = () => toggleSheet('keysSheet', $('keysBtn'));
 $('setBtn').onclick = () => toggleSheet('setSheet', $('setBtn'));
+$('scrBtn').onclick = () => { screenNote = ''; toggleSheet('scrSheet', $('scrBtn')); };
+$('scrKeep').onclick = () => closeSheets();
 // ---------------- permissions and clipboard ----------------
 let safeView = false;
 let hostOs = '', perms = { control: true, sound: true, files: true, clipboard: true };
@@ -1341,30 +1366,85 @@ function applyPerms(p, announce) {
   }
   if (typeof updateSoundBtn === 'function') updateSoundBtn();
   // Which screens can be switched to directly depends on mouse & keyboard permission.
-  if (old.control !== perms.control && screenList.length) applyMonitors({ list: screenList, current: screenCurrent });
+  if (old.control !== perms.control && !$('scrSheet').hidden) renderScreens();
 }
-// Several screens on the computer: choose which one to see (Settings sheet).
-let screenList = [], screenCurrent = 0;
+// Several screens on the computer: choose which one to see. The choice opens once by itself when
+// a computer with several screens connects, and from the toolbar any time later. Screens open to
+// this viewer switch at once (with mouse & keyboard allowed); others ask the computer's user.
+let screenList = [], screenCurrent = 0, screenOffered = false, screenPending = null, screenNote = '', screenTimer = 0;
 function screenName(i) { const s = screenList.find(x => x.i === i); return s ? s.name : 'screen ' + (i + 1); }
+function screenDirect(s) { return s.open !== false && perms.control; }
 function applyMonitors(m) {
   screenList = Array.isArray(m.list) ? m.list : [];
   screenCurrent = m.current || 0;
-  const seg = $('screenSeg'); seg.innerHTML = '';
-  $('screenBox').hidden = screenList.length < 2;
-  for (const s of screenList) {
-    const b = document.createElement('button');
-    // A screen that is not open to viewers is shown only when the computer's user agrees.
-    const direct = s.open !== false && perms.control;
-    b.textContent = (s.i + 1) + (s.w ? ' · ' + s.w + '×' + s.h : '') + (direct || s.i === screenCurrent ? '' : ' · ask');
-    b.title = s.i === screenCurrent ? 'Shown now' : direct ? s.name : s.name + ' — the computer\'s user is asked first';
-    b.classList.toggle('on', s.i === screenCurrent);
-    b.onclick = () => {
-      if (s.i === screenCurrent) return;
-      send({ t: 'monitor', i: s.i });
-      if (!direct) toast('Asked to show screen ' + (s.i + 1) + '…', 2500);
-    };
-    seg.appendChild(b);
+  $('scrBtn').hidden = screenList.length < 2;
+  if (screenPending !== null && screenCurrent === screenPending) {
+    screenPending = null; clearTimeout(screenTimer);
+    if (!$('scrSheet').hidden) closeSheets();
   }
+  if (screenList.length > 1 && !screenOffered) {
+    screenOffered = true;
+    if ($('scrSheet').hidden) toggleSheet('scrSheet', $('scrBtn'));
+  }
+  if (!$('scrSheet').hidden) renderScreens();
+}
+function screenRefused() {
+  if (screenPending === null) return;
+  screenNote = 'The computer\'s user kept the current screen (screen ' + (screenPending + 1) + ' was not shown).';
+  screenPending = null; clearTimeout(screenTimer);
+  if (!$('scrSheet').hidden) renderScreens();
+}
+function pickScreen(i) {
+  if (i === screenCurrent) { closeSheets(); return; }
+  if (screenPending !== null) return; // one question at a time
+  const s = screenList.find(x => x.i === i);
+  send({ t: 'monitor', i });
+  screenNote = '';
+  if (s && screenDirect(s)) { closeSheets(); return; }
+  screenPending = i;
+  // The computer's user has 30 s to answer.
+  screenTimer = setTimeout(() => {
+    if (screenPending === i) { screenPending = null; screenNote = 'No answer from the computer\'s user.'; if (!$('scrSheet').hidden) renderScreens(); }
+  }, 35000);
+  renderScreens();
+}
+function renderScreens() {
+  const map = $('scrMap'); map.innerHTML = '';
+  $('scrIntro').textContent = 'This computer has ' + screenList.length + ' screens. Which one do you want to see?';
+  if (!screenList.length) return;
+  // Computers before v0.15 send no places: side by side then.
+  const placed = screenList.some(s => s.x || s.y);
+  let nx = 0;
+  const boxes = screenList.map(s => {
+    const w = Math.max(1, s.w || 1600), h = Math.max(1, s.h || 900);
+    const b = placed ? { x: s.x || 0, y: s.y || 0, w, h } : { x: nx, y: 0, w, h };
+    nx += w; return b;
+  });
+  const minX = Math.min(...boxes.map(b => b.x)), minY = Math.min(...boxes.map(b => b.y));
+  const maxX = Math.max(...boxes.map(b => b.x + b.w)), maxY = Math.max(...boxes.map(b => b.y + b.h));
+  const roomW = map.clientWidth || 380, roomH = 170;
+  const k = Math.min(roomW / (maxX - minX), roomH / (maxY - minY));
+  const offX = (roomW - (maxX - minX) * k) / 2;
+  map.style.height = Math.round((maxY - minY) * k) + 'px';
+  screenList.forEach((s, n) => {
+    const b = boxes[n], el = document.createElement('button');
+    const current = s.i === screenCurrent, asking = s.i === screenPending, direct = screenDirect(s);
+    el.className = 'scr' + (current ? ' on' : '') + (!current && (!direct || asking) ? ' ask' : '');
+    el.style.left = (offX + (b.x - minX) * k + 3) + 'px';
+    el.style.top = ((b.y - minY) * k + 3) + 'px';
+    el.style.width = Math.max(30, b.w * k - 6) + 'px';
+    el.style.height = Math.max(30, b.h * k - 6) + 'px';
+    const tag = current ? 'shown now' : asking ? 'asking…' : direct ? (s.w + '×' + s.h) : 'asks first';
+    el.innerHTML = (s.primary ? '<i>main</i>' : '') + '<b>' + (s.i + 1) + '</b><small>' + tag + '</small>';
+    el.title = s.name + (s.w ? ' · ' + s.w + '×' + s.h : '') + (current ? ' — shown now' : direct ? '' : ' — the computer\'s user is asked first');
+    el.onclick = () => pickScreen(s.i);
+    map.appendChild(el);
+  });
+  const note = $('scrNote');
+  note.classList.toggle('warn', !!screenNote && screenPending === null);
+  note.textContent = screenPending !== null ? 'Asked the computer\'s user to show screen ' + (screenPending + 1) + '…'
+    : screenNote ? screenNote
+    : perms.control ? '' : 'Without mouse & keyboard permission, the computer\'s user is asked before the screen changes.';
 }
 let clipPending = '';
 function showClip(text) {
